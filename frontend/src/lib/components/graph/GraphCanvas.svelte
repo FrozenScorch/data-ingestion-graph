@@ -104,8 +104,8 @@
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <div class="flex-1 relative" role="region" ondragover={handleDragOver} ondrop={handleDrop}>
   <SvelteFlow
-    {nodes}
-    {edges}
+    nodes={graph.nodes}
+    edges={graph.edges}
     {nodeTypes}
     onconnect={handleConnect}
     onnodeclick={handleNodeClick}
