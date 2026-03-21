@@ -1,5 +1,5 @@
 /**
- * Auth store — JWT token, user, login/logout.
+ * Auth store -- JWT token, user, login/logout.
  * Uses Svelte 5 runes for reactivity.
  */
 
@@ -64,12 +64,19 @@ class AuthState {
     }
   }
 
-  logout(): void {
+  /**
+   * Log out the user, clear all local state, and clean up other stores.
+   * Accepts optional store cleanup callbacks to avoid circular imports.
+   */
+  logout(clearOtherStores?: () => void): void {
     this.token = null;
     this.user = null;
+    this.error = null;
     if (typeof localStorage !== 'undefined') {
       localStorage.removeItem('auth_token');
     }
+    // Clean up all other stores (disconnects WebSocket, clears state)
+    clearOtherStores?.();
   }
 }
 

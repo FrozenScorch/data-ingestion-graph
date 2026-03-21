@@ -149,9 +149,13 @@ class GraphState {
 
   clear(): void {
     this.currentGraph = null;
+    this.graphs = [];
+    this.totalGraphs = 0;
     this.nodes = [];
     this.edges = [];
     this.selectedNodeId = null;
+    this.loading = false;
+    this.saving = false;
     this.error = null;
   }
 }

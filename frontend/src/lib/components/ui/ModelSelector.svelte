@@ -7,7 +7,14 @@
     value = $bindable(''),
     category = 'chat',
     label = 'Model',
-    placeholder = 'Select a model...'
+    placeholder = 'Select a model...',
+    onValueChange
+  }: {
+    value?: string;
+    category?: string;
+    label?: string;
+    placeholder?: string;
+    onValueChange?: (value: string) => void;
   } = $props();
 
   let search = $state('');
@@ -28,6 +35,7 @@
     value = model.id;
     open = false;
     search = '';
+    onValueChange?.(model.id);
   }
 
   function formatCost(costStr: string): string {

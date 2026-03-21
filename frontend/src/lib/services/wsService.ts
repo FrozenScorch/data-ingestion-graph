@@ -11,12 +11,17 @@ function getWsBaseUrl(): string {
   return `${protocol}//${window.location.host}`;
 }
 
+export interface WsConnection {
+  /** Gracefully close the WebSocket and stop reconnection. */
+  close: () => void;
+}
+
 export function createRunWebSocket(
   runId: string,
   onEvent: EventHandler,
   onError?: (error: Event) => void,
   onClose?: (event: CloseEvent) => void
-): { close: () => void } {
+): WsConnection {
   const token = typeof localStorage !== 'undefined'
     ? localStorage.getItem('auth_token')
     : null;
@@ -66,7 +71,17 @@ export function createRunWebSocket(
         clearTimeout(reconnectTimer);
         reconnectTimer = null;
       }
-      ws?.close();
+      // Clean up event handlers to prevent memory leaks
+      if (ws) {
+        ws.onmessage = null;
+        ws.onerror = null;
+        ws.onclose = null;
+        // Only call close() if the connection is still open or connecting
+        if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
+          ws.close();
+        }
+        ws = null;
+      }
     }
   };
 }

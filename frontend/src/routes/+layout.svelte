@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { auth } from '$lib/stores';
+  import { auth, clearAllStores } from '$lib/stores';
   import { goto } from '$app/navigation';
   import { onMount } from 'svelte';
   import { page } from '$app/stores';
@@ -53,7 +53,7 @@
             <span class="text-xs text-gray-500">{auth.user.username}</span>
             <span class="text-xs px-2 py-0.5 rounded-full bg-indigo-500/20 text-indigo-400 border border-indigo-500/30">{auth.user.role}</span>
             <button
-              onclick={() => { auth.logout(); goto('/login'); }}
+              onclick={() => { auth.logout(clearAllStores); goto('/login'); }}
               class="text-gray-500 hover:text-gray-300 transition-colors"
               title="Logout"
             >

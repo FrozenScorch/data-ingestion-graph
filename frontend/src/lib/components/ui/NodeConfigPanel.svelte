@@ -94,11 +94,12 @@
             </select>
 
           {:else if key === 'model' || key === 'embedding_model'}
-            <!-- Model selector -->
+            <!-- Model selector (use onValueChange instead of bind since config is derived) -->
             <ModelSelector
-              bind:value={config[key] as string}
+              value={(config[key] as string) || ''}
               category={getModelCategory()}
               label=""
+              onValueChange={(v: string) => updateConfig(key, v)}
             />
 
           {:else if field.type === 'string'}

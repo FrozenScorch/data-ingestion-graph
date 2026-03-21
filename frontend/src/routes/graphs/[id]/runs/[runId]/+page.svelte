@@ -10,6 +10,11 @@
 
   onMount(() => {
     execution.getRun(runId);
+
+    // Cleanup WebSocket and execution state on navigation
+    return () => {
+      execution.disconnectWs();
+    };
   });
 
   function getStatusBadge(status: NodeRunStatus): string {

@@ -1,8 +1,8 @@
 <script lang="ts">
-  import { auth } from '$lib/stores';
+  import { auth, clearAllStores } from '$lib/stores';
 
   function handleLogout() {
-    auth.logout();
+    auth.logout(clearAllStores);
     window.location.href = '/login';
   }
 </script>

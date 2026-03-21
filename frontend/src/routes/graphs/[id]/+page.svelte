@@ -18,6 +18,11 @@
       nodeRegistry.loadNodeTypes(),
       graph.loadGraph(graphId)
     ]);
+
+    // Cleanup WebSocket and execution state on navigation away
+    return () => {
+      execution.disconnectWs();
+    };
   });
 
   function handleNodeSelect(nodeId: string | null) {
