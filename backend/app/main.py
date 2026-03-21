@@ -3,6 +3,7 @@ FastAPI application with lifespan context manager.
 Initializes database, Redis, and node registry on startup.
 """
 import logging
+import sys
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
 
@@ -22,28 +23,54 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Track component health for the health endpoint
+_component_health: dict[str, str] = {}
+
+
+def get_component_health() -> dict[str, str]:
+    """Return the current component health status."""
+    return _component_health.copy()
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """
     Application lifespan: startup and shutdown logic.
-    Initializes database, Redis, seeds admin user, loads node registry.
+    Initializes database (mandatory), Redis (optional), seeds admin user, loads node registry.
     """
+    global _component_health
+    _component_health = {}
     logger.info("Starting ingestion-graph application...")
 
-    # Initialize database (create tables)
+    # Validate security-critical settings (skip in development for convenience)
+    if settings.app_env != "development":
+        try:
+            settings.validate_security()
+        except RuntimeError as e:
+            logger.critical(str(e))
+            raise
+
+    # Initialize database (mandatory - app must not start without it)
     try:
         await init_db()
+        _component_health["database"] = "ok"
         logger.info("Database initialized successfully")
     except Exception as e:
-        logger.error(f"Failed to initialize database: {e}")
+        _component_health["database"] = f"error: {e}"
+        logger.critical(f"Failed to initialize database (FATAL): {e}")
+        logger.critical("Application cannot start without a database connection. Exiting.")
+        sys.exit(1)
 
-    # Initialize Redis connection
+    # Initialize Redis connection (optional - cache only, warn but continue)
     try:
         await init_redis()
+        _component_health["redis"] = "ok"
         logger.info("Redis connected successfully")
     except Exception as e:
-        logger.error(f"Failed to connect to Redis: {e}")
+        _component_health["redis"] = f"error: {e}"
+        logger.warning(
+            f"Failed to connect to Redis (non-fatal, caching disabled): {e}"
+        )
 
     # Seed admin user
     try:
@@ -101,7 +128,7 @@ from app.ws.execution_ws import ws_manager
 
 @app.websocket("/ws/executions/{run_id}")
 async def execution_websocket(websocket: WebSocket, run_id: str):
-    """WebSocket endpoint for live execution run progress."""
+    """WebSocket endpoint for live execution run progress. Requires JWT token via ?token=xxx query param."""
     await ws_manager.handle_connection(websocket, run_id)
 
 

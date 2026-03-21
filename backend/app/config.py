@@ -2,7 +2,14 @@
 Application configuration using Pydantic Settings.
 Loads from .env file with environment variable overrides.
 """
+import logging
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+logger = logging.getLogger(__name__)
+
+# Default secret that must never be used in production
+_INSECURE_JWT_SECRET = "change-this-secret-in-production"
 
 
 class Settings(BaseSettings):
@@ -74,6 +81,27 @@ class Settings(BaseSettings):
         """Convert async database URL to sync for Alembic."""
         return self.database_url.replace("+asyncpg", "")
 
+    def validate_security(self) -> None:
+        """
+        Validate security-critical settings at startup.
+
+        Raises RuntimeError if JWT_SECRET is still the insecure default
+        or shorter than 32 characters (insufficient entropy).
+        """
+        if self.jwt_secret_key == _INSECURE_JWT_SECRET:
+            raise RuntimeError(
+                "SECURITY: jwt_secret_key is still set to the default insecure value. "
+                "Set a strong secret (>= 32 chars) via the JWT_SECRET_KEY environment "
+                "variable or .env file before deploying to production."
+            )
+        if len(self.jwt_secret_key) < 32:
+            raise RuntimeError(
+                f"SECURITY: jwt_secret_key is only {len(self.jwt_secret_key)} characters long. "
+                "It must be at least 32 characters for sufficient entropy. "
+                "Set a stronger secret via the JWT_SECRET_KEY environment variable."
+            )
+
 
 # Global settings instance
 settings = Settings()
+

@@ -26,11 +26,11 @@ services:
     image: redis:7-alpine
     container_name: ingestion-redis
     restart: unless-stopped
-    command: redis-server --appendonly yes
+    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD:-redis_secret_change_me}
     volumes:
       - ingestion_redis_data:/data
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-redis_secret_change_me}", "ping"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -52,7 +52,8 @@ services:
       DATABASE_ECHO: "false"
 
       # Redis
-      REDIS_URL: redis://localhost:6379/0
+      REDIS_URL: redis://:${REDIS_PASSWORD:-redis_secret_change_me}@localhost:6379/0
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-redis_secret_change_me}
 
       # Auth
       JWT_SECRET_KEY: ${JWT_SECRET_KEY:-change-this-secret-in-production}
@@ -102,15 +103,17 @@ services:
       ingestion-redis:
         condition: service_healthy
 
-  # Frontend placeholder (SvelteKit - adapter-node)
+  # Frontend (SvelteKit - adapter-node)
   ingestion-frontend:
-    image: node:20-alpine
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
     container_name: ingestion-frontend
     restart: unless-stopped
-    working_dir: /app
-    command: echo "Frontend placeholder - replace with SvelteKit build"
-    volumes:
-      - ./frontend:/app
+    environment:
+      HOST: "0.0.0.0"
+      PORT: "3000"
+      ORIGIN: http://localhost:3000
     network_mode: host
     profiles:
       - frontend
