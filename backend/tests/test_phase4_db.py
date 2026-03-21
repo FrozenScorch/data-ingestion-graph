@@ -169,34 +169,14 @@ class TestDatabaseSourceNode:
 
     @pytest.mark.asyncio
     async def test_execute_non_select_query(self, base_context):
-        """Test that non-SELECT queries return empty results gracefully."""
+        """Test that non-SELECT queries are rejected for security."""
         node = DatabaseSourceNode()
         base_context.config["query"] = "INSERT INTO logs (msg) VALUES ('test')"
 
-        mock_result = MagicMock()
-        mock_result.returns_rows = False
+        result = await node.execute(base_context)
 
-        mock_session = AsyncMock()
-        mock_session.execute = AsyncMock(return_value=mock_result)
-        mock_session.commit = AsyncMock()
-        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
-        mock_session.__aexit__ = AsyncMock(return_value=False)
-
-        mock_engine = AsyncMock()
-        mock_engine.dispose = AsyncMock()
-
-        with patch(
-            "app.nodes.database_source.create_async_engine",
-            return_value=mock_engine,
-        ), patch(
-            "app.nodes.database_source.async_sessionmaker",
-            return_value=lambda: mock_session,
-        ):
-            result = await node.execute(base_context)
-
-        assert result.success is True
-        assert result.output_data["row_count"] == 0
-        assert result.metadata["query_type"] == "non_select"
+        assert result.success is False
+        assert "SELECT" in result.error_message
 
     @pytest.mark.asyncio
     async def test_execute_db_error(self, base_context):

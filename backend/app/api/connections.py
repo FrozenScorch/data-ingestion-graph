@@ -92,6 +92,8 @@ async def get_connection(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Connection not found",
         )
+    if current_user["role"] != "admin" and str(connection.user_id) != str(current_user["user_id"]):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You do not have permission to access this connection")
     return connection
 
 
@@ -150,6 +152,8 @@ async def test_connection(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Connection not found",
         )
+    if current_user["role"] != "admin" and str(connection.user_id) != str(current_user["user_id"]):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You do not have permission to access this connection")
 
     result = await connection_service.test_connection(
         config=connection.config or {},

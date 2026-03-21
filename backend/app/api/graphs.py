@@ -78,6 +78,7 @@ async def get_graph_endpoint(
     graph = await get_graph(db, graph_id)
     if not graph:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Graph not found")
+    _check_graph_owner(graph, current_user)
     return graph
 
 
@@ -89,6 +90,11 @@ async def update_graph_endpoint(
     current_user: dict = Depends(get_current_user),
 ):
     """Update a graph's metadata."""
+    existing_graph = await get_graph(db, graph_id)
+    if not existing_graph:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Graph not found")
+    _check_graph_owner(existing_graph, current_user)
+
     graph = await update_graph(
         db,
         graph_id,
@@ -109,6 +115,11 @@ async def archive_graph_endpoint(
     current_user: dict = Depends(get_current_user),
 ):
     """Archive a graph (soft delete)."""
+    existing_graph = await get_graph(db, graph_id)
+    if not existing_graph:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Graph not found")
+    _check_graph_owner(existing_graph, current_user)
+
     graph = await archive_graph(db, graph_id)
     if not graph:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Graph not found")
@@ -122,6 +133,11 @@ async def save_graph_version_endpoint(
     current_user: dict = Depends(get_current_user),
 ):
     """Save a new version of a graph."""
+    existing_graph = await get_graph(db, graph_id)
+    if not existing_graph:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Graph not found")
+    _check_graph_owner(existing_graph, current_user)
+
     version = await save_graph_version(
         db,
         graph_id,
@@ -142,5 +158,16 @@ async def get_graph_versions_endpoint(
     current_user: dict = Depends(get_current_user),
 ):
     """Get version history for a graph."""
+    existing_graph = await get_graph(db, graph_id)
+    if not existing_graph:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Graph not found")
+    _check_graph_owner(existing_graph, current_user)
+
     versions = await get_graph_versions(db, graph_id, limit=limit)
     return versions
+
+
+
+def _check_graph_owner(graph, current_user: dict) -> None:
+    if current_user["role"] != "admin" and str(graph.owner_id) != str(current_user["user_id"]):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You do not have permission to access this graph")

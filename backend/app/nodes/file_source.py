@@ -8,12 +8,31 @@ Supports three source types:
 """
 import logging
 import mimetypes
+import os
 from pathlib import Path
 from typing import Any
 
 from app.nodes.base import BaseNode, NodeContext, NodeResult, PortDef, PortDataType
 
 logger = logging.getLogger(__name__)
+
+
+def _validate_path_within_allowed(path, allowed_base):
+    """
+    Validate that the resolved file path stays within the allowed base directory.
+    Uses os.path.realpath() to resolve symlinks and checks containment.
+    Returns the resolved path if valid, or None if traversal is detected.
+    """
+    try:
+        resolved = Path(os.path.realpath(str(path)))
+        resolved_base = Path(os.path.realpath(str(allowed_base)))
+    except (OSError, ValueError):
+        return None
+    try:
+        resolved.relative_to(resolved_base)
+        return resolved
+    except ValueError:
+        return None
 
 
 class FileSourceNode(BaseNode):
@@ -76,9 +95,22 @@ class FileSourceNode(BaseNode):
         # Determine base directory
         base_dir = context.config.get("base_dir")
         if not base_dir:
-            base_dir = str(Path(context.working_dir) / "uploads")
+            # Default to working_dir itself; uploads is a common subdirectory
+            # that will be covered by recursive glob
+            base_dir = context.working_dir
 
         base_path = Path(base_dir)
+
+        # SECURITY: Resolve base_path to its real path to prevent symlink-based traversal
+        try:
+            base_path = Path(os.path.realpath(str(base_path)))
+        except (OSError, ValueError) as e:
+            return NodeResult(
+                success=False,
+                output_data={"file_list": []},
+                items_processed=0,
+                error_message=f"Invalid base directory: {e}",
+            )
 
         file_list: list[dict[str, Any]] = []
 
@@ -99,10 +131,11 @@ class FileSourceNode(BaseNode):
                 else:
                     matched = sorted(base_path.glob(file_pattern))
 
-                # Filter to files only (not directories)
+                # Filter to files only (not directories), and validate containment
                 for p in matched:
-                    if p.is_file():
-                        file_list.append(self._file_metadata(p))
+                    resolved = _validate_path_within_allowed(p, base_path)
+                    if resolved and resolved.is_file():
+                        file_list.append(self._file_metadata(resolved))
 
             elif source_type == "glob":
                 # Use the pattern against the base directory
@@ -122,8 +155,9 @@ class FileSourceNode(BaseNode):
                     matched = sorted(Path(base_path).glob(file_pattern))
 
                 for p in matched:
-                    if p.is_file():
-                        file_list.append(self._file_metadata(p))
+                    resolved = _validate_path_within_allowed(p, base_path)
+                    if resolved and resolved.is_file():
+                        file_list.append(self._file_metadata(resolved))
 
             elif source_type == "path":
                 # Single file path (absolute or relative to base_dir)
@@ -136,11 +170,30 @@ class FileSourceNode(BaseNode):
                         error_message="No file_path provided for path source_type",
                     )
 
+                # SECURITY: Reject paths containing '..' before resolution
+                if ".." in file_path_str:
+                    return NodeResult(
+                        success=False,
+                        output_data={"file_list": []},
+                        items_processed=0,
+                        error_message="Path traversal detected: '..' is not allowed in file paths",
+                    )
+
                 file_path = Path(file_path_str)
                 if not file_path.is_absolute():
                     file_path = base_path / file_path
 
-                if not file_path.exists() or not file_path.is_file():
+                # SECURITY: Validate the resolved path stays within allowed directories
+                resolved = _validate_path_within_allowed(file_path, base_path)
+                if not resolved:
+                    return NodeResult(
+                        success=False,
+                        output_data={"file_list": []},
+                        items_processed=0,
+                        error_message="File path is outside the allowed directory",
+                    )
+
+                if not resolved.exists() or not resolved.is_file():
                     return NodeResult(
                         success=False,
                         output_data={"file_list": []},
@@ -148,7 +201,7 @@ class FileSourceNode(BaseNode):
                         error_message=f"File not found: {file_path}",
                     )
 
-                file_list.append(self._file_metadata(file_path))
+                file_list.append(self._file_metadata(resolved))
 
             else:
                 return NodeResult(

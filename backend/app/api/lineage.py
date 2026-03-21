@@ -4,16 +4,31 @@ Lineage API routes: query data lineage and provenance.
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import get_session
 from app.middleware.auth import get_current_user
+from app.services.graph_service import get_graph
 from app.services.lineage_service import (
     get_lineage_for_run,
     get_lineage_for_graph,
     get_lineage_for_source,
     get_provenance_for_run,
 )
+
+
+async def _check_lineage_run_access(run_id, current_user, db):
+    from app.models.execution import Run
+    result = await db.execute(select(Run).where(Run.id == run_id))
+    run = result.scalar_one_or_none()
+    if not run:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found")
+    graph = await get_graph(db, run.graph_id)
+    if not graph:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Parent graph not found")
+    if current_user["role"] != "admin" and str(graph.owner_id) != str(current_user["user_id"]):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No permission")
 
 router = APIRouter(prefix="/api/lineage", tags=["lineage"])
 
@@ -25,6 +40,7 @@ async def list_lineage_for_run(
     current_user: dict = Depends(get_current_user),
 ):
     """Get all lineage entries for a specific run."""
+    await _check_lineage_run_access(run_id, current_user, db)
     entries = await get_lineage_for_run(db, run_id)
     return {
         "run_id": str(run_id),
@@ -54,6 +70,11 @@ async def list_lineage_for_graph(
     current_user: dict = Depends(get_current_user),
 ):
     """Get lineage entries across all runs for a graph."""
+    graph = await get_graph(db, graph_id)
+    if not graph:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Graph not found")
+    if current_user["role"] != "admin" and str(graph.owner_id) != str(current_user["user_id"]):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No permission")
     entries = await get_lineage_for_graph(db, graph_id, limit=limit)
     return {
         "graph_id": str(graph_id),
@@ -119,6 +140,7 @@ async def list_provenance_for_run(
     current_user: dict = Depends(get_current_user),
 ):
     """Get provenance records for a specific run."""
+    await _check_lineage_run_access(run_id, current_user, db)
     entries = await get_provenance_for_run(db, run_id)
     return {
         "run_id": str(run_id),

@@ -39,10 +39,12 @@ async def start_run(
     current_user: dict = Depends(get_current_user),
 ):
     """Start a new execution run for a graph."""
-    # Verify graph exists
+    # Verify graph exists and user has access
     graph = await get_graph(db, graph_id)
     if not graph:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Graph not found")
+    if current_user["role"] != "admin" and str(graph.owner_id) != str(current_user["user_id"]):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No permission")
 
     # Get latest version if not specified
     graph_version_id = request.graph_version_id if request else None
@@ -122,6 +124,7 @@ async def get_run_detail(
     run = await get_run(db, run_id, load_nodes=True)
     if not run:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found")
+    await _check_run_access(run, current_user, db)
 
     run_nodes = [
         RunNodeResponse.model_validate(node) for node in run.run_nodes

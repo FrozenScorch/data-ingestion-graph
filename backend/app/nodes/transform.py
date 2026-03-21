@@ -6,14 +6,16 @@ Modes:
 - "jinja2": renders a Jinja2 template with input data as context
 """
 import ast
+import json
 import logging
+import re
 from typing import Any
 
 from app.nodes.base import BaseNode, NodeContext, NodeResult, PortDef, PortDataType
 
 logger = logging.getLogger(__name__)
 
-# Restricted builtins for Python expression mode
+# Restricted builtins for Python expression mode -- no getattr/setattr/type to prevent sandbox escapes
 _RESTRICTED_BUILTINS: dict[str, Any] = {
     "len": len,
     "str": str,
@@ -28,8 +30,6 @@ _RESTRICTED_BUILTINS: dict[str, Any] = {
     "all": all,
     "isinstance": isinstance,
     "hasattr": hasattr,
-    "getattr": getattr,
-    "setattr": setattr,
     "list": list,
     "dict": dict,
     "set": set,
@@ -42,9 +42,8 @@ _RESTRICTED_BUILTINS: dict[str, Any] = {
     "map": map,
     "filter": filter,
     "round": round,
-    "type": type,
-    "json": __import__("json"),
-    "re": __import__("re"),
+    "json": json,
+    "re": re,
     "True": True,
     "False": False,
     "None": None,
@@ -161,16 +160,17 @@ class TransformNode(BaseNode):
 
     @staticmethod
     def _render_jinja2(template_str: str, data: Any) -> str:
-        """Render a Jinja2 template with data as context."""
+        """Render a Jinja2 template with data as context using SandboxedEnvironment."""
         try:
-            from jinja2 import Environment, BaseLoader, StrictUndefined
+            from jinja2.sandbox import SandboxedEnvironment
+            from jinja2 import BaseLoader, StrictUndefined
         except ImportError:
             raise ImportError(
                 "jinja2 is required for Jinja2 template mode. "
                 "Install with: pip install jinja2"
             )
 
-        env = Environment(
+        env = SandboxedEnvironment(
             loader=BaseLoader(),
             undefined=StrictUndefined,
         )

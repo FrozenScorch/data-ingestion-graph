@@ -12,6 +12,23 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.session import get_session
 from app.middleware.auth import get_current_user
 from app.models.dead_letter import DeadLetterQueue
+from app.services.graph_service import get_graph
+
+
+async def _check_dlq_item_access(item, current_user, db):
+    if not item.run_id:
+        return
+    from app.models.execution import Run
+    from sqlalchemy import select as _s
+    result = await db.execute(_s(Run).where(Run.id == item.run_id))
+    run = result.scalar_one_or_none()
+    if not run:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Parent run not found")
+    graph = await get_graph(db, run.graph_id)
+    if not graph:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Parent graph not found")
+    if current_user["role"] != "admin" and str(graph.owner_id) != str(current_user["user_id"]):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No permission")
 
 router = APIRouter(prefix="/api/dead-letter", tags=["dead-letter"])
 
@@ -94,6 +111,8 @@ async def retry_dlq_item(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="DLQ item not found",
         )
+
+    await _check_dlq_item_access(item, current_user, db)
 
     if item.resolved:
         raise HTTPException(
@@ -188,6 +207,8 @@ async def resolve_dlq_item(
             detail="DLQ item not found",
         )
 
+    await _check_dlq_item_access(item, current_user, db)
+
     if item.resolved:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -224,6 +245,8 @@ async def delete_dlq_item(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="DLQ item not found",
         )
+
+    await _check_dlq_item_access(item, current_user, db)
 
     await db.delete(item)
     await db.commit()

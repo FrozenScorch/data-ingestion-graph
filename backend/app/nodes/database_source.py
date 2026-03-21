@@ -7,6 +7,7 @@ Input: none (source node)
 Output: {rows: [...], row_count: N, columns: [...]}
 """
 import logging
+import re
 from typing import Any
 
 from sqlalchemy import text
@@ -15,6 +16,9 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from app.nodes.base import BaseNode, NodeContext, NodeResult, PortDef, PortDataType
 
 logger = logging.getLogger(__name__)
+
+# SQL identifier regex: only simple identifiers like table_name or "schema"."table"
+_SQL_IDENTIFIER_RE = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*(\.[a-zA-Z_][a-zA-Z0-9_]*)?$")
 
 
 class DatabaseSourceNode(BaseNode):
@@ -54,7 +58,7 @@ class DatabaseSourceNode(BaseNode):
                 "query": {
                     "type": "string",
                     "default": "SELECT * FROM table LIMIT 1000",
-                    "description": "SQL query to execute",
+                    "description": "SQL query to execute (SELECT only)",
                 },
                 "batch_size": {
                     "type": "integer",
@@ -65,6 +69,18 @@ class DatabaseSourceNode(BaseNode):
             },
             "required": ["connection_id", "query"],
         }
+
+    @staticmethod
+    def _validate_query(query: str) -> None:
+        """Validate that the query is SELECT-only to prevent data modification."""
+        stripped = query.strip().rstrip(";").strip()
+        upper = stripped.upper()
+        # Must start with SELECT or WITH (CTE)
+        if not (upper.startswith("SELECT") or upper.startswith("WITH")):
+            raise ValueError(
+                "Only SELECT queries are allowed in database_source node. "
+                f"Query starts with: {stripped[:20]}"
+            )
 
     async def _build_connection_url(self, context: NodeContext) -> str:
         """
@@ -104,6 +120,15 @@ class DatabaseSourceNode(BaseNode):
         config = context.config
         query = config.get("query", "SELECT * FROM table LIMIT 1000")
         batch_size = config.get("batch_size", 1000)
+
+        # Validate query is SELECT-only
+        try:
+            self._validate_query(query)
+        except ValueError as e:
+            return NodeResult(
+                success=False,
+                error_message=str(e),
+            )
 
         try:
             connection_url = await self._build_connection_url(context)

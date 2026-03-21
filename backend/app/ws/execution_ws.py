@@ -9,6 +9,8 @@ from uuid import UUID
 
 from fastapi import WebSocket, WebSocketDisconnect
 
+from app.services.auth_service import decode_token
+
 logger = logging.getLogger(__name__)
 
 
@@ -66,8 +68,25 @@ class ExecutionWebSocketManager:
     async def handle_connection(self, websocket: WebSocket, run_id: str):
         """
         Handle a WebSocket connection lifecycle.
+        Validates JWT token from query parameter before accepting the connection.
         Keeps connection alive until client disconnects.
         """
+        # Validate JWT token from query parameter
+        token = websocket.query_params.get("token")
+        if not token:
+            await websocket.close(code=1008, reason="Missing authentication token")
+            return
+
+        try:
+            payload = decode_token(token)
+        except Exception:
+            await websocket.close(code=1008, reason="Invalid or expired token")
+            return
+
+        if payload.get("type") != "access":
+            await websocket.close(code=1008, reason="Invalid token type")
+            return
+
         await self.connect(websocket, run_id)
         try:
             while True:

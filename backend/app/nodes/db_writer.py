@@ -1,3 +1,4 @@
+import re as _re_dw
 """
 DatabaseWriter node: write data to PostgreSQL.
 
@@ -16,6 +17,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from app.nodes.base import BaseNode, NodeContext, NodeResult, PortDef, PortDataType
 
 logger = logging.getLogger(__name__)
+
+_SQL_IDENTIFIER_RE = _re_dw.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
 
 
 class DatabaseWriterNode(BaseNode):
@@ -119,6 +122,9 @@ class DatabaseWriterNode(BaseNode):
                 success=False,
                 error_message="Missing required config: table_name",
             )
+
+        if not _SQL_IDENTIFIER_RE.match(table_name):
+            return NodeResult(success=False, error_message=f"Invalid table_name: {table_name}")
 
         # Extract rows from input data
         input_data = context.input_data

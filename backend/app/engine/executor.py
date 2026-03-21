@@ -148,6 +148,8 @@ class DAGExecutor:
     ) -> dict[str, Any]:
         """
         Execute all nodes in a level in parallel using asyncio.gather.
+        Each coroutine creates its own DB session to avoid sharing AsyncSession
+        across concurrent tasks.
 
         Returns a dict of node_id -> RunNode. Failed nodes will have
         status='failed'.
@@ -157,87 +159,89 @@ class DAGExecutor:
             async with AsyncSessionLocal() as node_db:
                 try:
                     await node_db.refresh(run)
-            if run.status == RunStatus.CANCELLED.value:
-                from app.models.execution import RunNode as RN, NodeStatus
-                return node_id, RN(
-                    run_id=run.id,
-                    node_id=node_id,
-                    status=NodeStatus.SKIPPED.value,
-                )
+                    if run.status == RunStatus.CANCELLED.value:
+                        from app.models.execution import RunNode as RN, NodeStatus
+                        return node_id, RN(
+                            run_id=run.id,
+                            node_id=node_id,
+                            status=NodeStatus.SKIPPED.value,
+                        )
 
-            node_def = nodes_data[node_id]
-            node_type = node_def.get("type", node_def.get("node_type", "unknown"))
-            node_config = (node_configs or {}).get(node_id, {})
+                    node_def = nodes_data[node_id]
+                    node_type = node_def.get("type", node_def.get("node_type", "unknown"))
+                    node_config = (node_configs or {}).get(node_id, {})
 
-            # Collect input data from predecessor outputs
-            input_data, lineage_edges = self._collect_inputs(node_id, edges_data, exec_state)
+                    # Collect input data from predecessor outputs
+                    input_data, lineage_edges = self._collect_inputs(node_id, edges_data, exec_state)
 
-            await self._emit_event(run.id, "node_started", {
-                "node_id": node_id,
-                "node_type": node_type,
-            })
+                    await self._emit_event(run.id, "node_started", {
+                        "node_id": node_id,
+                        "node_type": node_type,
+                    })
 
-            # Run the node with retry support (uses its own session)
+                    # Run the node with retry support (uses its own session)
                     run_node = await run_node_with_retry(
                         db=node_db,
-                run_id=run.id,
-                node_id=node_id,
-                node_type=node_type,
-                config=node_config,
-                input_data=input_data,
-                state=exec_state,
-            )
-
-            # Store output in execution state (only on success)
-            if run_node.output_data and run_node.status == "completed":
-                exec_state["outputs"][node_id] = run_node.output_data
-
-                # Record lineage for each edge that provided data
-                for edge_info in lineage_edges:
-                    await self._record_lineage(
                         run_id=run.id,
-                        source_node_id=edge_info["source_node_id"],
-                        target_node_id=edge_info["target_node_id"],
-                        source_port=edge_info["source_port"],
-                        target_port=edge_info["target_port"],
-                        data=edge_info["data"],
+                        node_id=node_id,
+                        node_type=node_type,
+                        config=node_config,
+                        input_data=input_data,
+                        state=exec_state,
                     )
 
-            # Save post-execution checkpoint
+                    # Store output in execution state (only on success)
+                    if run_node.output_data and run_node.status == "completed":
+                        exec_state["outputs"][node_id] = run_node.output_data
+
+                        # Record lineage for each edge that provided data
+                        for edge_info in lineage_edges:
+                            await self._record_lineage(
+                                db=node_db,
+                                run_id=run.id,
+                                source_node_id=edge_info["source_node_id"],
+                                target_node_id=edge_info["target_node_id"],
+                                source_port=edge_info["source_port"],
+                                target_port=edge_info["target_port"],
+                                data=edge_info["data"],
+                            )
+
+                    # Save post-execution checkpoint
                     await save_checkpoint(
                         db=node_db,
-                run_id=run.id,
-                node_id=node_id,
-                checkpoint_type=CheckpointType.POST_EXEC.value,
-                state_data={"level": level_idx},
-                node_output=run_node.output_data,
-            )
+                        run_id=run.id,
+                        node_id=node_id,
+                        checkpoint_type=CheckpointType.POST_EXEC.value,
+                        state_data={"level": level_idx},
+                        node_output=run_node.output_data,
+                    )
 
-            # Emit completion event
-            if run_node.status == "completed":
-                await self._emit_event(run.id, "node_completed", {
-                    "node_id": node_id,
-                    "node_type": node_type,
-                    "items_processed": run_node.items_processed,
-                    "duration_ms": run_node.duration_ms,
-                })
-            else:
-                # Record in DLQ
-                error_type = type(run_node.error_message).__name__ if run_node.error_message else "UnknownError"
-                await self._record_dlq(
-                    run_id=run.id,
-                    node_id=node_id,
-                    node_type=node_type,
-                    error_type=error_type,
-                    error_message=run_node.error_message,
-                    input_data=input_data,
-                    retry_count=run_node.attempt_count,
-                )
-                await self._emit_event(run.id, "node_failed", {
-                    "node_id": node_id,
-                    "node_type": node_type,
-                    "error": run_node.error_message,
-                })
+                    # Emit completion event
+                    if run_node.status == "completed":
+                        await self._emit_event(run.id, "node_completed", {
+                            "node_id": node_id,
+                            "node_type": node_type,
+                            "items_processed": run_node.items_processed,
+                            "duration_ms": run_node.duration_ms,
+                        })
+                    else:
+                        # Record in DLQ
+                        error_type = type(run_node.error_message).__name__ if run_node.error_message else "UnknownError"
+                        await self._record_dlq(
+                            db=node_db,
+                            run_id=run.id,
+                            node_id=node_id,
+                            node_type=node_type,
+                            error_type=error_type,
+                            error_message=run_node.error_message,
+                            input_data=input_data,
+                            retry_count=run_node.attempt_count,
+                        )
+                        await self._emit_event(run.id, "node_failed", {
+                            "node_id": node_id,
+                            "node_type": node_type,
+                            "error": run_node.error_message,
+                        })
 
                     return node_id, run_node
                 except Exception:
@@ -291,9 +295,9 @@ class DAGExecutor:
                 "node_type": node_type,
             })
 
-            # Run the node with retry support (uses its own session)
-                    run_node = await run_node_with_retry(
-                        db=node_db,
+            # Run the node with retry support (uses shared session for sequential)
+            run_node = await run_node_with_retry(
+                db=self.db,
                 run_id=run.id,
                 node_id=node_id,
                 node_type=node_type,
@@ -319,8 +323,8 @@ class DAGExecutor:
                     )
 
             # Save post-execution checkpoint
-                    await save_checkpoint(
-                        db=node_db,
+            await save_checkpoint(
+                db=self.db,
                 run_id=run.id,
                 node_id=node_id,
                 checkpoint_type=CheckpointType.POST_EXEC.value,
