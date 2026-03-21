@@ -115,6 +115,7 @@ services:
       HOST: "0.0.0.0"
       PORT: "3000"
       ORIGIN: http://localhost:3000
+      API_HOST: http://localhost:8040
     network_mode: host
     profiles:
       - frontend
