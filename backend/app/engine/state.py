@@ -1,5 +1,5 @@
 """
-Execution state machine for run status management.
+Execution state machine for run and node status management.
 """
 from enum import Enum
 from typing import Optional
@@ -15,7 +15,17 @@ class ExecutionState(str, Enum):
     CANCELLED = "cancelled"
 
 
-# Valid state transitions: current_state -> set of allowed next states
+class NodeExecutionState(str, Enum):
+    """States a run node can be in."""
+    PENDING = "pending"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    SKIPPED = "skipped"
+    RETRYING = "retrying"
+
+
+# Valid state transitions for runs: current_state -> set of allowed next states
 VALID_TRANSITIONS: dict[ExecutionState, set[ExecutionState]] = {
     ExecutionState.PENDING: {ExecutionState.RUNNING, ExecutionState.CANCELLED},
     ExecutionState.RUNNING: {ExecutionState.PAUSED, ExecutionState.COMPLETED, ExecutionState.FAILED, ExecutionState.CANCELLED},
@@ -25,9 +35,19 @@ VALID_TRANSITIONS: dict[ExecutionState, set[ExecutionState]] = {
     ExecutionState.CANCELLED: set(),  # Terminal state
 }
 
+# Valid state transitions for nodes: current_state -> set of allowed next states
+VALID_NODE_TRANSITIONS: dict[NodeExecutionState, set[NodeExecutionState]] = {
+    NodeExecutionState.PENDING: {NodeExecutionState.RUNNING, NodeExecutionState.SKIPPED},
+    NodeExecutionState.RUNNING: {NodeExecutionState.COMPLETED, NodeExecutionState.FAILED, NodeExecutionState.RETRYING, NodeExecutionState.SKIPPED},
+    NodeExecutionState.RETRYING: {NodeExecutionState.RUNNING, NodeExecutionState.FAILED, NodeExecutionState.SKIPPED},
+    NodeExecutionState.COMPLETED: set(),  # Terminal state
+    NodeExecutionState.FAILED: {NodeExecutionState.RUNNING},  # Can retry
+    NodeExecutionState.SKIPPED: set(),  # Terminal state
+}
+
 
 def can_transition(current: str, target: str) -> bool:
-    """Check if a state transition is valid."""
+    """Check if a run state transition is valid."""
     try:
         current_state = ExecutionState(current)
         target_state = ExecutionState(target)
@@ -38,8 +58,20 @@ def can_transition(current: str, target: str) -> bool:
     return target_state in allowed
 
 
+def can_node_transition(current: str, target: str) -> bool:
+    """Check if a node state transition is valid."""
+    try:
+        current_state = NodeExecutionState(current)
+        target_state = NodeExecutionState(target)
+    except ValueError:
+        return False
+
+    allowed = VALID_NODE_TRANSITIONS.get(current_state, set())
+    return target_state in allowed
+
+
 def get_terminal_states() -> list[str]:
-    """Get states that cannot be transitioned out of."""
+    """Get run states that cannot be transitioned out of."""
     return [
         ExecutionState.COMPLETED.value,
         ExecutionState.CANCELLED.value,

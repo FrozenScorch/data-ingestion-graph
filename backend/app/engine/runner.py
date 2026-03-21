@@ -13,6 +13,7 @@ from app.models.execution import RunNode, NodeStatus, ExecutionLog, LogLevel
 from app.nodes.base import BaseNode, NodeContext, NodeResult
 from app.nodes.registry import get_node as registry_get_node
 from app.engine.retry import RetryConfig, retry_async
+from app.engine.state import can_node_transition
 
 logger = logging.getLogger(__name__)
 
@@ -54,7 +55,9 @@ async def run_node_with_retry(
     # Get node implementation
     node_impl = registry_get_node(node_type)
     if not node_impl:
-        run_node.status = NodeStatus.FAILED.value
+        new_status = NodeStatus.FAILED.value
+        if can_node_transition(run_node.status, new_status):
+            run_node.status = new_status
         run_node.error_message = f"Unknown node type: {node_type}"
         await db.commit()
         return run_node
@@ -91,7 +94,14 @@ async def run_node_with_retry(
         )
         elapsed_ms = int((time.monotonic() - start_time) * 1000)
 
-        run_node.status = NodeStatus.COMPLETED.value if result.success else NodeStatus.FAILED.value
+        new_status = NodeStatus.COMPLETED.value if result.success else NodeStatus.FAILED.value
+        if can_node_transition(run_node.status, new_status):
+            run_node.status = new_status
+        else:
+            logger.warning(
+                f"Invalid node transition: {run_node.status} -> {new_status} "
+                f"for node {node_id}. Skipping status update."
+            )
         run_node.output_data = result.output_data
         run_node.items_processed = result.items_processed
         run_node.duration_ms = elapsed_ms
@@ -111,7 +121,14 @@ async def run_node_with_retry(
 
     except Exception as e:
         elapsed_ms = int((time.monotonic() - start_time) * 1000)
-        run_node.status = NodeStatus.FAILED.value
+        new_status = NodeStatus.FAILED.value
+        if can_node_transition(run_node.status, new_status):
+            run_node.status = new_status
+        else:
+            logger.warning(
+                f"Invalid node transition: {run_node.status} -> {new_status} "
+                f"for node {node_id}. Skipping status update."
+            )
         run_node.duration_ms = elapsed_ms
         run_node.error_message = str(e)
         run_node.attempt_count = retry_config.max_retries

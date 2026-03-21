@@ -112,12 +112,25 @@ async def save_graph_version(
     edges_data: Optional[dict] = None,
     node_configs: Optional[dict] = None,
 ) -> Optional[GraphVersion]:
-    """Save a new version of a graph."""
-    graph = await get_graph(db, graph_id)
+    """Save a new version of a graph.
+
+    Uses SELECT ... FOR UPDATE to prevent concurrent version number collisions.
+    Locks the graph row so that only one save_version call can increment the
+    version at a time for a given graph.
+    """
+    from sqlalchemy import select as sa_select
+
+    # Lock the graph row with FOR UPDATE to serialize concurrent version saves
+    lock_result = await db.execute(
+        sa_select(Graph)
+        .where(Graph.id == graph_id)
+        .with_for_update()
+    )
+    graph = lock_result.scalar_one_or_none()
     if not graph:
         return None
 
-    # Get the next version number
+    # Get the next version number (safe within the locked transaction)
     version_result = await db.execute(
         select(func.coalesce(func.max(GraphVersion.version_number), 0))
         .where(GraphVersion.graph_id == graph_id)

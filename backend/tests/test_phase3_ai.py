@@ -111,16 +111,19 @@ class TestOpenRouterService:
 
     def test_calculate_cost_paid_model(self, mock_openrouter_service):
         service = mock_openrouter_service
-        # gpt-4: prompt=0.00003, completion=0.00006
+        # gpt-4: prompt=0.00003 per 1M tokens, completion=0.00006 per 1M tokens
+        # cost = (tokens / 1_000_000) * rate_per_1m
+        # input: (1000 / 1_000_000) * 0.00003 = 3e-08
+        # output: (500 / 1_000_000) * 0.00006 = 3e-08
         costs = service.calculate_cost("openai/gpt-4", 1000, 500)
-        assert costs["input_cost_usd"] == pytest.approx(0.03, abs=1e-10)
-        assert costs["output_cost_usd"] == pytest.approx(0.03, abs=1e-10)
-        assert costs["total_cost_usd"] == pytest.approx(0.06, abs=1e-10)
+        assert costs["input_cost_usd"] == pytest.approx(3e-08, abs=1e-15)
+        assert costs["output_cost_usd"] == pytest.approx(3e-08, abs=1e-15)
+        assert costs["total_cost_usd"] == pytest.approx(6e-08, abs=1e-15)
 
     def test_estimate_cost(self, mock_openrouter_service):
         service = mock_openrouter_service
         total = service.estimate_cost("openai/gpt-4", 1000, 500)
-        assert total == pytest.approx(0.06, abs=1e-10)
+        assert total == pytest.approx(6e-08, abs=1e-15)
 
     def test_calculate_cost_no_cache(self, mock_openrouter_service):
         """Cost calculation with empty cache should return zeros."""

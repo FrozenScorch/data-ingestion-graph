@@ -10,6 +10,7 @@ from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.db.session import AsyncSessionLocal
 from app.engine.scheduler import topological_sort, validate_dag
 from app.engine.state import can_transition, ExecutionState
 from app.engine.runner import run_node_with_retry
@@ -67,18 +68,20 @@ class DAGExecutor:
             await self._emit_event(run.id, "run_failed", {"errors": errors})
             return run
 
-        # Update run status
-        run.status = RunStatus.RUNNING.value
-        await self.db.commit()
+        # Update run status with state machine validation
+        if can_transition(run.status, RunStatus.RUNNING.value):
+            run.status = RunStatus.RUNNING.value
+            await self.db.commit()
         await self._emit_event(run.id, "run_started", {})
 
         # Compute execution levels (topological sort)
         try:
             levels = topological_sort(nodes_data, edges_data)
         except ValueError as e:
-            run.status = RunStatus.FAILED.value
-            run.error_message = str(e)
-            await self.db.commit()
+            if can_transition(run.status, RunStatus.FAILED.value):
+                run.status = RunStatus.FAILED.value
+                run.error_message = str(e)
+                await self.db.commit()
             await self._emit_event(run.id, "run_failed", {"error": str(e)})
             return run
 
@@ -103,12 +106,13 @@ class DAGExecutor:
                 # Check for failures in parallel results
                 for node_id, run_node in results.items():
                     if run_node.status == "failed":
-                        run.status = RunStatus.FAILED.value
-                        node_type = nodes_data[node_id].get("type", "unknown")
-                        run.error_message = (
-                            f"Node {node_id} ({node_type}) failed: {run_node.error_message}"
-                        )
-                        await self.db.commit()
+                        if can_transition(run.status, RunStatus.FAILED.value):
+                            run.status = RunStatus.FAILED.value
+                            node_type = nodes_data[node_id].get("type", "unknown")
+                            run.error_message = (
+                                f"Node {node_id} ({node_type}) failed: {run_node.error_message}"
+                            )
+                            await self.db.commit()
                         await self._emit_event(run.id, "run_failed", {
                             "node_id": node_id,
                             "error": run_node.error_message,
@@ -123,10 +127,11 @@ class DAGExecutor:
                 if result is not None:
                     return result  # A failure occurred
 
-        # Mark run as completed if no failures
+        # Mark run as completed if no failures (with state machine validation)
         if run.status == RunStatus.RUNNING.value:
-            run.status = RunStatus.COMPLETED.value
-            await self.db.commit()
+            if can_transition(run.status, RunStatus.COMPLETED.value):
+                run.status = RunStatus.COMPLETED.value
+                await self.db.commit()
             await self._emit_event(run.id, "run_completed", {})
 
         return run
@@ -148,8 +153,10 @@ class DAGExecutor:
         status='failed'.
         """
         async def _run_single(node_id: str) -> tuple[str, Any]:
-            """Execute a single node and return (node_id, RunNode)."""
-            await self.db.refresh(run)
+            """Execute a single node with its own session and return (node_id, RunNode)."""
+            async with AsyncSessionLocal() as node_db:
+                try:
+                    await node_db.refresh(run)
             if run.status == RunStatus.CANCELLED.value:
                 from app.models.execution import RunNode as RN, NodeStatus
                 return node_id, RN(
@@ -170,9 +177,9 @@ class DAGExecutor:
                 "node_type": node_type,
             })
 
-            # Run the node with retry support
-            run_node = await run_node_with_retry(
-                db=self.db,
+            # Run the node with retry support (uses its own session)
+                    run_node = await run_node_with_retry(
+                        db=node_db,
                 run_id=run.id,
                 node_id=node_id,
                 node_type=node_type,
@@ -197,8 +204,8 @@ class DAGExecutor:
                     )
 
             # Save post-execution checkpoint
-            await save_checkpoint(
-                db=self.db,
+                    await save_checkpoint(
+                        db=node_db,
                 run_id=run.id,
                 node_id=node_id,
                 checkpoint_type=CheckpointType.POST_EXEC.value,
@@ -232,7 +239,16 @@ class DAGExecutor:
                     "error": run_node.error_message,
                 })
 
-            return node_id, run_node
+                    return node_id, run_node
+                except Exception:
+                    logger.exception(f"Unexpected error in parallel node {node_id}")
+                    from app.models.execution import RunNode as RN, NodeStatus
+                    return node_id, RN(
+                        run_id=run.id,
+                        node_id=node_id,
+                        status=NodeStatus.FAILED.value,
+                        error_message="Unexpected error during parallel execution",
+                    )
 
         # Run all nodes in parallel
         results_list = await asyncio.gather(
@@ -275,9 +291,9 @@ class DAGExecutor:
                 "node_type": node_type,
             })
 
-            # Run the node with retry support
-            run_node = await run_node_with_retry(
-                db=self.db,
+            # Run the node with retry support (uses its own session)
+                    run_node = await run_node_with_retry(
+                        db=node_db,
                 run_id=run.id,
                 node_id=node_id,
                 node_type=node_type,
@@ -303,8 +319,8 @@ class DAGExecutor:
                     )
 
             # Save post-execution checkpoint
-            await save_checkpoint(
-                db=self.db,
+                    await save_checkpoint(
+                        db=node_db,
                 run_id=run.id,
                 node_id=node_id,
                 checkpoint_type=CheckpointType.POST_EXEC.value,
@@ -337,12 +353,13 @@ class DAGExecutor:
                     "node_type": node_type,
                     "error": run_node.error_message,
                 })
-                # Fail the entire run on node failure
-                run.status = RunStatus.FAILED.value
-                run.error_message = (
-                    f"Node {node_id} ({node_type}) failed: {run_node.error_message}"
-                )
-                await self.db.commit()
+                # Fail the entire run on node failure (with state machine validation)
+                if can_transition(run.status, RunStatus.FAILED.value):
+                    run.status = RunStatus.FAILED.value
+                    run.error_message = (
+                        f"Node {node_id} ({node_type}) failed: {run_node.error_message}"
+                    )
+                    await self.db.commit()
                 await self._emit_event(run.id, "run_failed", {
                     "node_id": node_id,
                     "error": run_node.error_message,
@@ -397,11 +414,14 @@ class DAGExecutor:
         source_port: str,
         target_port: str,
         data: Any,
+        db: AsyncSession | None = None,
     ) -> None:
         """Record a lineage entry for data flowing from source to target node."""
         try:
             from app.models.lineage import DataLineage
             import json
+
+            session = db or self.db
 
             # Calculate approximate metrics
             items_count = None
@@ -430,8 +450,8 @@ class DAGExecutor:
                 items_sample=items_sample,
                 bytes_transferred=bytes_transferred,
             )
-            self.db.add(lineage_entry)
-            await self.db.commit()
+            session.add(lineage_entry)
+            await session.commit()
         except Exception as e:
             logger.warning(f"Failed to record lineage: {e}")
 
@@ -444,13 +464,15 @@ class DAGExecutor:
         error_message: str,
         input_data: dict | None,
         retry_count: int,
+        db: AsyncSession | None = None,
     ) -> None:
         """Record a failed node in the dead letter queue."""
         try:
             from app.engine.dead_letter import add_to_dlq
 
+            session = db or self.db
             await add_to_dlq(
-                db=self.db,
+                db=session,
                 run_id=run_id,
                 node_id=node_id,
                 node_type=node_type,

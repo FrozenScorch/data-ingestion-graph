@@ -65,6 +65,12 @@ class OpenRouterService:
                 return models
         except Exception:
             logger.debug("Redis not available for model cache, using in-memory or fetching fresh")
+        finally:
+            if redis_client is not None:
+                try:
+                    redis_client.close()
+                except Exception:
+                    pass
 
         # Fetch from OpenRouter API
         try:
@@ -78,12 +84,14 @@ class OpenRouterService:
             models.sort(key=lambda m: float(m.get("pricing", {}).get("prompt", "999") or "999"))
             self._models_cache = models
 
-            # Cache in Redis
-            if redis_client:
-                try:
-                    redis_client.setex(MODELS_CACHE_KEY, MODELS_CACHE_TTL, json.dumps(models))
-                except Exception:
-                    logger.debug("Failed to cache models in Redis")
+            # Cache in Redis (redis_client was closed in finally, create new one)
+            try:
+                import redis as redis_lib
+                redis_client2 = redis_lib.from_url(settings.redis_url, decode_responses=True)
+                redis_client2.setex(MODELS_CACHE_KEY, MODELS_CACHE_TTL, json.dumps(models))
+                redis_client2.close()
+            except Exception:
+                logger.debug("Failed to cache models in Redis")
 
             return models
         except Exception as e:
@@ -151,14 +159,16 @@ class OpenRouterService:
 
         if model_info and model_info.get("pricing"):
             pricing = model_info["pricing"]
-            prompt_cost_per_token = float(pricing.get("prompt", "0") or "0")
-            completion_cost_per_token = float(pricing.get("completion", "0") or "0")
+            # OpenRouter pricing is per 1M tokens (e.g. "0.5" = $0.50 per 1M tokens)
+            prompt_cost_per_1m = float(pricing.get("prompt", "0") or "0")
+            completion_cost_per_1m = float(pricing.get("completion", "0") or "0")
         else:
-            prompt_cost_per_token = 0.0
-            completion_cost_per_token = 0.0
+            prompt_cost_per_1m = 0.0
+            completion_cost_per_1m = 0.0
 
-        input_cost = input_tokens * prompt_cost_per_token
-        output_cost = output_tokens * completion_cost_per_token
+        # Convert per-1M pricing to actual cost by dividing token counts by 1M
+        input_cost = (input_tokens / 1_000_000) * prompt_cost_per_1m
+        output_cost = (output_tokens / 1_000_000) * completion_cost_per_1m
 
         return {
             "input_cost_usd": round(input_cost, 10),
