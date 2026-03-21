@@ -28,8 +28,6 @@ _RESTRICTED_BUILTINS: dict[str, Any] = {
     "sum": sum,
     "any": any,
     "all": all,
-    "isinstance": isinstance,
-    "hasattr": hasattr,
     "list": list,
     "dict": dict,
     "set": set,

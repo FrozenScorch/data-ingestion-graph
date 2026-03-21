@@ -587,7 +587,7 @@ class TestDLQAPI:
             resolved=None,
             node_type=None,
             db=mock_db,
-            current_user={"user_id": _make_uuid()},
+            current_user={"user_id": _make_uuid(), "role": "admin"},
         )
 
         assert result["total"] == 2
@@ -615,7 +615,7 @@ class TestDLQAPI:
             resolved=True,
             node_type=None,
             db=mock_db,
-            current_user={"user_id": _make_uuid()},
+            current_user={"user_id": _make_uuid(), "role": "admin"},
         )
 
         assert result["total"] == 1
@@ -643,7 +643,7 @@ class TestDLQAPI:
             resolved=None,
             node_type="embedder",
             db=mock_db,
-            current_user={"user_id": _make_uuid()},
+            current_user={"user_id": _make_uuid(), "role": "admin"},
         )
 
         assert result["total"] == 1
@@ -668,7 +668,7 @@ class TestDLQAPI:
             item_id=item.id,
             request=request,
             db=mock_db,
-            current_user={"user_id": _make_uuid()},
+            current_user={"user_id": _make_uuid(), "role": "admin"},
         )
 
         assert result["resolved"] is True
@@ -693,7 +693,7 @@ class TestDLQAPI:
                 item_id=_make_uuid(),
                 request=request,
                 db=mock_db,
-                current_user={"user_id": _make_uuid()},
+                current_user={"user_id": _make_uuid(), "role": "admin"},
             )
 
         assert exc_info.value.status_code == 404
@@ -717,7 +717,7 @@ class TestDLQAPI:
                 item_id=item.id,
                 request=request,
                 db=mock_db,
-                current_user={"user_id": _make_uuid()},
+                current_user={"user_id": _make_uuid(), "role": "admin"},
             )
 
         assert exc_info.value.status_code == 400
@@ -737,7 +737,7 @@ class TestDLQAPI:
         await delete_dlq_item(
             item_id=item.id,
             db=mock_db,
-            current_user={"user_id": _make_uuid()},
+            current_user={"user_id": _make_uuid(), "role": "admin"},
         )
 
         mock_db.delete.assert_called_once_with(item)
@@ -758,7 +758,7 @@ class TestDLQAPI:
             await delete_dlq_item(
                 item_id=_make_uuid(),
                 db=mock_db,
-                current_user={"user_id": _make_uuid()},
+                current_user={"user_id": _make_uuid(), "role": "admin"},
             )
 
         assert exc_info.value.status_code == 404
@@ -796,7 +796,7 @@ class TestDLQRetry:
             result = await retry_dlq_item(
                 item_id=item.id,
                 db=mock_db,
-                current_user={"user_id": _make_uuid()},
+                current_user={"user_id": _make_uuid(), "role": "admin"},
             )
 
         assert result["success"] is True
@@ -828,7 +828,7 @@ class TestDLQRetry:
                 await retry_dlq_item(
                     item_id=item.id,
                     db=mock_db,
-                    current_user={"user_id": _make_uuid()},
+                    current_user={"user_id": _make_uuid(), "role": "admin"},
                 )
 
         assert exc_info.value.status_code == 422
@@ -849,7 +849,7 @@ class TestDLQRetry:
             await retry_dlq_item(
                 item_id=_make_uuid(),
                 db=mock_db,
-                current_user={"user_id": _make_uuid()},
+                current_user={"user_id": _make_uuid(), "role": "admin"},
             )
 
         assert exc_info.value.status_code == 404
@@ -871,7 +871,7 @@ class TestDLQRetry:
             await retry_dlq_item(
                 item_id=item.id,
                 db=mock_db,
-                current_user={"user_id": _make_uuid()},
+                current_user={"user_id": _make_uuid(), "role": "admin"},
             )
 
         assert exc_info.value.status_code == 400
@@ -894,7 +894,7 @@ class TestDLQRetry:
             await retry_dlq_item(
                 item_id=item.id,
                 db=mock_db,
-                current_user={"user_id": _make_uuid()},
+                current_user={"user_id": _make_uuid(), "role": "admin"},
             )
 
         assert exc_info.value.status_code == 400
@@ -951,7 +951,7 @@ class TestRunRetry:
                     run_id=run.id,
                     background_tasks=mock_bg_tasks,
                     db=mock_db,
-                    current_user={"user_id": _make_uuid()},
+                    current_user={"user_id": _make_uuid(), "role": "admin"},
                 )
 
         assert result.status == "pending"
@@ -973,7 +973,7 @@ class TestRunRetry:
                     run_id=run.id,
                     background_tasks=MagicMock(),
                     db=mock_db,
-                    current_user={"user_id": _make_uuid()},
+                    current_user={"user_id": _make_uuid(), "role": "admin"},
                 )
 
         assert exc_info.value.status_code == 400
@@ -992,7 +992,7 @@ class TestRunRetry:
                     run_id=_make_uuid(),
                     background_tasks=MagicMock(),
                     db=mock_db,
-                    current_user={"user_id": _make_uuid()},
+                    current_user={"user_id": _make_uuid(), "role": "admin"},
                 )
 
         assert exc_info.value.status_code == 404
@@ -1035,7 +1035,7 @@ class TestRunReplay:
                     run_id=run.id,
                     background_tasks=mock_bg_tasks,
                     db=mock_db,
-                    current_user={"user_id": _make_uuid()},
+                    current_user={"user_id": _make_uuid(), "role": "admin"},
                 )
 
         assert result is new_run
@@ -1055,7 +1055,7 @@ class TestRunReplay:
                     run_id=_make_uuid(),
                     background_tasks=MagicMock(),
                     db=mock_db,
-                    current_user={"user_id": _make_uuid()},
+                    current_user={"user_id": _make_uuid(), "role": "admin"},
                 )
 
         assert exc_info.value.status_code == 404
@@ -1087,7 +1087,7 @@ class TestLineageAPI:
         result = await list_lineage_for_run(
             run_id=run_id,
             db=mock_db,
-            current_user={"user_id": _make_uuid()},
+            current_user={"user_id": _make_uuid(), "role": "admin"},
         )
 
         assert result["run_id"] == str(run_id)
@@ -1114,7 +1114,7 @@ class TestLineageAPI:
             graph_id=graph_id,
             limit=100,
             db=mock_db,
-            current_user={"user_id": _make_uuid()},
+            current_user={"user_id": _make_uuid(), "role": "admin"},
         )
 
         assert result["graph_id"] == str(graph_id)
@@ -1149,7 +1149,7 @@ class TestLineageAPI:
         result = await list_lineage_for_source(
             source_ref="s3://bucket/file.csv",
             db=mock_db,
-            current_user={"user_id": _make_uuid()},
+            current_user={"user_id": _make_uuid(), "role": "admin"},
         )
 
         assert result["source_ref"] == "s3://bucket/file.csv"
@@ -1173,7 +1173,7 @@ class TestLineageAPI:
         result = await list_provenance_for_run(
             run_id=run_id,
             db=mock_db,
-            current_user={"user_id": _make_uuid()},
+            current_user={"user_id": _make_uuid(), "role": "admin"},
         )
 
         assert result["run_id"] == str(run_id)
