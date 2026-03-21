@@ -1,0 +1,468 @@
+"""
+DAG Executor: main orchestrator for graph execution.
+Coordinates topological sort, parallel node execution, checkpointing, and error handling.
+"""
+import asyncio
+import logging
+import sys
+from typing import Any
+from uuid import UUID
+
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.engine.scheduler import topological_sort, validate_dag
+from app.engine.state import can_transition, ExecutionState
+from app.engine.runner import run_node_with_retry
+from app.engine.checkpoint import save_checkpoint
+from app.engine.retry import RetryConfig
+from app.models.execution import Run, RunStatus, CheckpointType
+
+logger = logging.getLogger(__name__)
+
+# Minimum number of nodes in a level to trigger parallel execution.
+# Small groups execute sequentially to avoid asyncio overhead.
+PARALLEL_THRESHOLD = 2
+
+
+class DAGExecutor:
+    """
+    Executes a graph DAG by:
+    1. Validating the DAG (no cycles)
+    2. Computing topological sort with parallel grouping
+    3. Executing each level sequentially, nodes within a level in parallel
+       (fallback to sequential for levels below PARALLEL_THRESHOLD)
+    4. Saving checkpoints after each level
+    5. Tracking lineage and costs
+    """
+
+    def __init__(self, db: AsyncSession, ws_manager=None):
+        self.db = db
+        self.ws_manager = ws_manager
+
+    async def execute(
+        self,
+        run: Run,
+        nodes_data: dict[str, dict],
+        edges_data: list[dict],
+        node_configs: dict[str, dict] | None = None,
+    ) -> Run:
+        """
+        Execute a graph run.
+
+        Args:
+            run: The Run record
+            nodes_data: Dict of node_id -> node definition
+            edges_data: List of edge definitions
+            node_configs: Dict of node_id -> configuration overrides
+
+        Returns:
+            Updated Run record with final status.
+        """
+        # Validate DAG
+        errors = validate_dag(nodes_data, edges_data)
+        if errors:
+            run.status = RunStatus.FAILED.value
+            run.error_message = f"Invalid DAG: {'; '.join(errors)}"
+            await self.db.commit()
+            await self._emit_event(run.id, "run_failed", {"errors": errors})
+            return run
+
+        # Update run status
+        run.status = RunStatus.RUNNING.value
+        await self.db.commit()
+        await self._emit_event(run.id, "run_started", {})
+
+        # Compute execution levels (topological sort)
+        try:
+            levels = topological_sort(nodes_data, edges_data)
+        except ValueError as e:
+            run.status = RunStatus.FAILED.value
+            run.error_message = str(e)
+            await self.db.commit()
+            await self._emit_event(run.id, "run_failed", {"error": str(e)})
+            return run
+
+        # Shared execution state
+        exec_state: dict[str, Any] = {"outputs": {}}
+
+        # Execute each level
+        for level_idx, level_nodes in enumerate(levels):
+            # Check if run is still running (could have been cancelled)
+            await self.db.refresh(run)
+            if run.status == RunStatus.CANCELLED.value:
+                break
+
+            logger.info(f"Executing level {level_idx} with {len(level_nodes)} nodes")
+
+            if len(level_nodes) >= PARALLEL_THRESHOLD:
+                # Parallel execution using asyncio.gather
+                results = await self._execute_level_parallel(
+                    run, level_idx, level_nodes, nodes_data, edges_data,
+                    node_configs, exec_state,
+                )
+                # Check for failures in parallel results
+                for node_id, run_node in results.items():
+                    if run_node.status == "failed":
+                        run.status = RunStatus.FAILED.value
+                        node_type = nodes_data[node_id].get("type", "unknown")
+                        run.error_message = (
+                            f"Node {node_id} ({node_type}) failed: {run_node.error_message}"
+                        )
+                        await self.db.commit()
+                        await self._emit_event(run.id, "run_failed", {
+                            "node_id": node_id,
+                            "error": run_node.error_message,
+                        })
+                        return run
+            else:
+                # Sequential fallback for small groups
+                result = await self._execute_level_sequential(
+                    run, level_idx, level_nodes, nodes_data, edges_data,
+                    node_configs, exec_state,
+                )
+                if result is not None:
+                    return result  # A failure occurred
+
+        # Mark run as completed if no failures
+        if run.status == RunStatus.RUNNING.value:
+            run.status = RunStatus.COMPLETED.value
+            await self.db.commit()
+            await self._emit_event(run.id, "run_completed", {})
+
+        return run
+
+    async def _execute_level_parallel(
+        self,
+        run: Run,
+        level_idx: int,
+        level_nodes: list[str],
+        nodes_data: dict[str, dict],
+        edges_data: list[dict],
+        node_configs: dict[str, dict] | None,
+        exec_state: dict[str, Any],
+    ) -> dict[str, Any]:
+        """
+        Execute all nodes in a level in parallel using asyncio.gather.
+
+        Returns a dict of node_id -> RunNode. Failed nodes will have
+        status='failed'.
+        """
+        async def _run_single(node_id: str) -> tuple[str, Any]:
+            """Execute a single node and return (node_id, RunNode)."""
+            await self.db.refresh(run)
+            if run.status == RunStatus.CANCELLED.value:
+                from app.models.execution import RunNode as RN, NodeStatus
+                return node_id, RN(
+                    run_id=run.id,
+                    node_id=node_id,
+                    status=NodeStatus.SKIPPED.value,
+                )
+
+            node_def = nodes_data[node_id]
+            node_type = node_def.get("type", node_def.get("node_type", "unknown"))
+            node_config = (node_configs or {}).get(node_id, {})
+
+            # Collect input data from predecessor outputs
+            input_data, lineage_edges = self._collect_inputs(node_id, edges_data, exec_state)
+
+            await self._emit_event(run.id, "node_started", {
+                "node_id": node_id,
+                "node_type": node_type,
+            })
+
+            # Run the node with retry support
+            run_node = await run_node_with_retry(
+                db=self.db,
+                run_id=run.id,
+                node_id=node_id,
+                node_type=node_type,
+                config=node_config,
+                input_data=input_data,
+                state=exec_state,
+            )
+
+            # Store output in execution state (only on success)
+            if run_node.output_data and run_node.status == "completed":
+                exec_state["outputs"][node_id] = run_node.output_data
+
+                # Record lineage for each edge that provided data
+                for edge_info in lineage_edges:
+                    await self._record_lineage(
+                        run_id=run.id,
+                        source_node_id=edge_info["source_node_id"],
+                        target_node_id=edge_info["target_node_id"],
+                        source_port=edge_info["source_port"],
+                        target_port=edge_info["target_port"],
+                        data=edge_info["data"],
+                    )
+
+            # Save post-execution checkpoint
+            await save_checkpoint(
+                db=self.db,
+                run_id=run.id,
+                node_id=node_id,
+                checkpoint_type=CheckpointType.POST_EXEC.value,
+                state_data={"level": level_idx},
+                node_output=run_node.output_data,
+            )
+
+            # Emit completion event
+            if run_node.status == "completed":
+                await self._emit_event(run.id, "node_completed", {
+                    "node_id": node_id,
+                    "node_type": node_type,
+                    "items_processed": run_node.items_processed,
+                    "duration_ms": run_node.duration_ms,
+                })
+            else:
+                # Record in DLQ
+                error_type = type(run_node.error_message).__name__ if run_node.error_message else "UnknownError"
+                await self._record_dlq(
+                    run_id=run.id,
+                    node_id=node_id,
+                    node_type=node_type,
+                    error_type=error_type,
+                    error_message=run_node.error_message,
+                    input_data=input_data,
+                    retry_count=run_node.attempt_count,
+                )
+                await self._emit_event(run.id, "node_failed", {
+                    "node_id": node_id,
+                    "node_type": node_type,
+                    "error": run_node.error_message,
+                })
+
+            return node_id, run_node
+
+        # Run all nodes in parallel
+        results_list = await asyncio.gather(
+            *[_run_single(node_id) for node_id in level_nodes],
+            return_exceptions=False,
+        )
+
+        return dict(results_list)
+
+    async def _execute_level_sequential(
+        self,
+        run: Run,
+        level_idx: int,
+        level_nodes: list[str],
+        nodes_data: dict[str, dict],
+        edges_data: list[dict],
+        node_configs: dict[str, dict] | None,
+        exec_state: dict[str, Any],
+    ) -> Run | None:
+        """
+        Execute nodes in a level sequentially (fallback for small groups).
+
+        Returns None on success, or the Run on failure (so the caller can
+        return it immediately).
+        """
+        for node_id in level_nodes:
+            await self.db.refresh(run)
+            if run.status == RunStatus.CANCELLED.value:
+                return None
+
+            node_def = nodes_data[node_id]
+            node_type = node_def.get("type", node_def.get("node_type", "unknown"))
+            node_config = (node_configs or {}).get(node_id, {})
+
+            # Collect input data from predecessor outputs
+            input_data, lineage_edges = self._collect_inputs(node_id, edges_data, exec_state)
+
+            await self._emit_event(run.id, "node_started", {
+                "node_id": node_id,
+                "node_type": node_type,
+            })
+
+            # Run the node with retry support
+            run_node = await run_node_with_retry(
+                db=self.db,
+                run_id=run.id,
+                node_id=node_id,
+                node_type=node_type,
+                config=node_config,
+                input_data=input_data,
+                state=exec_state,
+            )
+
+            # Store output in execution state
+            if run_node.output_data:
+                exec_state["outputs"][node_id] = run_node.output_data
+
+            # Record lineage on success
+            if run_node.output_data and run_node.status == "completed":
+                for edge_info in lineage_edges:
+                    await self._record_lineage(
+                        run_id=run.id,
+                        source_node_id=edge_info["source_node_id"],
+                        target_node_id=edge_info["target_node_id"],
+                        source_port=edge_info["source_port"],
+                        target_port=edge_info["target_port"],
+                        data=edge_info["data"],
+                    )
+
+            # Save post-execution checkpoint
+            await save_checkpoint(
+                db=self.db,
+                run_id=run.id,
+                node_id=node_id,
+                checkpoint_type=CheckpointType.POST_EXEC.value,
+                state_data={"level": level_idx},
+                node_output=run_node.output_data,
+            )
+
+            # Emit completion event
+            if run_node.status == "completed":
+                await self._emit_event(run.id, "node_completed", {
+                    "node_id": node_id,
+                    "node_type": node_type,
+                    "items_processed": run_node.items_processed,
+                    "duration_ms": run_node.duration_ms,
+                })
+            else:
+                # Record in DLQ
+                error_type = type(run_node.error_message).__name__ if run_node.error_message else "UnknownError"
+                await self._record_dlq(
+                    run_id=run.id,
+                    node_id=node_id,
+                    node_type=node_type,
+                    error_type=error_type,
+                    error_message=run_node.error_message,
+                    input_data=input_data,
+                    retry_count=run_node.attempt_count,
+                )
+                await self._emit_event(run.id, "node_failed", {
+                    "node_id": node_id,
+                    "node_type": node_type,
+                    "error": run_node.error_message,
+                })
+                # Fail the entire run on node failure
+                run.status = RunStatus.FAILED.value
+                run.error_message = (
+                    f"Node {node_id} ({node_type}) failed: {run_node.error_message}"
+                )
+                await self.db.commit()
+                await self._emit_event(run.id, "run_failed", {
+                    "node_id": node_id,
+                    "error": run_node.error_message,
+                })
+                return run
+
+        return None
+
+    def _collect_inputs(
+        self,
+        node_id: str,
+        edges: list[dict],
+        exec_state: dict[str, Any],
+    ) -> tuple[dict[str, Any], list[dict]]:
+        """
+        Collect input data for a node from its predecessor outputs.
+
+        Returns:
+            Tuple of (inputs dict, list of edge info dicts for lineage recording).
+            Each edge info dict has: source_node_id, target_node_id, source_port,
+            target_port, data (the actual data that was passed).
+        """
+        inputs: dict[str, Any] = {}
+        lineage_edges: list[dict] = []
+        for edge in edges:
+            target = edge.get("target", edge.get("target_id"))
+            source = edge.get("source", edge.get("source_id"))
+            source_port = edge.get("source_port", "output")
+            target_port = edge.get("target_port", "input")
+
+            if target == node_id and source in exec_state.get("outputs", {}):
+                source_output = exec_state["outputs"][source]
+                if isinstance(source_output, dict):
+                    data = source_output.get(source_port, source_output)
+                else:
+                    data = source_output
+                inputs[target_port] = data
+                lineage_edges.append({
+                    "source_node_id": source,
+                    "target_node_id": node_id,
+                    "source_port": source_port,
+                    "target_port": target_port,
+                    "data": data,
+                })
+        return inputs, lineage_edges
+
+    async def _record_lineage(
+        self,
+        run_id: UUID,
+        source_node_id: str,
+        target_node_id: str,
+        source_port: str,
+        target_port: str,
+        data: Any,
+    ) -> None:
+        """Record a lineage entry for data flowing from source to target node."""
+        try:
+            from app.models.lineage import DataLineage
+            import json
+
+            # Calculate approximate metrics
+            items_count = None
+            items_sample = None
+            bytes_transferred = None
+
+            if isinstance(data, (list, tuple)):
+                items_count = len(data)
+                items_sample = data[:3] if data else None
+                bytes_transferred = len(json.dumps(data[:3], default=str))
+            elif isinstance(data, dict):
+                items_count = len(data)
+                items_sample = dict(list(data.items())[:3])
+                bytes_transferred = len(json.dumps(items_sample, default=str))
+            elif data is not None:
+                items_count = 1
+                bytes_transferred = sys.getsizeof(data)
+
+            lineage_entry = DataLineage(
+                run_id=run_id,
+                source_node_id=source_node_id,
+                target_node_id=target_node_id,
+                source_port=source_port,
+                target_port=target_port,
+                items_count=items_count,
+                items_sample=items_sample,
+                bytes_transferred=bytes_transferred,
+            )
+            self.db.add(lineage_entry)
+            await self.db.commit()
+        except Exception as e:
+            logger.warning(f"Failed to record lineage: {e}")
+
+    async def _record_dlq(
+        self,
+        run_id: UUID,
+        node_id: str,
+        node_type: str,
+        error_type: str,
+        error_message: str,
+        input_data: dict | None,
+        retry_count: int,
+    ) -> None:
+        """Record a failed node in the dead letter queue."""
+        try:
+            from app.engine.dead_letter import add_to_dlq
+
+            await add_to_dlq(
+                db=self.db,
+                run_id=run_id,
+                node_id=node_id,
+                node_type=node_type,
+                error_type=error_type,
+                error_message=error_message,
+                input_data=input_data,
+                retry_count=retry_count,
+            )
+        except Exception as e:
+            logger.warning(f"Failed to record DLQ entry: {e}")
+
+    async def _emit_event(self, run_id: UUID, event_type: str, data: dict) -> None:
+        """Emit a WebSocket event if manager is available."""
+        if self.ws_manager:
+            await self.ws_manager.broadcast(run_id, event_type, data)

@@ -1,0 +1,137 @@
+@import 'tailwindcss';
+
+/* Svelte Flow dark theme overrides */
+@layer base {
+  :root {
+    --color-bg-primary: #0a0a0f;
+    --color-bg-secondary: #111118;
+    --color-bg-tertiary: #1a1a24;
+    --color-border: #2a2a3a;
+    --color-text-primary: #e4e4e7;
+    --color-text-secondary: #a1a1aa;
+    --color-accent: #6366f1;
+  }
+}
+
+/* Svelte Flow customizations */
+.react-flow__background {
+  background-color: var(--color-bg-primary) !important;
+}
+
+.react-flow__minimap {
+  background-color: var(--color-bg-secondary) !important;
+  border: 1px solid var(--color-border) !important;
+  border-radius: 8px !important;
+}
+
+.react-flow__controls {
+  border: 1px solid var(--color-border) !important;
+  border-radius: 8px !important;
+  overflow: hidden;
+}
+
+.react-flow__controls-button {
+  background-color: var(--color-bg-secondary) !important;
+  color: var(--color-text-primary) !important;
+  border-bottom: 1px solid var(--color-border) !important;
+}
+
+.react-flow__controls-button:hover {
+  background-color: var(--color-bg-tertiary) !important;
+}
+
+.react-flow__edge-path {
+  stroke: #6366f1;
+  stroke-width: 2;
+}
+
+.react-flow__connection-line {
+  stroke: #6366f1;
+  stroke-width: 2;
+  stroke-dasharray: 5;
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--color-bg-primary);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--color-border);
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #3a3a4a;
+}
+
+/* Node category colors */
+.node-category-source {
+  border-color: #3b82f6;
+  background: linear-gradient(135deg, #1e3a5f 0%, #0f1b2d 100%);
+}
+
+.node-category-processing {
+  border-color: #22c55e;
+  background: linear-gradient(135deg, #1a3a2a 0%, #0f1b18 100%);
+}
+
+.node-category-ai {
+  border-color: #a855f7;
+  background: linear-gradient(135deg, #2d1a4e 0%, #180f2d 100%);
+}
+
+.node-category-output {
+  border-color: #f97316;
+  background: linear-gradient(135deg, #3d2a1a 0%, #1f150f 100%);
+}
+
+/* Node status indicators */
+.node-status-idle {
+  opacity: 1;
+}
+
+.node-status-running {
+  animation: pulse-border 2s ease-in-out infinite;
+}
+
+.node-status-completed {
+  border-color: #22c55e !important;
+}
+
+.node-status-failed {
+  border-color: #ef4444 !important;
+}
+
+.node-status-cancelled {
+  border-color: #6b7280 !important;
+  opacity: 0.7;
+}
+
+@keyframes pulse-border {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(99, 102, 241, 0.4); }
+  50% { box-shadow: 0 0 0 4px rgba(99, 102, 241, 0.1); }
+}
+
+/* Handle styles */
+.svelte-flow__handle {
+  width: 10px !important;
+  height: 10px !important;
+  border: 2px solid #6366f1 !important;
+  background: #1a1a24 !important;
+}
+
+.svelte-flow__handle-connecting {
+  background: #6366f1 !important;
+}
+
+/* Drag overlay */
+.dragging-node {
+  opacity: 0.8;
+  cursor: grabbing;
+}

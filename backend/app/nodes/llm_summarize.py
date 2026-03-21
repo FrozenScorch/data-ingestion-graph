@@ -1,0 +1,173 @@
+"""
+LLMSummarize node: text summarization using LLM via OpenRouter.
+
+Takes text input and produces a concise summary using the configured
+LLM model and prompt.
+"""
+import json
+import logging
+from typing import Any
+
+from app.nodes.base import BaseNode, NodeContext, NodeResult, PortDef, PortDataType
+from app.services.openrouter_service import openrouter_service
+
+logger = logging.getLogger(__name__)
+
+
+class LLMSummarizeNode(BaseNode):
+    @property
+    def node_type(self) -> str:
+        return "llm_summarize"
+
+    @property
+    def display_name(self) -> str:
+        return "LLM Summarize"
+
+    @property
+    def category(self) -> str:
+        return "ai"
+
+    @property
+    def description(self) -> str:
+        return "Summarize text using an LLM"
+
+    @property
+    def inputs(self) -> list[PortDef]:
+        return [PortDef(name="text", data_type=PortDataType.TEXT, required=True, label="Input Text")]
+
+    @property
+    def outputs(self) -> list[PortDef]:
+        return [PortDef(name="text", data_type=PortDataType.TEXT, label="Summary")]
+
+    @property
+    def config_schema(self) -> dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "model": {
+                    "type": "string",
+                    "description": "Chat model ID (sorted by cost in UI)",
+                },
+                "prompt": {
+                    "type": "string",
+                    "default": "Summarize the following text concisely:",
+                    "description": "Summarization prompt",
+                },
+                "max_tokens": {
+                    "type": "integer",
+                    "default": 512,
+                    "minimum": 1,
+                    "maximum": 16384,
+                    "description": "Maximum tokens in the summary response",
+                },
+                "temperature": {
+                    "type": "number",
+                    "default": 0.3,
+                    "minimum": 0.0,
+                    "maximum": 2.0,
+                    "description": "Temperature (0.3 default for balanced creativity)",
+                },
+            },
+            "required": ["model"],
+        }
+
+    async def execute(self, context: NodeContext) -> NodeResult:
+        """
+        Summarize text using an LLM.
+
+        Expects context.input_data["text"] to be a string.
+        Uses config["prompt"] as the system prompt for summarization.
+
+        Returns: {summary: "...", model, tokens_used}
+        """
+        config = context.config
+        model = config.get("model", "")
+        prompt = config.get("prompt", "Summarize the following text concisely:")
+        max_tokens = config.get("max_tokens", 512)
+        temperature = config.get("temperature", 0.3)
+
+        input_text = context.input_data.get("text", "")
+        if not input_text:
+            return NodeResult(
+                success=False,
+                output_data={"text": ""},
+                items_processed=0,
+                error_message="No input text provided",
+            )
+
+        messages = [
+            {"role": "system", "content": prompt},
+            {"role": "user", "content": input_text},
+        ]
+
+        try:
+            response = await openrouter_service.chat_completion(
+                model=model,
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
+
+            # Extract response text
+            choices = response.get("choices", [])
+            if not choices:
+                return NodeResult(
+                    success=False,
+                    output_data={"text": ""},
+                    items_processed=0,
+                    error_message="LLM returned no choices",
+                    metadata={"model": model},
+                )
+
+            summary = choices[0].get("message", {}).get("content", "")
+
+            # Extract usage
+            usage = response.get("usage", {})
+            input_tokens = usage.get("prompt_tokens", 0)
+            output_tokens = usage.get("completion_tokens", 0)
+            total_tokens = usage.get("total_tokens", input_tokens + output_tokens)
+
+            # Record cost
+            cost_info = openrouter_service.calculate_cost(model, input_tokens, output_tokens)
+
+            return NodeResult(
+                success=True,
+                output_data={"text": summary},
+                items_processed=1,
+                metadata={
+                    "summary": summary,
+                    "model": model,
+                    "tokens_used": {
+                        "input_tokens": input_tokens,
+                        "output_tokens": output_tokens,
+                        "total_tokens": total_tokens,
+                    },
+                    "cost_usd": cost_info["total_cost_usd"],
+                    "input_cost_usd": cost_info["input_cost_usd"],
+                    "output_cost_usd": cost_info["output_cost_usd"],
+                },
+            )
+
+        except ValueError as e:
+            # Free model validation error
+            return NodeResult(
+                success=False,
+                output_data={"text": ""},
+                items_processed=0,
+                error_message=str(e),
+                metadata={"model": model},
+            )
+        except Exception as e:
+            logger.error(f"LLM summarize failed: {e}")
+            return NodeResult(
+                success=False,
+                output_data={"text": ""},
+                items_processed=0,
+                error_message=f"LLM summarize failed: {str(e)}",
+                metadata={"model": model},
+            )
+
+
+def register():
+    from app.nodes.registry import register_node
+    register_node(LLMSummarizeNode())
