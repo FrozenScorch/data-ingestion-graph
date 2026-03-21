@@ -27,10 +27,11 @@ class User(UUIDMixin, TimestampMixin, Base):
     role: Mapped[str] = mapped_column(String(50), default=UserRole.VIEWER.value, nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
-    # Relationships
-    graphs = relationship("Graph", back_populates="owner", lazy="selectin")
-    api_keys = relationship("ApiKey", back_populates="user", lazy="selectin")
-    runs = relationship("Run", back_populates="triggered_by_user", foreign_keys="Run.triggered_by")
+    # Relationships -- use lazy="noload" to prevent N+1 queries.
+    # Use explicit selectinload() in queries that need these.
+    graphs = relationship("Graph", back_populates="owner", lazy="noload")
+    api_keys = relationship("ApiKey", back_populates="user", lazy="noload")
+    runs = relationship("Run", back_populates="triggered_by_user", foreign_keys="Run.triggered_by", lazy="noload")
 
     def __repr__(self) -> str:
         return f"<User id={self.id} username={self.username} role={self.role}>"

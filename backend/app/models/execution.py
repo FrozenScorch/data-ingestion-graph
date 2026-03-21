@@ -4,7 +4,7 @@ Execution models: runs, run_nodes, checkpoints, execution_logs, run_costs.
 import enum
 import uuid
 from datetime import datetime
-from sqlalchemy import String, Integer, Float, DateTime, ForeignKey, Text
+from sqlalchemy import String, Integer, Float, DateTime, ForeignKey, Text, Index
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -50,6 +50,9 @@ class LogLevel(str, enum.Enum):
 
 class Run(UUIDMixin, TimestampMixin, Base):
     __tablename__ = "runs"
+    __table_args__ = (
+        Index("ix_runs_graph_id_status", "graph_id", "status"),
+    )
 
     graph_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("graphs.id"), nullable=False)
     graph_version_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("graph_versions.id"), nullable=True)
@@ -58,16 +61,17 @@ class Run(UUIDMixin, TimestampMixin, Base):
     status: Mapped[str] = mapped_column(String(50), default=RunStatus.PENDING.value, nullable=False)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
 
-    # Relationships
-    graph = relationship("Graph", back_populates="runs")
-    graph_version = relationship("GraphVersion", back_populates="runs")
-    triggered_by_user = relationship("User", back_populates="runs", foreign_keys=[triggered_by])
-    run_nodes = relationship("RunNode", back_populates="run", lazy="selectin")
-    checkpoints = relationship("Checkpoint", back_populates="run", lazy="selectin")
-    execution_logs = relationship("ExecutionLog", back_populates="run", lazy="selectin")
-    run_costs = relationship("RunCost", back_populates="run", lazy="selectin")
-    data_lineage = relationship("DataLineage", back_populates="run", lazy="selectin")
-    provenance = relationship("Provenance", back_populates="run", lazy="selectin")
+    # Relationships -- all use lazy="noload" to prevent N+1 queries.
+    # Use explicit selectinload() in queries that need these.
+    graph = relationship("Graph", back_populates="runs", lazy="noload")
+    graph_version = relationship("GraphVersion", back_populates="runs", lazy="noload")
+    triggered_by_user = relationship("User", back_populates="runs", foreign_keys=[triggered_by], lazy="noload")
+    run_nodes = relationship("RunNode", back_populates="run", lazy="noload")
+    checkpoints = relationship("Checkpoint", back_populates="run", lazy="noload")
+    execution_logs = relationship("ExecutionLog", back_populates="run", lazy="noload")
+    run_costs = relationship("RunCost", back_populates="run", lazy="noload")
+    data_lineage = relationship("DataLineage", back_populates="run", lazy="noload")
+    provenance = relationship("Provenance", back_populates="run", lazy="noload")
 
     def __repr__(self) -> str:
         return f"<Run id={self.id} status={self.status}>"
@@ -75,6 +79,9 @@ class Run(UUIDMixin, TimestampMixin, Base):
 
 class RunNode(UUIDMixin, TimestampMixin, Base):
     __tablename__ = "run_nodes"
+    __table_args__ = (
+        Index("ix_run_nodes_run_id_status", "run_id", "status"),
+    )
 
     run_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("runs.id"), nullable=False)
     node_id: Mapped[str] = mapped_column(String(255), nullable=False)
@@ -118,6 +125,9 @@ class Checkpoint(UUIDMixin, Base):
 
 class ExecutionLog(UUIDMixin, Base):
     __tablename__ = "execution_logs"
+    __table_args__ = (
+        Index("ix_execution_logs_run_id_level", "run_id", "level"),
+    )
 
     run_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("runs.id"), nullable=False)
     run_node_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("run_nodes.id"), nullable=True)
@@ -140,6 +150,9 @@ class ExecutionLog(UUIDMixin, Base):
 
 class RunCost(UUIDMixin, Base):
     __tablename__ = "run_costs"
+    __table_args__ = (
+        Index("ix_run_costs_run_id", "run_id"),
+    )
 
     run_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("runs.id"), nullable=False)
     run_node_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("run_nodes.id"), nullable=True)

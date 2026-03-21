@@ -8,6 +8,7 @@ from uuid import UUID
 
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.models.execution import Run, RunStatus, TriggerType
 from app.models.graph import GraphVersion
@@ -36,11 +37,23 @@ async def create_run(
     return run
 
 
-async def get_run(db: AsyncSession, run_id: UUID) -> Optional[Run]:
-    """Get a run by ID with relationships."""
-    result = await db.execute(
-        select(Run).where(Run.id == run_id)
-    )
+async def get_run(
+    db: AsyncSession,
+    run_id: UUID,
+    *,
+    load_nodes: bool = False,
+) -> Optional[Run]:
+    """Get a run by ID with optional relationship loading.
+
+    Args:
+        db: Async database session.
+        run_id: UUID of the run.
+        load_nodes: If True, eagerly load run_nodes (used by detail endpoints).
+    """
+    stmt = select(Run).where(Run.id == run_id)
+    if load_nodes:
+        stmt = stmt.options(selectinload(Run.run_nodes))
+    result = await db.execute(stmt)
     return result.scalar_one_or_none()
 
 

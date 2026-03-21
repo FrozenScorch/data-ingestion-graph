@@ -119,7 +119,7 @@ async def get_run_detail(
     current_user: dict = Depends(get_current_user),
 ):
     """Get detailed run information including node statuses."""
-    run = await get_run(db, run_id)
+    run = await get_run(db, run_id, load_nodes=True)
     if not run:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found")
 

@@ -4,7 +4,7 @@ Graph, graph version, and connection models.
 import enum
 import uuid
 from datetime import datetime
-from sqlalchemy import String, Boolean, DateTime, ForeignKey, Text, Integer, ARRAY
+from sqlalchemy import String, Boolean, DateTime, ForeignKey, Text, Integer, ARRAY, Index, UniqueConstraint
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -26,6 +26,9 @@ class ConnectionType(str, enum.Enum):
 
 class Graph(UUIDMixin, TimestampMixin, Base):
     __tablename__ = "graphs"
+    __table_args__ = (
+        Index("ix_graphs_owner_id_status", "owner_id", "status"),
+    )
 
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -33,10 +36,11 @@ class Graph(UUIDMixin, TimestampMixin, Base):
     status: Mapped[str] = mapped_column(String(50), default=GraphStatus.DRAFT.value, nullable=False)
     tags: Mapped[list[str] | None] = mapped_column(ARRAY(String), nullable=True, default=list)
 
-    # Relationships
-    owner = relationship("User", back_populates="graphs")
-    versions = relationship("GraphVersion", back_populates="graph", lazy="selectin", order_by="GraphVersion.version_number.desc()")
-    runs = relationship("Run", back_populates="graph", lazy="selectin")
+    # Relationships -- use lazy="noload" to prevent N+1 queries.
+    # Use explicit selectinload() in queries that need these.
+    owner = relationship("User", back_populates="graphs", lazy="noload")
+    versions = relationship("GraphVersion", back_populates="graph", lazy="noload", order_by="GraphVersion.version_number.desc()")
+    runs = relationship("Run", back_populates="graph", lazy="noload")
 
     def __repr__(self) -> str:
         return f"<Graph id={self.id} name={self.name} status={self.status}>"
@@ -44,6 +48,9 @@ class Graph(UUIDMixin, TimestampMixin, Base):
 
 class GraphVersion(UUIDMixin, TimestampMixin, Base):
     __tablename__ = "graph_versions"
+    __table_args__ = (
+        UniqueConstraint("graph_id", "version_number", name="uq_graph_version"),
+    )
 
     graph_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("graphs.id"), nullable=False)
     version_number: Mapped[int] = mapped_column(Integer, nullable=False)

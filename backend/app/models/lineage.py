@@ -2,7 +2,7 @@
 Data lineage and provenance models.
 """
 import uuid
-from sqlalchemy import String, Integer, BigInteger, Text, ForeignKey
+from sqlalchemy import String, Integer, BigInteger, Text, ForeignKey, Index
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -11,6 +11,10 @@ from app.models.base import Base, UUIDMixin
 
 class DataLineage(UUIDMixin, Base):
     __tablename__ = "data_lineage"
+    __table_args__ = (
+        Index("ix_data_lineage_run_id", "run_id"),
+        Index("ix_data_lineage_source_target", "source_node_id", "target_node_id"),
+    )
 
     run_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("runs.id"), nullable=False,
