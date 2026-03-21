@@ -1,11 +1,11 @@
-import { execution } from './execution.js';
-import { graph } from './graph.js';
+import { execution } from './execution.svelte.js';
+import { graph } from './graph.svelte.js';
 
-export { auth } from './auth.js';
-export { graph } from './graph.js';
-export { execution } from './execution.js';
-export { nodeRegistry } from './nodeRegistry.js';
-export { openrouter } from './openrouter.js';
+export { auth } from './auth.svelte.js';
+export { graph } from './graph.svelte.js';
+export { execution } from './execution.svelte.js';
+export { nodeRegistry } from './nodeRegistry.svelte.js';
+export { openrouter } from './openrouter.svelte.js';
 
 /**
  * Clear all non-auth stores. Called on logout to prevent stale state
