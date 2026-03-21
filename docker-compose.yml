@@ -11,10 +11,11 @@ services:
       POSTGRES_PASSWORD: ingestion_password
       POSTGRES_DB: ingestion_db
       POSTGRES_ENCODING: UTF8
+      PGPORT: ${POSTGRES_PORT:-5433}
     volumes:
       - ingestion_postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ingestion -d ingestion_db"]
+      test: ["CMD-SHELL", "pg_isready -U ingestion -d ingestion_db -p ${POSTGRES_PORT:-5433}"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -26,11 +27,11 @@ services:
     image: redis:7-alpine
     container_name: ingestion-redis
     restart: unless-stopped
-    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD:-redis_secret_change_me}
+    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD:-redis_secret_change_me} --port ${REDIS_PORT:-6380}
     volumes:
       - ingestion_redis_data:/data
     healthcheck:
-      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-redis_secret_change_me}", "ping"]
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-redis_secret_change_me}", "-p", "${REDIS_PORT:-6380}", "ping"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -46,13 +47,13 @@ services:
     restart: unless-stopped
     environment:
       # Database
-      DATABASE_URL: postgresql+asyncpg://ingestion:ingestion_password@localhost:5432/ingestion_db
+      DATABASE_URL: postgresql+asyncpg://ingestion:ingestion_password@localhost:${POSTGRES_PORT:-5433}/ingestion_db
       DATABASE_POOL_SIZE: 10
       DATABASE_MAX_OVERFLOW: 20
       DATABASE_ECHO: "false"
 
       # Redis
-      REDIS_URL: redis://:${REDIS_PASSWORD:-redis_secret_change_me}@localhost:6379/0
+      REDIS_URL: redis://:${REDIS_PASSWORD:-redis_secret_change_me}@localhost:${REDIS_PORT:-6380}/0
       REDIS_PASSWORD: ${REDIS_PASSWORD:-redis_secret_change_me}
 
       # Auth
