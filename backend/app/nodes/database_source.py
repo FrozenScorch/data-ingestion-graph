@@ -51,12 +51,18 @@ class DatabaseSourceNode(BaseNode):
         return {
             "type": "object",
             "properties": {
+                "host": {"type": "string", "default": "localhost", "description": "Database host"},
+                "port": {"type": "integer", "default": 5432, "description": "Database port"},
+                "database": {"type": "string", "description": "Database name"},
+                "username": {"type": "string", "default": "postgres", "description": "Database username"},
+                "password": {"type": "string", "format": "password", "description": "Database password"},
                 "connection_id": {
                     "type": "string",
                     "description": "Reference to a saved connection ID",
                 },
                 "query": {
                     "type": "string",
+                    "format": "textarea",
                     "default": "SELECT * FROM table LIMIT 1000",
                     "description": "SQL query to execute (SELECT only)",
                 },
@@ -67,7 +73,7 @@ class DatabaseSourceNode(BaseNode):
                     "description": "Number of rows per batch",
                 },
             },
-            "required": ["connection_id", "query"],
+            "required": ["query"],
         }
 
     @staticmethod
@@ -92,8 +98,17 @@ class DatabaseSourceNode(BaseNode):
         config = context.config
         connection_id = config.get("connection_id", "")
 
-        # Check if a saved connection was loaded into state by the engine
+        # Validate: either a connection_id or inline host+database must be provided
         connections = context.state.get("connections", {})
+        has_connection = connection_id and connection_id in connections
+        has_inline = config.get("host") and config.get("database")
+        if not has_connection and not has_inline:
+            raise ValueError(
+                "Either a 'connection_id' referencing a saved connection, "
+                "or inline 'host' and 'database' fields must be provided."
+            )
+
+        # Check if a saved connection was loaded into state by the engine
         if connection_id in connections:
             conn_config = connections[connection_id]
         else:

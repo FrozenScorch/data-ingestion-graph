@@ -15,7 +15,8 @@
 
   let {
     data,
-    id
+    id,
+    type: nodeType
   }: NodeProps & { data: PipelineNodeData } = $props();
 
   let category = $derived(data.category || 'processing');
@@ -76,9 +77,13 @@
     if (config.parser_type) return config.parser_type as string;
     if (config.condition) return 'Filter';
     if (config.expression) return 'Transform';
+    if (nodeType === 'recursive_splitter' && config.chunk_size) return `Recursive (${config.chunk_size} chars)`;
     if (config.chunk_size) return `${config.chunk_size} chunks`;
     if (config.url) return config.url as string;
     if (config.table) return config.table as string;
+    if (config.identifier) return `${config.filing_type || ''} ${config.identifier}`;
+    if (config.tag_priority) return `Tags: ${config.tag_priority}`;
+    if (config.similarity_threshold !== undefined) return `Semantic (${config.similarity_threshold})`;
     return '';
   }
 </script>

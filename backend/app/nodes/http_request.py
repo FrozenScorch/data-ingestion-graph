@@ -1,9 +1,13 @@
 """
 HttpRequest node: send HTTP requests.
 """
+import json
+import logging
 from typing import Any
 
 from app.nodes.base import BaseNode, NodeContext, NodeResult, PortDef, PortDataType
+
+logger = logging.getLogger(__name__)
 
 
 class HttpRequestNode(BaseNode):
@@ -38,13 +42,35 @@ class HttpRequestNode(BaseNode):
             "properties": {
                 "url": {"type": "string", "format": "uri"},
                 "method": {"type": "string", "enum": ["GET", "POST", "PUT", "DELETE", "PATCH"], "default": "POST"},
-                "headers": {"type": "object", "default": {}},
-                "body": {"type": ["string", "object"], "description": "Request body template"},
+                "headers": {"type": "string", "format": "textarea", "default": "{}", "description": "HTTP headers as JSON object"},
+                "body": {"type": "string", "format": "textarea", "description": "Request body (text or JSON)"},
             },
             "required": ["url"],
         }
 
+    @staticmethod
+    def _parse_json_field(value: Any) -> Any:
+        """Try to parse a string value as JSON. Returns the original value if parsing fails."""
+        if isinstance(value, str):
+            try:
+                return json.loads(value)
+            except (json.JSONDecodeError, ValueError):
+                return value
+        return value
+
     async def execute(self, context: NodeContext) -> NodeResult:
+        config = context.config
+
+        # Parse headers: if string, try JSON parse; fall back to plain string
+        headers = self._parse_json_field(config.get("headers", "{}"))
+        if isinstance(headers, str):
+            headers = {}
+            logger.warning("headers could not be parsed as JSON, using empty dict")
+
+        # Parse body: if string, try JSON parse; fall back to plain string
+        body = self._parse_json_field(config.get("body"))
+
+        # TODO: implement actual HTTP request logic using headers and body
         return NodeResult(success=True, output_data={"json": {}}, items_processed=0)
 
 

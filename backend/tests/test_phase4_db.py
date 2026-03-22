@@ -97,7 +97,7 @@ class TestDatabaseSourceNode:
         assert "connection_id" in schema["properties"]
         assert "query" in schema["properties"]
         assert "batch_size" in schema["properties"]
-        assert "connection_id" in schema["required"]
+        assert "connection_id" in schema["properties"]
         assert "query" in schema["required"]
 
     @pytest.mark.asyncio
@@ -243,11 +243,18 @@ class TestDatabaseSourceNode:
         """Test config validation."""
         node = DatabaseSourceNode()
         errors = await node.validate_config({})
-        assert "connection_id" in str(errors)
         assert "query" in str(errors)
 
         errors = await node.validate_config({
             "connection_id": "conn-1",
+            "query": "SELECT 1",
+        })
+        assert errors == []
+
+        # Inline connection fields also work
+        errors = await node.validate_config({
+            "host": "localhost",
+            "database": "mydb",
             "query": "SELECT 1",
         })
         assert errors == []

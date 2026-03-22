@@ -36,11 +36,12 @@ class DiscordSourceNode(BaseNode):
         return {
             "type": "object",
             "properties": {
+                "bot_token": {"type": "string", "format": "password", "description": "Discord bot token"},
                 "connection_id": {"type": "string"},
                 "channel_id": {"type": "string"},
                 "message_limit": {"type": "integer", "default": 100},
             },
-            "required": ["connection_id", "channel_id"],
+            "required": ["bot_token", "channel_id"],
         }
 
     async def execute(self, context: NodeContext) -> NodeResult:

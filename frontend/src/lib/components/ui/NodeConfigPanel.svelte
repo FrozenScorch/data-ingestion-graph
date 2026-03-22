@@ -73,7 +73,7 @@
         {@const required = nodeType.config_schema.required?.includes(key)}
         <div>
           <!-- svelte-ignore a11y_label_has_associated_control -->
-          <label class="block text-xs text-gray-400 mb-1">
+          <label class="block text-xs text-gray-400 mb-1" title={field.description}>
             {field.description || key.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase())}
             {#if required}
               <span class="text-red-400">*</span>
@@ -101,6 +101,32 @@
               label=""
               onValueChange={(v: string) => updateConfig(key, v)}
             />
+
+          {:else if field.type === 'string' && field.format === 'password'}
+            <input
+              type="password"
+              value={(config[key] as string) || (field.default as string) || ''}
+              oninput={(e) => updateConfig(key, (e.target as HTMLInputElement).value)}
+              class="w-full px-3 py-1.5 bg-gray-800 border border-gray-700 rounded-lg text-sm text-gray-200 placeholder-gray-500 focus:outline-none focus:border-indigo-500"
+              placeholder={field.description || key}
+            />
+
+          {:else if field.type === 'string' && field.format === 'date'}
+            <input
+              type="date"
+              value={(config[key] as string) || (field.default as string) || ''}
+              oninput={(e) => updateConfig(key, (e.target as HTMLInputElement).value)}
+              class="w-full px-3 py-1.5 bg-gray-800 border border-gray-700 rounded-lg text-sm text-gray-200 focus:outline-none focus:border-indigo-500"
+            />
+
+          {:else if field.type === 'string' && field.format === 'textarea'}
+            <textarea
+              rows="4"
+              value={(config[key] as string) || (field.default as string) || ''}
+              oninput={(e) => updateConfig(key, (e.target as HTMLTextAreaElement).value)}
+              class="w-full px-3 py-1.5 bg-gray-800 border border-gray-700 rounded-lg text-sm text-gray-200 placeholder-gray-500 focus:outline-none focus:border-indigo-500 resize-y"
+              placeholder={field.description || key}
+            ></textarea>
 
           {:else if field.type === 'string'}
             <input
