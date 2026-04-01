@@ -39,7 +39,7 @@
       <dl class="space-y-3">
         <div>
           <dt class="text-xs text-gray-500">Backend URL</dt>
-          <dd class="text-sm text-gray-200 font-mono">http://localhost:8040</dd>
+          <dd class="text-sm text-gray-200 font-mono">{import.meta.env.VITE_API_URL || `http://localhost:8040`}</dd>
         </div>
         <div>
           <dt class="text-xs text-gray-500">AI Provider</dt>

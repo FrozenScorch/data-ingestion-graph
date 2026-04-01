@@ -45,4 +45,3 @@ Visual, node-based data ingestion pipeline builder. Users construct DAGs on a Sv
 - Always check existing comments and unit tests before modifying code
 - Only modify code necessary to fix bugs or implement features
 - If you don't understand the entire code, explore the codebase first
-- use port 8000 for file website. do not use other ports for a file share based projects. state this assumption when used.
