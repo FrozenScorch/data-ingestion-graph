@@ -34,11 +34,27 @@
     graph.selectNode(null);
   }
 
-  // Keyboard shortcut for save
+  function handleDeleteSelected() {
+    if (graph.selectedNodeId) {
+      graph.removeNode(graph.selectedNodeId);
+      showConfigPanel = false;
+    }
+  }
+
+  // Keyboard shortcut for save and delete
   function handleKeydown(e: KeyboardEvent) {
+    // Don't handle shortcuts when typing in an input/textarea/select
+    const tag = (e.target as HTMLElement).tagName;
+    if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+
     if ((e.ctrlKey || e.metaKey) && e.key === 's') {
       e.preventDefault();
       graph.saveVersion(graphId);
+    }
+
+    if (e.key === 'Delete' || e.key === 'Backspace') {
+      e.preventDefault();
+      handleDeleteSelected();
     }
   }
 </script>
@@ -65,7 +81,7 @@
       <!-- Config Panel (right sidebar, conditionally shown) -->
       {#if showConfigPanel}
         <div class="w-72 overflow-hidden shrink-0">
-          <NodeConfigPanel onClose={handleCloseConfig} />
+          <NodeConfigPanel onClose={handleCloseConfig} onDelete={handleDeleteSelected} />
         </div>
       {/if}
     </div>

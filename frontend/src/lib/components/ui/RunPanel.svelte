@@ -4,6 +4,19 @@
 
   let graphId = $derived(graph.currentGraph?.id);
 
+  // Deduplicate nodes by id (guards against duplicates from backend data or Svelte Flow)
+  let uniqueNodes = $derived(() => {
+    const seen = new Set<string>();
+    const result: typeof graph.nodes = [];
+    for (const n of graph.nodes) {
+      if (!seen.has(n.id)) {
+        seen.add(n.id);
+        result.push(n);
+      }
+    }
+    return result;
+  });
+
   async function handleStartRun() {
     if (!graphId) return;
     // Save first
@@ -83,9 +96,9 @@
   </div>
 
   <!-- Node progress -->
-  {#if graph.nodes.length > 0}
+  {#if uniqueNodes().length > 0}
     <div class="px-4 py-2 flex items-center gap-2 overflow-x-auto">
-      {#each graph.nodes as node}
+      {#each uniqueNodes() as node}
         {@const status = execution.nodeStatuses.get(node.id)}
         <div class="flex items-center gap-1.5 shrink-0 px-2 py-1 rounded border text-xs {status ? getStatusColor(status.status) : 'text-gray-600 bg-gray-800/50 border-gray-800'}">
           <span class="truncate max-w-24">{node.data.label}</span>

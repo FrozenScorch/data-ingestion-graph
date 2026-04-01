@@ -30,7 +30,9 @@
   }
 
   // Handle node click
-  function handleNodeClick(event: MouseEvent, node: Node) {
+  // @xyflow/svelte v1.x passes a single { node, event } object, not (event, node)
+  function handleNodeClick({ node }: { node: Node; event: MouseEvent | TouchEvent }) {
+    console.log('[GraphCanvas] node clicked:', node.id);
     graph.selectNode(node.id);
     onNodeSelect(node.id);
   }
@@ -108,6 +110,14 @@
     return true;
   }
 
+  // Default edge options for smooth bezier curves with consistent styling
+  const defaultEdgeOptions = {
+    type: 'smoothstep',
+    animated: false,
+    style: { stroke: '#6366f1', strokeWidth: 2 },
+    markerEnd: { type: 'arrowclosed' as const, width: 15, height: 15, color: '#6366f1' }
+  };
+
   // Handle nodes delete
   function handleDelete({ nodes }: { nodes: Node[] }) {
     for (const node of nodes) {
@@ -122,6 +132,7 @@
     nodes={graph.nodes}
     edges={graph.edges}
     {nodeTypes}
+    {defaultEdgeOptions}
     onconnect={handleConnect}
     onnodeclick={handleNodeClick}
     onpaneclick={handlePaneClick}
@@ -134,6 +145,7 @@
     colorMode="dark"
     class="bg-gray-950"
     proOptions={{ hideAttribution: true }}
+    connectionLineType="bezier"
     connectionLineStyle="stroke: #6366f1; stroke-width: 2; stroke-dasharray: 5;"
   >
     <Background
