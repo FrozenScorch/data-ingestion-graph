@@ -2,7 +2,7 @@
  * Base HTTP client with JWT auth header and error handling.
  */
 
-const API_BASE = '';
+const API_BASE = '/api';
 
 interface RequestOptions extends Omit<RequestInit, 'body'> {
   body?: unknown;

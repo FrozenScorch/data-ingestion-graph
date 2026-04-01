@@ -88,8 +88,23 @@
 
   // Validate connection types
   function isValidConnection(connection: Connection): boolean {
-    // For now, allow all connections
-    // TODO: Validate port data types match
+    // Prevent self-connections (connecting a node to itself)
+    if (connection.source === connection.target) {
+      return false;
+    }
+
+    // Prevent duplicate connections (same source+target handles already exists)
+    const isDuplicate = graph.edges.some(
+      (e) =>
+        e.source === connection.source &&
+        e.target === connection.target &&
+        e.sourceHandle === (connection.sourceHandle || undefined) &&
+        e.targetHandle === (connection.targetHandle || undefined)
+    );
+    if (isDuplicate) {
+      return false;
+    }
+
     return true;
   }
 

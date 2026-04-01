@@ -16,31 +16,31 @@ import type {
 export const graphService = {
   /** List all graphs */
   async listGraphs(): Promise<GraphListResponse> {
-    return api.get<GraphListResponse>('/api/graphs');
+    return api.get<GraphListResponse>('/graphs');
   },
 
   /** Get single graph with latest version */
   async getGraph(id: string): Promise<GraphDetail> {
-    return api.get<GraphDetail>(`/api/graphs/${id}`);
+    return api.get<GraphDetail>(`/graphs/${id}`);
   },
 
   /** Create a new graph */
   async createGraph(data: GraphCreate): Promise<Graph> {
-    return api.post<Graph>('/api/graphs', data);
+    return api.post<Graph>('/graphs', data);
   },
 
   /** Update graph metadata */
   async updateGraph(id: string, data: GraphUpdate): Promise<Graph> {
-    return api.patch<Graph>(`/api/graphs/${id}`, data);
+    return api.patch<Graph>(`/graphs/${id}`, data);
   },
 
   /** Delete a graph */
   async deleteGraph(id: string): Promise<void> {
-    return api.delete(`/api/graphs/${id}`);
+    return api.delete(`/graphs/${id}`);
   },
 
   /** Save a new version (nodes, edges, configs) */
   async saveVersion(id: string, data: GraphVersionSave): Promise<GraphVersion> {
-    return api.post<GraphVersion>(`/api/graphs/${id}/save`, data);
+    return api.post<GraphVersion>(`/graphs/${id}/save`, data);
   }
 };

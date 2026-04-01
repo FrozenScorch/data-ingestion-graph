@@ -4,3 +4,5 @@ export { executionService } from './executionService.js';
 export { nodeRegistryService } from './nodeRegistryService.js';
 export { openrouterService } from './openrouterService.js';
 export { createRunWebSocket } from './wsService.js';
+export { dlqService } from './dlqService.js';
+export type { DlqItem, DlqListResponse, DlqRetryResponse, DlqResolveResponse } from './dlqService.js';
