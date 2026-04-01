@@ -2,20 +2,61 @@
   // Dead Letter Queue viewer component
   // The DLQ is viewed via the API - this provides the UI shell
 
-  let items = $state<any[]>([]);
+  import { dlqService } from '$lib/services';
+  import type { DlqItem } from '$lib/services';
+  import { ApiError } from '$lib/services';
+
+  let items = $state<DlqItem[]>([]);
   let loading = $state(false);
   let selectedId = $state<string | null>(null);
+  let error = $state<string | null>(null);
 
   async function loadItems() {
     loading = true;
+    error = null;
     try {
-      // TODO: Wire up to actual DLQ API when available
-      // const response = await fetch('/api/dead-letter');
-      // items = await response.json();
+      const response = await dlqService.listItems();
+      items = response.items;
+    } catch (e: unknown) {
+      if (e instanceof ApiError) {
+        error = e.detail;
+      } else {
+        error = e instanceof Error ? e.message : 'Failed to load DLQ items';
+      }
       items = [];
     } finally {
       loading = false;
     }
+  }
+
+  async function retryItem(item: DlqItem) {
+    try {
+      await dlqService.retryItem(item.id);
+      await loadItems();
+    } catch (e: unknown) {
+      error = e instanceof ApiError ? e.detail : e instanceof Error ? e.message : 'Retry failed';
+    }
+  }
+
+  async function resolveItem(item: DlqItem) {
+    try {
+      await dlqService.resolveItem(item.id, 'Manually resolved');
+      await loadItems();
+    } catch (e: unknown) {
+      error = e instanceof ApiError ? e.detail : e instanceof Error ? e.message : 'Resolve failed';
+    }
+  }
+
+  async function retryAll() {
+    const unresolved = items.filter(i => !i.resolved);
+    for (const item of unresolved) {
+      try {
+        await dlqService.retryItem(item.id);
+      } catch {
+        // Continue retrying remaining items even if one fails
+      }
+    }
+    await loadItems();
   }
 </script>
 
@@ -34,13 +75,20 @@
         {loading ? 'Loading...' : 'Refresh'}
       </button>
       <button
-        onclick={() => {}}
+        onclick={retryAll}
         class="px-3 py-1.5 text-xs bg-indigo-600 text-white rounded-lg hover:bg-indigo-500 transition-colors"
       >
         Retry All
       </button>
     </div>
   </div>
+
+  {#if error}
+    <div class="px-4 py-2 bg-red-500/10 border border-red-500/20 rounded-lg text-red-400 text-sm">
+      {error}
+      <button onclick={() => error = null} class="ml-2 text-red-500 hover:text-red-300">&times;</button>
+    </div>
+  {/if}
 
   {#if loading}
     <div class="flex items-center justify-center py-12">
@@ -76,8 +124,8 @@
               <td class="px-4 py-2 text-gray-500">{new Date(item.created_at).toLocaleString()}</td>
               <td class="px-4 py-2 text-right">
                 <div class="flex items-center justify-end gap-1">
-                  <button class="text-xs px-2 py-1 text-indigo-400 hover:bg-indigo-500/10 rounded transition-colors">Retry</button>
-                  <button class="text-xs px-2 py-1 text-gray-500 hover:bg-gray-700 rounded transition-colors">Resolve</button>
+                  <button onclick={() => retryItem(item)} class="text-xs px-2 py-1 text-indigo-400 hover:bg-indigo-500/10 rounded transition-colors">Retry</button>
+                  <button onclick={() => resolveItem(item)} class="text-xs px-2 py-1 text-gray-500 hover:bg-gray-700 rounded transition-colors">Resolve</button>
                 </div>
               </td>
             </tr>

@@ -35,7 +35,7 @@ class AuthState {
     this.error = null;
     try {
       const response = await api.post<{ access_token: string; token_type: string; expires_in: number }>(
-        '/api/auth/login',
+        '/auth/login',
         { username, password }
       );
       this.token = response.access_token;
@@ -57,7 +57,7 @@ class AuthState {
   async fetchUser(): Promise<void> {
     if (!this.token) return;
     try {
-      this.user = await api.get<User>('/api/auth/me');
+      this.user = await api.get<User>('/auth/me');
     } catch {
       // Token might be invalid, clear it
       this.logout();
