@@ -88,10 +88,12 @@ async def start_run(
         from app.ws.execution_ws import ws_manager
         from app.models.execution import Run
 
+        run_id = run.id  # capture before reassignment to avoid UnboundLocalError
+
         async with AsyncSessionLocal() as bg_db:
             try:
                 # Reload run in background session to avoid detached instance error
-                run = await bg_db.get(Run, run.id)
+                run = await bg_db.get(Run, run_id)
                 if not run:
                     return
 
