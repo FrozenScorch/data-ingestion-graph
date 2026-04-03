@@ -225,6 +225,7 @@ class DAGExecutor:
                             "node_type": node_type,
                             "items_processed": run_node.items_processed,
                             "duration_ms": run_node.duration_ms,
+                            "output_data": run_node.output_data,
                         })
                     else:
                         # Record in DLQ

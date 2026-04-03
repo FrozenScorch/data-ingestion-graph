@@ -41,52 +41,65 @@
     }
   }
 
-  function getOutputSummary(rn: RunNode): { hasData: boolean; type: string; count: number; preview: string } {
+  function getOutputSummary(rn: RunNode): { hasData: boolean; type: string; count: number; preview: string; isEmpty: boolean } {
     const out = rn.output_data;
     if (!out || typeof out !== 'object') {
-      return { hasData: false, type: '-', count: 0, preview: '' };
+      return { hasData: false, type: '-', count: 0, preview: '', isEmpty: true };
     }
-    // Check for common output shapes: array, items key, chunks key
-    const items: unknown[] = Array.isArray(out)
-      ? out
-      : Array.isArray((out as Record<string, unknown>).items)
-        ? (out as Record<string, unknown>).items as unknown[]
-        : Array.isArray((out as Record<string, unknown>).chunks)
-          ? (out as Record<string, unknown>).chunks as unknown[]
-          : Object.keys(out).length > 0
-            ? [out]
-            : [];
 
-    if (items.length === 0) {
-      return { hasData: true, type: typeof out === 'object' ? 'object' : typeof out, count: 0, preview: '' };
+    // Check for common output shapes: array, items, chunks, documents, embeddings, rows, or any top-level key
+    let items: unknown[] = [];
+    let shapeName = '';
+
+    if (Array.isArray(out)) {
+      items = out;
+      shapeName = 'array';
+    } else {
+      const obj = out as Record<string, unknown>;
+      for (const key of ['items', 'chunks', 'documents', 'embeddings', 'rows', 'results', 'records']) {
+        if (Array.isArray(obj[key])) {
+          items = obj[key] as unknown[];
+          shapeName = key;
+          break;
+        }
+      }
+      if (items.length === 0 && !shapeName) {
+        // Not a recognized array shape — show the full object as a single item
+        const otherKeys = Object.keys(obj).filter(k => typeof obj[k] !== 'object' || obj[k] === null);
+        if (otherKeys.length > 0) {
+          items = [obj];
+          shapeName = 'object';
+        }
+      }
     }
+
+    const isEmpty = items.length === 0;
 
     const previewItems = items.slice(0, 15);
-    const preview = previewItems
-      .map(item => {
-        if (typeof item === 'string') return item.length > 120 ? item.slice(0, 120) + '...' : item;
-        try {
-          const str = JSON.stringify(item);
-          return str.length > 200 ? str.slice(0, 200) + '...' : str;
-        } catch {
-          return String(item);
-        }
-      })
-      .join('\n');
+    const preview = isEmpty
+      ? '(empty — no data produced)'
+      : previewItems
+          .map(item => {
+            if (typeof item === 'string') return item.length > 120 ? item.slice(0, 120) + '...' : item;
+            try {
+              const str = JSON.stringify(item);
+              return str.length > 200 ? str.slice(0, 200) + '...' : str;
+            } catch {
+              return String(item);
+            }
+          })
+          .join('\n');
 
     const dataType = Array.isArray(out)
-      ? `array[${typeof out[0]}]`
-      : (out as Record<string, unknown>).items
-        ? `items[${typeof ((out as Record<string, unknown>).items as unknown[])[0]}]`
-        : (out as Record<string, unknown>).chunks
-          ? `chunks[${typeof ((out as Record<string, unknown>).chunks as unknown[])[0]}]`
-          : 'object';
+      ? `array`
+      : shapeName || 'object';
 
     return {
       hasData: true,
       type: dataType,
       count: items.length,
-      preview
+      preview,
+      isEmpty
     };
   }
 </script>
@@ -159,8 +172,10 @@
                         <polyline points="9 18 15 12 9 6"/>
                       </svg>
                       {isExpanded ? 'Hide' : 'Preview'} output
-                      {#if summary.count > 0}
-                        <span class="text-gray-600">({summary.count} items)</span>
+                      {#if summary.isEmpty}
+                        <span class="text-yellow-600 ml-1">(empty)</span>
+                      {:else if summary.count > 0}
+                        <span class="text-gray-600 ml-1">({summary.count} {summary.type})</span>
                       {/if}
                     </button>
                     {#if isExpanded}
