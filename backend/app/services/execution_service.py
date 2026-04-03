@@ -63,10 +63,22 @@ async def list_runs(
     status: Optional[str] = None,
     offset: int = 0,
     limit: int = 50,
+    owner_id: Optional[UUID] = None,
 ) -> tuple[list[Run], int]:
-    """List runs with optional filtering."""
+    """List runs with optional filtering.
+
+    Args:
+        owner_id: When provided, only return runs belonging to graphs owned
+                  by this user. Pass None to return runs for all users (admin).
+    """
+    from app.models.graph import Graph
+
     query = select(Run)
     count_query = select(func.count()).select_from(Run)
+
+    if owner_id is not None:
+        query = query.join(Graph, Run.graph_id == Graph.id).where(Graph.owner_id == owner_id)
+        count_query = count_query.join(Graph, Run.graph_id == Graph.id).where(Graph.owner_id == owner_id)
 
     if graph_id:
         query = query.where(Run.graph_id == graph_id)

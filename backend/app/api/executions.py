@@ -30,6 +30,15 @@ from app.engine.executor import DAGExecutor
 router = APIRouter(tags=["executions"])
 
 
+async def _check_run_access(run, current_user: dict, db: AsyncSession) -> None:
+    """Raise 403 if the current user does not own the graph that produced this run."""
+    if current_user.get("role") == "admin":
+        return
+    graph = await get_graph(db, run.graph_id)
+    if not graph or str(graph.owner_id) != str(current_user["user_id"]):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No permission")
+
+
 def _unpack_version_data(nodes_data: dict | None, edges_data: dict | list | None) -> tuple[dict, list]:
     """Unpack version data from frontend storage format into executor format.
 
@@ -134,13 +143,16 @@ async def list_executions(
     db: AsyncSession = Depends(get_session),
     current_user: dict = Depends(get_current_user),
 ):
-    """List all execution runs."""
+    """List execution runs scoped to the current user's graphs."""
+    is_admin = current_user.get("role") == "admin"
+    owner_id = None if is_admin else current_user["user_id"]
     runs, total = await list_runs(
         db,
         graph_id=graph_id,
         status=status_filter,
         offset=offset,
         limit=limit,
+        owner_id=owner_id,
     )
     return RunListResponse(runs=runs, total=total)
 
