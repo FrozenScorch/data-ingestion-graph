@@ -207,30 +207,29 @@ class SECEdgarSourceNode(BaseNode):
                 # Extract document URLs from filings
                 filing_urls: list[tuple[str, str, str]] = []  # (url, filename, cik)
                 for hit in hits[:max_filings]:
-                    # EDGAR wraps results in _source: {"_source": {"file_num": "...", ...}}
+                    # EDGAR wraps results in _source
                     hit_data = hit.get("_source", hit) if isinstance(hit, dict) else hit
                     if not isinstance(hit_data, dict):
                         continue
 
-                    # Look for the primary document URL — EDGAR uses several field names
-                    doc_url = (
-                        hit_data.get("linkToFilingDetails")
-                        or hit_data.get("filingDetailUrl")
-                        or hit_data.get("url")
-                        or hit_data.get("filing_href")
-                        or ""
-                    )
-                    # Build full URL if relative
-                    if doc_url and not doc_url.startswith("http"):
-                        doc_url = f"https://www.sec.gov/Archives/edgar/data/{doc_url}"
+                    # Build filing detail URL from accession number (adsh)
+                    adsh = hit_data.get("adsh", "")
+                    ciks = hit_data.get("ciks", [])
+                    cik = ciks[0] if isinstance(ciks, list) and ciks else str(ciks)
 
-                    filename = (
-                        hit_data.get("fileNum")
-                        or hit_data.get("file_num")
-                        or hit_data.get("filename")
-                        or ""
-                    )
-                    cik = str(hit_data.get("cik", hit_data.get("entityId", "")))
+                    if adsh and cik:
+                        # EDGAR filing URL pattern: /Archives/edgar/data/{CIK}/{ADSH}
+                        clean_cik = str(cik).lstrip("0")
+                        clean_adsh = adsh.replace("-", "")
+                        doc_url = f"https://www.sec.gov/Archives/edgar/data/{clean_cik}/{clean_adsh}/{adsh}-index.htm"
+                    else:
+                        doc_url = ""
+
+                    form = hit_data.get("form", filing_type)
+                    file_desc = hit_data.get("file_description", "")
+                    display_names = hit_data.get("display_names", [])
+                    name = display_names[0] if isinstance(display_names, list) and display_names else str(display_names)
+                    filename = f"{form} - {name} - {file_desc}"
 
                     if doc_url:
                         filing_urls.append((doc_url, filename, cik))
@@ -241,7 +240,26 @@ class SECEdgarSourceNode(BaseNode):
                         doc_response = await client.get(url, headers=headers)
                         doc_response.raise_for_status()
 
+                        # The index page links to the actual filing document.
+                        # Look for the primary document link in the index table.
                         raw_html = doc_response.text
+                        # Find the primary .htm document link (not .xml, not -index.htm)
+                        import re as _re
+                        doc_link_match = _re.search(
+                            r'href="([^"]*\.(htm)(?!\.xml)[^"]*(?:10-|8-K|DEF |13F|10Q)[^"]*\.htm)"',
+                            raw_html, _re.IGNORECASE
+                        )
+                        if doc_link_match:
+                            doc_path = doc_link_match.group(1)
+                            # Resolve relative URLs
+                            if doc_path.startswith("/"):
+                                doc_url_final = f"https://www.sec.gov{doc_path}"
+                            else:
+                                doc_url_final = f"https://www.sec.gov/Archives/edgar/data/{cik.lstrip('0')}/{doc_path}"
+                            doc_response = await client.get(doc_url_final, headers=headers)
+                            doc_response.raise_for_status()
+                            raw_html = doc_response.text
+
                         cleaned_text = _strip_html(raw_html)
 
                         if cleaned_text:
