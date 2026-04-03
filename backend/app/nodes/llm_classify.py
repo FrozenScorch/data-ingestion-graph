@@ -55,7 +55,7 @@ class LLMClassifyNode(BaseNode):
                 "categories": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "List of category names to classify into",
+                    "description": "Comma-separated or JSON array of category labels",
                 },
                 "temperature": {
                     "type": "number",

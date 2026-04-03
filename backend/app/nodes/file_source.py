@@ -69,14 +69,17 @@ class FileSourceNode(BaseNode):
                     "type": "string",
                     "enum": ["upload", "glob", "path"],
                     "default": "upload",
+                    "description": "File source type: upload files, glob pattern, or direct path",
                 },
                 "file_pattern": {
                     "type": "string",
                     "default": "**/*",
+                    "description": "Glob pattern to match files (e.g. **/*.pdf)",
                 },
                 "recursive": {
                     "type": "boolean",
                     "default": True,
+                    "description": "Search subdirectories recursively",
                 },
                 "base_dir": {
                     "type": "string",

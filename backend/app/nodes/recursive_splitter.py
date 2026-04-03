@@ -55,11 +55,13 @@ class RecursiveSplitterNode(BaseNode):
                     "type": "integer",
                     "default": 1000,
                     "minimum": 10,
+                    "description": "Target chunk size in characters",
                 },
                 "chunk_overlap": {
                     "type": "integer",
                     "default": 200,
                     "minimum": 0,
+                    "description": "Number of overlapping characters between chunks",
                 },
             },
         }

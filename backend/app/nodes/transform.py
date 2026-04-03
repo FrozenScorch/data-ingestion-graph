@@ -82,6 +82,7 @@ class TransformNode(BaseNode):
                     "type": "string",
                     "enum": ["python", "jinja2"],
                     "default": "python",
+                    "description": "Expression mode: python (eval expression per item) or jinja2 (template rendering)",
                 },
                 "expression": {
                     "type": "string",

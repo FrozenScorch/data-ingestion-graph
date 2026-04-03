@@ -90,6 +90,7 @@ class SECEdgarSourceNode(BaseNode):
                     "type": "string",
                     "enum": ["10-K", "10-Q", "8-K", "13-F", "DEF 14A", "ALL"],
                     "default": "10-K",
+                    "description": "SEC filing type to search for",
                 },
                 "start_date": {
                     "type": "string",
@@ -110,6 +111,7 @@ class SECEdgarSourceNode(BaseNode):
                     "default": 10,
                     "minimum": 1,
                     "maximum": 100,
+                    "description": "Maximum number of filings to retrieve",
                 },
             },
             "required": ["identifier", "filing_type", "user_agent_email"],

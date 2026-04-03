@@ -37,7 +37,7 @@ class WebhookSourceNode(BaseNode):
             "type": "object",
             "properties": {
                 "path": {"type": "string", "description": "Auto-generated webhook path"},
-                "method": {"type": "string", "enum": ["POST", "GET", "PUT"], "default": "POST"},
+                "method": {"type": "string", "enum": ["POST", "GET", "PUT"], "default": "POST", "description": "HTTP method for incoming webhooks"},
             },
         }
 

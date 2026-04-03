@@ -42,10 +42,11 @@ class HttpRequestNode(BaseNode):
         return {
             "type": "object",
             "properties": {
-                "url": {"type": "string", "format": "uri"},
-                "method": {"type": "string", "enum": ["GET", "POST", "PUT", "DELETE", "PATCH"], "default": "POST"},
+                "url": {"type": "string", "format": "uri", "description": "Target URL to send the request to"},
+                "method": {"type": "string", "enum": ["GET", "POST", "PUT", "DELETE", "PATCH"], "default": "POST", "description": "HTTP method"},
                 "headers": {"type": "string", "format": "textarea", "default": "{}", "description": "HTTP headers as JSON object"},
                 "body": {"type": "string", "format": "textarea", "description": "Request body (text or JSON)"},
+                "timeout": {"type": "integer", "description": "Request timeout in seconds", "default": 30, "minimum": 1, "maximum": 300},
             },
             "required": ["url"],
         }

@@ -50,6 +50,7 @@ class MergeNode(BaseNode):
                     "type": "string",
                     "enum": ["concat", "zip", "merge_objects"],
                     "default": "concat",
+                    "description": "How to merge multiple inputs: concat (append all), zip (pair by index), merge_objects (deep merge dicts)",
                 },
             },
         }

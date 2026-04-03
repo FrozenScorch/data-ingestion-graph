@@ -37,9 +37,9 @@ class DiscordSourceNode(BaseNode):
             "type": "object",
             "properties": {
                 "bot_token": {"type": "string", "format": "password", "description": "Discord bot token"},
-                "connection_id": {"type": "string"},
-                "channel_id": {"type": "string"},
-                "message_limit": {"type": "integer", "default": 100},
+                "connection_id": {"type": "string", "description": "Saved Discord connection ID"},
+                "channel_id": {"type": "string", "description": "Discord channel ID to read messages from"},
+                "message_limit": {"type": "integer", "default": 100, "description": "Maximum number of messages to fetch"},
             },
             "required": ["bot_token", "channel_id"],
         }

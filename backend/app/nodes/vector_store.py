@@ -47,7 +47,7 @@ class VectorStoreNode(BaseNode):
             "properties": {
                 "connection_id": {
                     "type": "string",
-                    "description": "Reference to a saved connection ID",
+                    "description": "Saved database connection ID (from Settings > Connections)",
                 },
                 "table_name": {
                     "type": "string",

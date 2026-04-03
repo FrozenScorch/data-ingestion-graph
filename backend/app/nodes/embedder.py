@@ -47,7 +47,7 @@ class EmbedderNode(BaseNode):
                     "type": "string",
                     "enum": SUPPORTED_EMBEDDING_MODELS,
                     "default": SUPPORTED_EMBEDDING_MODELS[0],
-                    "description": "Embedding model to use",
+                    "description": "Embedding model ID (e.g. openai/text-embedding-3-small)",
                 },
                 "batch_size": {
                     "type": "integer",

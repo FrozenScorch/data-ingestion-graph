@@ -44,12 +44,13 @@ class TextChunkerNode(BaseNode):
         return {
             "type": "object",
             "properties": {
-                "chunk_size": {"type": "integer", "default": 512, "minimum": 10},
-                "chunk_overlap": {"type": "integer", "default": 50, "minimum": 0},
+                "chunk_size": {"type": "integer", "default": 512, "minimum": 10, "description": "Target chunk size in characters"},
+                "chunk_overlap": {"type": "integer", "default": 50, "minimum": 0, "description": "Number of overlapping characters between chunks"},
                 "tokenizer": {
                     "type": "string",
                     "enum": ["tiktoken_cl100k", "words", "chars"],
                     "default": "tiktoken_cl100k",
+                    "description": "Tokenization method: tiktoken (OpenAI), word-based, or character-based",
                 },
             },
         }

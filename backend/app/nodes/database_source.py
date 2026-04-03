@@ -53,7 +53,7 @@ class DatabaseSourceNode(BaseNode):
             "properties": {
                 "host": {"type": "string", "default": "localhost", "description": "Database host"},
                 "port": {"type": "integer", "default": 5432, "description": "Database port"},
-                "database": {"type": "string", "description": "Database name"},
+                "database": {"type": "string", "description": "Name of the database to connect to"},
                 "username": {"type": "string", "default": "postgres", "description": "Database username"},
                 "password": {"type": "string", "format": "password", "description": "Database password"},
                 "connection_id": {

@@ -51,7 +51,7 @@ class LLMSummarizeNode(BaseNode):
                 "prompt": {
                     "type": "string",
                     "default": "Summarize the following text concisely:",
-                    "description": "Summarization prompt",
+                    "description": "Instructions for the LLM summarizer",
                 },
                 "max_tokens": {
                     "type": "integer",

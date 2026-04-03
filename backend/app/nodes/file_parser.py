@@ -62,8 +62,9 @@ class FileParserNode(BaseNode):
                     "type": "string",
                     "enum": ["auto", "pdf", "docx", "csv", "txt"],
                     "default": "auto",
+                    "description": "Parser to use for file content extraction",
                 },
-                "ocr_enabled": {"type": "boolean", "default": False},
+                "ocr_enabled": {"type": "boolean", "default": False, "description": "Enable OCR for scanned PDFs (requires Tesseract)"},
             },
         }
 

@@ -54,7 +54,7 @@ class LLMExtractNode(BaseNode):
                 },
                 "output_schema": {
                     "type": "object",
-                    "description": "JSON schema describing expected output structure",
+                    "description": "JSON schema the LLM should follow for structured extraction",
                 },
                 "temperature": {
                     "type": "number",

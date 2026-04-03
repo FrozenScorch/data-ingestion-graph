@@ -123,8 +123,12 @@
 
     <!-- Config Form -->
     <div class="flex-1 overflow-auto p-4 space-y-4">
+      {#if nodeType.config_schema.required?.length}
+        <p class="text-xs text-gray-600 mb-2">Fields marked with * are required</p>
+      {/if}
       {#each Object.entries(nodeType.config_schema.properties) as [key, field]}
         {@const required = nodeType.config_schema.required?.includes(key)}
+        {@const isEmptyRequired = required && !config[key] && !field.default}
         <div>
           <!-- svelte-ignore a11y_label_has_associated_control -->
           <label class="block text-xs text-gray-400 mb-1" title={field.description}>
@@ -161,9 +165,12 @@
               type="password"
               value={(config[key] as string) || (field.default as string) || ''}
               oninput={(e) => updateConfig(key, (e.target as HTMLInputElement).value)}
-              class="w-full px-3 py-1.5 bg-gray-800 border border-gray-700 rounded-lg text-sm text-gray-200 placeholder-gray-500 focus:outline-none focus:border-indigo-500"
+              class="w-full px-3 py-1.5 bg-gray-800 border {isEmptyRequired ? 'border-amber-700' : 'border-gray-700'} rounded-lg text-sm text-gray-200 placeholder-gray-500 focus:outline-none focus:border-indigo-500"
               placeholder={field.description || key}
             />
+            {#if isEmptyRequired}
+              <p class="text-xs text-gray-600 mt-0.5">Required</p>
+            {/if}
 
           {:else if field.type === 'string' && field.format === 'date'}
             <input
@@ -178,18 +185,24 @@
               rows="4"
               value={(config[key] as string) || (field.default as string) || ''}
               oninput={(e) => updateConfig(key, (e.target as HTMLTextAreaElement).value)}
-              class="w-full px-3 py-1.5 bg-gray-800 border border-gray-700 rounded-lg text-sm text-gray-200 placeholder-gray-500 focus:outline-none focus:border-indigo-500 resize-y"
+              class="w-full px-3 py-1.5 bg-gray-800 border {isEmptyRequired ? 'border-amber-700' : 'border-gray-700'} rounded-lg text-sm text-gray-200 placeholder-gray-500 focus:outline-none focus:border-indigo-500 resize-y"
               placeholder={field.description || key}
             ></textarea>
+            {#if isEmptyRequired}
+              <p class="text-xs text-gray-600 mt-0.5">Required</p>
+            {/if}
 
           {:else if field.type === 'string'}
             <input
               type="text"
               value={(config[key] as string) || (field.default as string) || ''}
               oninput={(e) => updateConfig(key, (e.target as HTMLInputElement).value)}
-              class="w-full px-3 py-1.5 bg-gray-800 border border-gray-700 rounded-lg text-sm text-gray-200 placeholder-gray-500 focus:outline-none focus:border-indigo-500"
+              class="w-full px-3 py-1.5 bg-gray-800 border {isEmptyRequired ? 'border-amber-700' : 'border-gray-700'} rounded-lg text-sm text-gray-200 placeholder-gray-500 focus:outline-none focus:border-indigo-500"
               placeholder={field.description || key}
             />
+            {#if isEmptyRequired}
+              <p class="text-xs text-gray-600 mt-0.5">Required</p>
+            {/if}
 
           {:else if field.type === 'number' || field.type === 'integer'}
             <input

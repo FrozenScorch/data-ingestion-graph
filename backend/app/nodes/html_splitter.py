@@ -98,16 +98,18 @@ class HTMLSplitterNode(BaseNode):
                 "tag_priority": {
                     "type": "string",
                     "default": "h1,h2,h3,p,table,section",
-                    "description": "HTML tags to split on",
+                    "description": "HTML tags to split on, tried in order",
                 },
                 "max_chunk_size": {
                     "type": "integer",
                     "default": 2000,
                     "minimum": 100,
+                    "description": "Maximum characters per chunk",
                 },
                 "include_metadata": {
                     "type": "boolean",
                     "default": True,
+                    "description": "Include HTML tag metadata in chunk headers",
                 },
             },
         }

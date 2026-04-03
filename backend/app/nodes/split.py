@@ -42,7 +42,7 @@ class SplitNode(BaseNode):
         return {
             "type": "object",
             "properties": {
-                "batch_size": {"type": "integer", "default": 1, "minimum": 1},
+                "batch_size": {"type": "integer", "default": 1, "minimum": 1, "description": "Number of items per output batch"},
             },
         }
 

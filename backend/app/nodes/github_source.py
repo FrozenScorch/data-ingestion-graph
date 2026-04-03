@@ -36,9 +36,9 @@ class GitHubSourceNode(BaseNode):
         return {
             "type": "object",
             "properties": {
-                "connection_id": {"type": "string"},
-                "repo": {"type": "string", "description": "owner/repo format"},
-                "resource_type": {"type": "string", "enum": ["issues", "pull_requests", "files"], "default": "issues"},
+                "connection_id": {"type": "string", "description": "Saved GitHub connection ID"},
+                "repo": {"type": "string", "description": "Repository in owner/repo format (e.g. microsoft/vscode)"},
+                "resource_type": {"type": "string", "enum": ["issues", "pull_requests", "files"], "default": "issues", "description": "Type of GitHub resource to fetch"},
             },
             "required": ["connection_id", "repo"],
         }
