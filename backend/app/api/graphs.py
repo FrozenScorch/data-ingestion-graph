@@ -12,6 +12,7 @@ from app.schemas.graph import (
     GraphCreate,
     GraphUpdate,
     GraphResponse,
+    GraphDetailResponse,
     GraphListResponse,
     GraphVersionSave,
     GraphVersionResponse,
@@ -68,13 +69,13 @@ async def create_graph_endpoint(
     return graph
 
 
-@router.get("/{graph_id}", response_model=GraphResponse)
+@router.get("/{graph_id}", response_model=GraphDetailResponse)
 async def get_graph_endpoint(
     graph_id: UUID,
     db: AsyncSession = Depends(get_session),
     current_user: dict = Depends(get_current_user),
 ):
-    """Get a graph by ID."""
+    """Get a graph by ID with its latest version."""
     graph = await get_graph(db, graph_id)
     if not graph:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Graph not found")

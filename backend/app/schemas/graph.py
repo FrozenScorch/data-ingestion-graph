@@ -53,6 +53,11 @@ class GraphResponse(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class GraphDetailResponse(GraphResponse):
+    """Graph response with latest version data included."""
+    latest_version: GraphVersionResponse | None = None
+
+
 class GraphListResponse(BaseModel):
     graphs: list[GraphResponse]
     total: int

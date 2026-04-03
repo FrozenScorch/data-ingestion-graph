@@ -8,6 +8,7 @@ from uuid import UUID
 
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.models.graph import Graph, GraphVersion, GraphStatus
 
@@ -41,9 +42,17 @@ async def list_graphs(
 
 
 async def get_graph(db: AsyncSession, graph_id: UUID) -> Optional[Graph]:
-    """Get a single graph by ID."""
-    result = await db.execute(select(Graph).where(Graph.id == graph_id))
-    return result.scalar_one_or_none()
+    """Get a single graph by ID, with its latest version eagerly loaded."""
+    result = await db.execute(
+        select(Graph)
+        .where(Graph.id == graph_id)
+        .options(selectinload(Graph.versions))
+    )
+    graph = result.scalar_one_or_none()
+    if graph is not None:
+        # Attach the latest version for serialization
+        graph._latest_version = graph.versions[0] if graph.versions else None
+    return graph
 
 
 async def create_graph(
