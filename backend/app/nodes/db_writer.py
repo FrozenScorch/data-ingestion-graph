@@ -3,7 +3,7 @@ import re as _re_dw
 DatabaseWriter node: write data to PostgreSQL.
 
 Writes row data to a PostgreSQL table using SQLAlchemy Core for
-efficient bulk operations.
+efficient bulk operations. Uses the app's own database connection.
 Input: rows data from DatabaseSourceNode or TransformNode
 Output: {rows_affected: N, table: "..."}
 """
@@ -15,6 +15,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.nodes.base import BaseNode, NodeContext, NodeResult, PortDef, PortDataType
+from app.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +37,7 @@ class DatabaseWriterNode(BaseNode):
 
     @property
     def description(self) -> str:
-        return "Write data to a PostgreSQL database table"
+        return "Write data to the app database (PostgreSQL)"
 
     @property
     def inputs(self) -> list[PortDef]:
@@ -51,10 +52,6 @@ class DatabaseWriterNode(BaseNode):
         return {
             "type": "object",
             "properties": {
-                "connection_id": {
-                    "type": "string",
-                    "description": "Saved database connection ID (from Settings > Connections)",
-                },
                 "table_name": {
                     "type": "string",
                     "default": "output_data",
@@ -77,33 +74,8 @@ class DatabaseWriterNode(BaseNode):
                     "description": "Comma-separated column names for upsert conflict resolution",
                 },
             },
-            "required": ["connection_id", "table_name"],
+            "required": ["table_name"],
         }
-
-    async def _build_connection_url(self, context: NodeContext) -> str:
-        """
-        Build a database connection URL from the node context.
-
-        Looks for connection config in context.state['connections'] keyed
-        by connection_id, or falls back to inline config in context.config.
-        """
-        config = context.config
-        connection_id = config.get("connection_id", "")
-
-        connections = context.state.get("connections", {})
-        if connection_id in connections:
-            conn_config = connections[connection_id]
-        else:
-            conn_config = config
-
-        host = conn_config.get("host", "localhost")
-        port = conn_config.get("port", 5432)
-        database = conn_config.get("database", conn_config.get("dbname", "postgres"))
-        username = conn_config.get("username", conn_config.get("user", "postgres"))
-        password = conn_config.get("password", "")
-
-        url = f"postgresql+asyncpg://{username}:{password}@{host}:{port}/{database}"
-        return url
 
     async def execute(self, context: NodeContext) -> NodeResult:
         """
@@ -138,11 +110,11 @@ class DatabaseWriterNode(BaseNode):
             )
 
         try:
-            connection_url = await self._build_connection_url(context)
+            connection_url = settings.database_url
         except Exception as e:
             return NodeResult(
                 success=False,
-                error_message=f"Failed to build connection URL: {e}",
+                error_message=f"Failed to get database URL: {e}",
             )
 
         # Parse upsert keys

@@ -13,6 +13,7 @@ from typing import Any
 
 _SQL_IDENTIFIER_RE = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
 
+from app.config import settings
 from app.nodes.base import BaseNode, NodeContext, NodeResult, PortDef, PortDataType
 
 logger = logging.getLogger(__name__)
@@ -48,10 +49,6 @@ class VectorStoreNode(BaseNode):
         return {
             "type": "object",
             "properties": {
-                "connection_id": {
-                    "type": "string",
-                    "description": "Saved database connection ID (from Settings > Connections)",
-                },
                 "table_name": {
                     "type": "string",
                     "default": "documents",
@@ -88,31 +85,33 @@ class VectorStoreNode(BaseNode):
                     "description": "Column name for pgvector column",
                 },
             },
-            "required": ["connection_id"],
+            "required": [],
         }
 
     async def _get_asyncpg_connection(self, context: NodeContext):
         """
-        Create an asyncpg connection from the node context.
+        Create an asyncpg connection using the app's own database URL.
 
-        Uses asyncpg directly for raw SQL vector operations.
+        Parses the SQLAlchemy async URL to extract asyncpg connection parameters.
         """
         import asyncpg
 
-        config = context.config
-        connection_id = config.get("connection_id", "")
+        url = settings.database_url
+        # Parse postgresql+asyncpg://user:pass@host:port/database
+        stripped = url.replace("postgresql+asyncpg://", "")
+        # Split user:pass from host:port/database
+        credentials, host_part = stripped.split("@", 1)
+        username, password = credentials.split(":", 1)
+        host_db = host_part.rsplit("/", 1)
+        host_port = host_db[0]
+        database = host_db[1] if len(host_db) > 1 else "postgres"
 
-        connections = context.state.get("connections", {})
-        if connection_id in connections:
-            conn_config = connections[connection_id]
+        if ":" in host_port:
+            host, port_str = host_port.rsplit(":", 1)
+            port = int(port_str)
         else:
-            conn_config = config
-
-        host = conn_config.get("host", "localhost")
-        port = conn_config.get("port", 5432)
-        database = conn_config.get("database", conn_config.get("dbname", "postgres"))
-        username = conn_config.get("username", conn_config.get("user", "postgres"))
-        password = conn_config.get("password", "")
+            host = host_port
+            port = 5432
 
         conn = await asyncpg.connect(
             host=host,

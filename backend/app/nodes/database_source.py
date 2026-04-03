@@ -13,6 +13,7 @@ from typing import Any
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+from app.config import settings
 from app.nodes.base import BaseNode, NodeContext, NodeResult, PortDef, PortDataType
 
 logger = logging.getLogger(__name__)
@@ -51,15 +52,6 @@ class DatabaseSourceNode(BaseNode):
         return {
             "type": "object",
             "properties": {
-                "host": {"type": "string", "default": "localhost", "description": "Database host"},
-                "port": {"type": "integer", "default": 5432, "description": "Database port"},
-                "database": {"type": "string", "description": "Name of the database to connect to"},
-                "username": {"type": "string", "default": "postgres", "description": "Database username"},
-                "password": {"type": "string", "format": "password", "description": "Database password"},
-                "connection_id": {
-                    "type": "string",
-                    "description": "Reference to a saved connection ID",
-                },
                 "query": {
                     "type": "string",
                     "format": "textarea",
@@ -88,42 +80,9 @@ class DatabaseSourceNode(BaseNode):
                 f"Query starts with: {stripped[:20]}"
             )
 
-    async def _build_connection_url(self, context: NodeContext) -> str:
-        """
-        Build a database connection URL from the node context.
-
-        Looks for connection config in context.state['connections'] keyed
-        by connection_id, or falls back to inline config in context.config.
-        """
-        config = context.config
-        connection_id = config.get("connection_id", "")
-
-        # Validate: either a connection_id or inline host+database must be provided
-        connections = context.state.get("connections", {})
-        has_connection = connection_id and connection_id in connections
-        has_inline = config.get("host") and config.get("database")
-        if not has_connection and not has_inline:
-            raise ValueError(
-                "Either a 'connection_id' referencing a saved connection, "
-                "or inline 'host' and 'database' fields must be provided."
-            )
-
-        # Check if a saved connection was loaded into state by the engine
-        if connection_id in connections:
-            conn_config = connections[connection_id]
-        else:
-            # Use inline config if provided
-            conn_config = config
-
-        # Build asyncpg URL
-        host = conn_config.get("host", "localhost")
-        port = conn_config.get("port", 5432)
-        database = conn_config.get("database", conn_config.get("dbname", "postgres"))
-        username = conn_config.get("username", conn_config.get("user", "postgres"))
-        password = conn_config.get("password", "")
-
-        url = f"postgresql+asyncpg://{username}:{password}@{host}:{port}/{database}"
-        return url
+    def _build_connection_url(self) -> str:
+        """Return the app's own database connection URL."""
+        return settings.database_url
 
     async def execute(self, context: NodeContext) -> NodeResult:
         """
@@ -146,7 +105,7 @@ class DatabaseSourceNode(BaseNode):
             )
 
         try:
-            connection_url = await self._build_connection_url(context)
+            connection_url = self._build_connection_url()
         except Exception as e:
             return NodeResult(
                 success=False,
