@@ -77,24 +77,43 @@
     </button>
   {/if}
 
-  <!-- Run status indicator -->
+  <!-- Run status indicator (clickable) -->
   {#if execution.currentRun}
-    <div class="flex items-center gap-1.5 ml-2 px-2 py-0.5 rounded-full text-xs
-      {execution.currentRun.run.status === 'running' ? 'bg-indigo-500/10 text-indigo-400 border border-indigo-500/20' : ''}
-      {execution.currentRun.run.status === 'completed' ? 'bg-green-500/10 text-green-400 border border-green-500/20' : ''}
-      {execution.currentRun.run.status === 'failed' ? 'bg-red-500/10 text-red-400 border border-red-500/20' : ''}
-    ">
+    <a
+      href="/graphs/{graphId}/runs/{execution.currentRun.run.id}"
+      class="flex items-center gap-1.5 ml-2 px-2 py-0.5 rounded-full text-xs cursor-pointer
+        {execution.currentRun.run.status === 'running' ? 'bg-indigo-500/10 text-indigo-400 border border-indigo-500/20' : ''}
+        {execution.currentRun.run.status === 'completed' ? 'bg-green-500/10 text-green-400 border border-green-500/20' : ''}
+        {execution.currentRun.run.status === 'failed' ? 'bg-red-500/10 text-red-400 border border-red-500/20' : ''}
+      "
+      title="View run details"
+    >
       <div class="w-1.5 h-1.5 rounded-full
         {execution.currentRun.run.status === 'running' ? 'bg-indigo-400 animate-pulse' : ''}
         {execution.currentRun.run.status === 'completed' ? 'bg-green-400' : ''}
         {execution.currentRun.run.status === 'failed' ? 'bg-red-400' : ''}
       "></div>
       {execution.currentRun.run.status}
-    </div>
+    </a>
   {/if}
 
   <!-- Spacer -->
   <div class="flex-1"></div>
+
+  <!-- Run History -->
+  {#if graphId}
+    <a
+      href="/graphs/{graphId}/runs"
+      class="flex items-center gap-1.5 px-2.5 py-1 text-xs rounded-md border border-gray-700 bg-gray-800 text-gray-400 hover:bg-gray-700 hover:text-gray-200 transition-colors"
+      title="View run history"
+    >
+      <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <circle cx="12" cy="12" r="10"/>
+        <polyline points="12 6 12 12 16 14"/>
+      </svg>
+      History
+    </a>
+  {/if}
 
   <!-- Graph name -->
   {#if graph.currentGraph}
