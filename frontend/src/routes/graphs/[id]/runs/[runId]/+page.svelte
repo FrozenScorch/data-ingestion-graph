@@ -3,10 +3,13 @@
   import { onMount } from 'svelte';
   import { execution } from '$lib/stores';
   import LineageViewer from '$lib/components/ui/LineageViewer.svelte';
-  import type { NodeRunStatus } from '$lib/types';
+  import type { NodeRunStatus, RunNode } from '$lib/types';
 
   let graphId = $derived($page.params.id);
   let runId = $derived($page.params.runId);
+
+  // Track which nodes have their preview expanded
+  let expandedNodes = $state<Set<string>>(new Set());
 
   onMount(() => {
     execution.getRun(runId);
@@ -17,6 +20,16 @@
     };
   });
 
+  function togglePreview(nodeId: string) {
+    const next = new Set(expandedNodes);
+    if (next.has(nodeId)) {
+      next.delete(nodeId);
+    } else {
+      next.add(nodeId);
+    }
+    expandedNodes = next;
+  }
+
   function getStatusBadge(status: NodeRunStatus): string {
     switch (status) {
       case 'completed': return 'text-green-400 bg-green-500/10 border-green-500/20';
@@ -26,6 +39,55 @@
       case 'skipped': return 'text-yellow-400 bg-yellow-500/10 border-yellow-500/20';
       default: return 'text-gray-400 bg-gray-500/10 border-gray-500/20';
     }
+  }
+
+  function getOutputSummary(rn: RunNode): { hasData: boolean; type: string; count: number; preview: string } {
+    const out = rn.output_data;
+    if (!out || typeof out !== 'object') {
+      return { hasData: false, type: '-', count: 0, preview: '' };
+    }
+    // Check for common output shapes: array, items key, chunks key
+    const items: unknown[] = Array.isArray(out)
+      ? out
+      : Array.isArray((out as Record<string, unknown>).items)
+        ? (out as Record<string, unknown>).items as unknown[]
+        : Array.isArray((out as Record<string, unknown>).chunks)
+          ? (out as Record<string, unknown>).chunks as unknown[]
+          : Object.keys(out).length > 0
+            ? [out]
+            : [];
+
+    if (items.length === 0) {
+      return { hasData: true, type: typeof out === 'object' ? 'object' : typeof out, count: 0, preview: '' };
+    }
+
+    const previewItems = items.slice(0, 15);
+    const preview = previewItems
+      .map(item => {
+        if (typeof item === 'string') return item.length > 120 ? item.slice(0, 120) + '...' : item;
+        try {
+          const str = JSON.stringify(item);
+          return str.length > 200 ? str.slice(0, 200) + '...' : str;
+        } catch {
+          return String(item);
+        }
+      })
+      .join('\n');
+
+    const dataType = Array.isArray(out)
+      ? `array[${typeof out[0]}]`
+      : (out as Record<string, unknown>).items
+        ? `items[${typeof ((out as Record<string, unknown>).items as unknown[])[0]}]`
+        : (out as Record<string, unknown>).chunks
+          ? `chunks[${typeof ((out as Record<string, unknown>).chunks as unknown[])[0]}]`
+          : 'object';
+
+    return {
+      hasData: true,
+      type: dataType,
+      count: items.length,
+      preview
+    };
   }
 </script>
 
@@ -65,17 +127,54 @@
           </thead>
           <tbody>
             {#each execution.currentRun.run_nodes as rn (rn.id)}
+              {@const summary = getOutputSummary(rn)}
+              {@const isExpanded = expandedNodes.has(rn.id)}
               <tr class="border-b border-gray-800/50 hover:bg-gray-800/30">
                 <td class="px-4 py-2">
                   <span class="text-xs px-2 py-0.5 rounded-full border {getStatusBadge(rn.status)}">{rn.status}</span>
                 </td>
                 <td class="px-4 py-2 text-gray-300 font-mono text-xs">{rn.node_id}</td>
                 <td class="px-4 py-2 text-gray-500 text-xs">{rn.node_type}</td>
-                <td class="px-4 py-2 text-gray-400 text-xs">{rn.items_processed ?? '-'}</td>
+                <td class="px-4 py-2 text-gray-400 text-xs">
+                  {rn.items_processed ?? '-'}
+                  {#if summary.hasData && summary.count > 0}
+                    <span class="text-gray-600 ml-1">({summary.type}, {summary.count})</span>
+                  {/if}
+                </td>
                 <td class="px-4 py-2 text-gray-400 text-xs">{rn.duration_ms ? `${rn.duration_ms}ms` : '-'}</td>
                 <td class="px-4 py-2 text-gray-400 text-xs">{rn.attempt_count}/{rn.max_retries}</td>
                 <td class="px-4 py-2 text-xs text-red-400 max-w-xs truncate" title={rn.error_message || ''}>{rn.error_message || '-'}</td>
               </tr>
+              {#if summary.hasData}
+                <tr class="border-b border-gray-800/50">
+                  <td colspan="7" class="px-4 py-1">
+                    <button
+                      onclick={() => togglePreview(rn.id)}
+                      class="flex items-center gap-1.5 text-xs text-gray-500 hover:text-gray-300 transition-colors"
+                    >
+                      <svg
+                        class="w-3 h-3 transition-transform {isExpanded ? 'rotate-90' : ''}"
+                        viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                      >
+                        <polyline points="9 18 15 12 9 6"/>
+                      </svg>
+                      {isExpanded ? 'Hide' : 'Preview'} output
+                      {#if summary.count > 0}
+                        <span class="text-gray-600">({summary.count} items)</span>
+                      {/if}
+                    </button>
+                    {#if isExpanded}
+                      <div class="mt-2 mb-1 rounded-lg border border-gray-800 bg-gray-950 overflow-hidden">
+                        <div class="flex items-center justify-between px-3 py-1.5 border-b border-gray-800 bg-gray-900/50">
+                          <span class="text-xs text-gray-500">Output Preview {summary.count > 15 ? `(showing 15 of ${summary.count})` : ''}</span>
+                          <span class="text-xs text-gray-600 font-mono">{summary.type}</span>
+                        </div>
+                        <pre class="px-3 py-2 text-xs text-gray-300 font-mono overflow-x-auto whitespace-pre-wrap max-h-80 overflow-y-auto">{summary.preview || '(no previewable items)'}</pre>
+                      </div>
+                    {/if}
+                  </td>
+                </tr>
+              {/if}
             {/each}
           </tbody>
         </table>

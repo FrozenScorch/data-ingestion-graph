@@ -49,10 +49,19 @@ class GraphState {
       const detail = await graphService.getGraph(id);
       this.currentGraph = detail;
 
-      // Restore nodes/edges from latest version
+      // Restore nodes/edges from latest version (deduplicate by id to guard against backend duplicates)
       if (detail.latest_version) {
         const v = detail.latest_version;
-        this.nodes = (v.nodes_data?.nodes as GraphNode[]) ?? [];
+        const rawNodes = (v.nodes_data?.nodes as GraphNode[]) ?? [];
+        const seen = new Set<string>();
+        const deduped: GraphNode[] = [];
+        for (const n of rawNodes) {
+          if (!seen.has(n.id)) {
+            seen.add(n.id);
+            deduped.push(n);
+          }
+        }
+        this.nodes = deduped;
         this.edges = (v.edges_data?.edges as GraphEdge[]) ?? [];
       } else {
         this.nodes = [];

@@ -30,6 +30,25 @@ from app.engine.executor import DAGExecutor
 router = APIRouter(tags=["executions"])
 
 
+def _unpack_version_data(nodes_data: dict | None, edges_data: dict | list | None) -> tuple[dict, list]:
+    """Unpack version data from frontend storage format into executor format.
+
+    Frontend saves: nodes_data={"nodes": [GraphNode, ...]}, edges_data={"edges": [GraphEdge, ...]}
+    Executor expects: nodes_data={node_id: node_def}, edges_data=[edge_dict, ...]
+    """
+    # Unpack nodes: from {"nodes": [...]} to {node_id: node_def, ...}
+    if isinstance(nodes_data, dict) and "nodes" in nodes_data:
+        nodes_list = nodes_data["nodes"]
+        if isinstance(nodes_list, list):
+            nodes_data = {str(n.get("id", n.get("node_id"))): n for n in nodes_list}
+
+    # Unpack edges: from {"edges": [...]} to [edge_dict, ...]
+    if isinstance(edges_data, dict) and "edges" in edges_data:
+        edges_data = edges_data["edges"]
+
+    return nodes_data or {}, edges_data or []
+
+
 @router.post("/api/graphs/{graph_id}/run", response_model=RunResponse, status_code=status.HTTP_201_CREATED)
 async def start_run(
     graph_id: UUID,
@@ -76,13 +95,15 @@ async def start_run(
                         __import__("sqlalchemy").select(GraphVersion).where(GraphVersion.id == graph_version_id)
                     )
                     version = result.scalar_one_or_none()
-                    nodes_data = version.nodes_data or {}
-                    edges_data = version.edges_data or []
+                    raw_nodes = version.nodes_data or {}
+                    raw_edges = version.edges_data or []
                     node_configs = version.node_configs or {}
                 else:
-                    nodes_data = {}
-                    edges_data = []
+                    raw_nodes = {}
+                    raw_edges = []
                     node_configs = {}
+
+                nodes_data, edges_data = _unpack_version_data(raw_nodes, raw_edges)
 
                 executor = DAGExecutor(bg_db, ws_manager)
                 await executor.execute(run, nodes_data, edges_data, node_configs)
@@ -204,14 +225,16 @@ async def retry_failed_run(
         version = result.scalar_one_or_none()
         if not version:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Graph version not found")
-        nodes_data = version.nodes_data or {}
-        edges_data = version.edges_data or []
+        raw_nodes = version.nodes_data or {}
+        raw_edges = version.edges_data or []
         node_configs = version.node_configs or {}
     else:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Run has no graph version, cannot retry",
         )
+
+    nodes_data, edges_data = _unpack_version_data(raw_nodes, raw_edges)
 
     # Reset run status
     run.status = "pending"
@@ -359,14 +382,16 @@ async def replay_run(
         version = result.scalar_one_or_none()
         if not version:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Graph version not found")
-        nodes_data = version.nodes_data or {}
-        edges_data = version.edges_data or []
+        raw_nodes = version.nodes_data or {}
+        raw_edges = version.edges_data or []
         node_configs = version.node_configs or {}
     else:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Run has no graph version, cannot replay",
         )
+
+    nodes_data, edges_data = _unpack_version_data(raw_nodes, raw_edges)
 
     # Create a new run
     new_run = await create_run(

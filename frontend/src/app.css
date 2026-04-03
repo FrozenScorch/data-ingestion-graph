@@ -45,10 +45,21 @@
   stroke-width: 2;
 }
 
+.react-flow__edge.selected .react-flow__edge-path {
+  stroke: #818cf8;
+  stroke-width: 3;
+}
+
 .react-flow__connection-line {
   stroke: #6366f1;
   stroke-width: 2;
   stroke-dasharray: 5;
+}
+
+/* Smooth edge transitions on hover */
+.react-flow__edge:hover .react-flow__edge-path {
+  stroke: #818cf8;
+  stroke-width: 3;
 }
 
 /* Custom scrollbar */

@@ -1,14 +1,52 @@
 <script lang="ts">
-  import { graph } from '$lib/stores';
+  import { graph, execution } from '$lib/stores';
   import { nodeRegistry } from '$lib/stores';
   import type { ConfigField } from '$lib/types';
   import ModelSelector from './ModelSelector.svelte';
 
-  let { onClose } = $props();
+  let { onClose, onDelete }: { onClose: () => void; onDelete: () => void } = $props();
 
   let node = $derived(graph.selectedNode);
   let nodeType = $derived(node ? nodeRegistry.getNodeByType(node.type) : null);
   let config = $derived(node?.data.config ?? {});
+
+  // Latest run output for the selected node
+  let nodeRunOutput = $derived(() => {
+    if (!graph.selectedNodeId) return null;
+    return execution.nodeStatuses.get(graph.selectedNodeId) ?? null;
+  });
+
+  let showRunOutput = $state(false);
+
+  function formatOutputPreview(output: Record<string, unknown> | null): string {
+    if (!output || typeof output !== 'object') return '';
+    // Extract items from common output shapes
+    const items: unknown[] = Array.isArray(output)
+      ? output
+      : Array.isArray((output as Record<string, unknown>).items)
+        ? (output as Record<string, unknown>).items as unknown[]
+        : Array.isArray((output as Record<string, unknown>).chunks)
+          ? (output as Record<string, unknown>).chunks as unknown[]
+          : Object.keys(output).length > 0
+            ? [output]
+            : [];
+    const preview = items.slice(0, 10).map(item => {
+      if (typeof item === 'string') return item.length > 100 ? item.slice(0, 100) + '...' : item;
+      try {
+        const str = JSON.stringify(item);
+        return str.length > 150 ? str.slice(0, 150) + '...' : str;
+      } catch { return String(item); }
+    }).join('\n');
+    return preview;
+  }
+
+  function getOutputItemCount(output: Record<string, unknown> | null): number {
+    if (!output || typeof output !== 'object') return 0;
+    if (Array.isArray(output)) return output.length;
+    if (Array.isArray((output as Record<string, unknown>).items)) return ((output as Record<string, unknown>).items as unknown[]).length;
+    if (Array.isArray((output as Record<string, unknown>).chunks)) return ((output as Record<string, unknown>).chunks as unknown[]).length;
+    return Object.keys(output).length > 0 ? 1 : 0;
+  }
 
   function updateConfig(key: string, value: unknown) {
     if (!graph.selectedNodeId) return;
@@ -49,16 +87,32 @@
         "></div>
         <h3 class="text-sm font-medium text-gray-200 truncate">{nodeType.display_name}</h3>
       </div>
-      <button
-        onclick={onClose}
-        class="text-gray-500 hover:text-gray-300 transition-colors"
-        aria-label="Close config panel"
-      >
-        <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <line x1="18" y1="6" x2="6" y2="18"/>
-          <line x1="6" y1="6" x2="18" y2="18"/>
-        </svg>
-      </button>
+      <div class="flex items-center gap-1 shrink-0">
+        <button
+          onclick={onDelete}
+          class="text-gray-500 hover:text-red-400 transition-colors"
+          aria-label="Delete node"
+          title="Delete node (Delete)"
+        >
+          <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <polyline points="3 6 5 6 21 6"/>
+            <path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6"/>
+            <path d="M10 11v6"/>
+            <path d="M14 11v6"/>
+            <path d="M9 6V4a1 1 0 011-1h4a1 1 0 011 1v2"/>
+          </svg>
+        </button>
+        <button
+          onclick={onClose}
+          class="text-gray-500 hover:text-gray-300 transition-colors"
+          aria-label="Close config panel"
+        >
+          <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <line x1="18" y1="6" x2="6" y2="18"/>
+            <line x1="6" y1="6" x2="18" y2="18"/>
+          </svg>
+        </button>
+      </div>
     </div>
 
     <!-- Description -->
@@ -168,6 +222,36 @@
           {/if}
         </div>
       {/each}
+
+      <!-- Latest Run Output -->
+      {#if nodeRunOutput() && nodeRunOutput().output_data}
+        {@const runOut = nodeRunOutput()}
+        <div class="border-t border-gray-800 pt-4">
+          <button
+            onclick={() => showRunOutput = !showRunOutput}
+            class="flex items-center gap-1.5 text-xs text-gray-400 hover:text-gray-200 transition-colors w-full"
+          >
+            <svg
+              class="w-3 h-3 transition-transform {showRunOutput ? 'rotate-90' : ''}"
+              viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+            >
+              <polyline points="9 18 15 12 9 6"/>
+            </svg>
+            Latest Run Output
+            <span class="text-gray-600 ml-auto">
+              {runOut.status}
+              {#if getOutputItemCount(runOut.output_data) > 0}
+                &middot; {getOutputItemCount(runOut.output_data)} items
+              {/if}
+            </span>
+          </button>
+          {#if showRunOutput}
+            <div class="mt-2 rounded-lg border border-gray-800 bg-gray-950 overflow-hidden">
+              <pre class="px-3 py-2 text-xs text-gray-300 font-mono overflow-x-auto whitespace-pre-wrap max-h-60 overflow-y-auto">{formatOutputPreview(runOut.output_data) || '(no previewable items)'}</pre>
+            </div>
+          {/if}
+        </div>
+      {/if}
     </div>
   </div>
 {:else}
