@@ -19,6 +19,19 @@ logger = logging.getLogger(__name__)
 
 EDGAR_SEARCH_URL = "https://efts.sec.gov/LATEST/search-index"
 
+# 2024 Fortune 500 top companies (ticker symbols)
+FORTUNE_500_TICKERS: list[str] = [
+    "WMT", "AMZN", "AAPL", "UNH", "CVX",
+    "EXC", "BHGE", "MET", "F", "KO",
+    "AIG", "LIN", "PFE", "JPM", "CMCSA",
+    "BA", "CVS", "VZ", "T", "HD",
+    "XOM", "BAC", "WFC", "C", "GOOGL",
+    "BRK.B", "MS", "RTX", "ABT", "COST",
+    "MCD", "NKE", "MRK", "DIS", "PG",
+    "PM", "TMO", "UPS", "INTC", "CSCO",
+    "ADBE", "PEP", "AVGO", "TXN", "QCOM",
+]
+
 
 class _HTMLStripper(HTMLParser):
     """Strip HTML tags and extract text content."""
@@ -84,7 +97,7 @@ class SECEdgarSourceNode(BaseNode):
             "properties": {
                 "identifier": {
                     "type": "string",
-                    "description": "Company ticker (e.g. AAPL) or CIK number",
+                    "description": "Company ticker (e.g. AAPL, MSFT, GOOG), CIK number, or 'fortune500' for Fortune 50 preset",
                 },
                 "filing_type": {
                     "type": "string",
@@ -137,6 +150,27 @@ class SECEdgarSourceNode(BaseNode):
         email = context.config.get("user_agent_email", "")
         max_filings = context.config.get("max_filings", 10)
 
+        # Parse tickers from identifier (comma-separated)
+        tickers = [t.strip().upper() for t in identifier.split(",") if t.strip()]
+
+        # Check for fortune500 preset
+        if tickers and tickers[0].lower() == "fortune500":
+            tickers = FORTUNE_500_TICKERS
+
+        if not tickers:
+            return NodeResult(
+                success=False,
+                output_data={"documents": []},
+                items_processed=0,
+                error_message="No valid ticker(s) provided in identifier",
+            )
+
+        logger.info(
+            "Processing SEC EDGAR filings for %d ticker(s): %s",
+            len(tickers),
+            ", ".join(tickers[:10]) + ("..." if len(tickers) > 10 else ""),
+        )
+
         user_agent = f"IngestionGraph/1.0 (mailto:{email})"
 
         headers = {
@@ -145,145 +179,186 @@ class SECEdgarSourceNode(BaseNode):
         }
 
         documents: list[dict[str, Any]] = []
+        # Track total filings across all tickers to respect max_filings cap
+        total_downloaded = 0
 
         try:
             async with httpx.AsyncClient(timeout=60.0) as client:
-                # Build search query
-                forms_param = filing_type if filing_type != "ALL" else ""
-                params: dict[str, str] = {
-                    "q": identifier,
-                    "dateRange": "custom",
-                    "startdt": start_date,
-                    "enddt": end_date,
-                }
-                if forms_param:
-                    params["forms"] = forms_param
+                for ticker in tickers:
+                    if total_downloaded >= max_filings:
+                        logger.info("Reached max_filings limit (%d), stopping ticker loop", max_filings)
+                        break
 
-                # Search for filings
-                response = await client.get(
-                    EDGAR_SEARCH_URL,
-                    params=params,
-                    headers=headers,
-                )
-                response.raise_for_status()
+                    remaining = max_filings - total_downloaded
+                    logger.info("Searching EDGAR for ticker=%s (remaining quota: %d)", ticker, remaining)
 
-                search_data = response.json()
+                    # Build search query
+                    forms_param = filing_type if filing_type != "ALL" else ""
+                    params: dict[str, str] = {
+                        "q": ticker,
+                        "dateRange": "custom",
+                        "startdt": start_date,
+                        "enddt": end_date,
+                    }
+                    if forms_param:
+                        params["forms"] = forms_param
 
-                # Debug: log raw response structure for diagnosis
-                logger.info(f"EDGAR search response keys: {list(search_data.keys()) if isinstance(search_data, dict) else type(search_data)}")
+                    # Search for filings
+                    try:
+                        response = await client.get(
+                            EDGAR_SEARCH_URL,
+                            params=params,
+                            headers=headers,
+                        )
+                        response.raise_for_status()
+                    except httpx.HTTPError as e:
+                        logger.error("SEC EDGAR search failed for ticker %s: %s", ticker, e)
+                        continue
 
-                # Extract filing entries from response.
-                # EDGAR full-text search returns: {"hits": {"hits": [{"_source": {...}}]}}
-                hits: list[dict[str, Any]] = []
-                if isinstance(search_data, dict):
-                    # Try nested hits.hits
-                    outer_hits = search_data.get("hits")
-                    if isinstance(outer_hits, dict):
-                        inner_hits = outer_hits.get("hits")
-                        if isinstance(inner_hits, list):
-                            hits = inner_hits
-                    # Also try flat structures
-                    if not hits:
-                        for key in ("hits", "filings", "results", "entries"):
-                            val = search_data.get(key)
-                            if isinstance(val, list):
-                                hits = val
-                                break
-                            elif isinstance(val, dict):
-                                sub = val.get("hits", val.get("filings", val.get("results", [])))
-                                if isinstance(sub, list):
-                                    hits = sub
-                                    break
+                    search_data = response.json()
 
-                if not hits:
-                    logger.warning("No filing entries found in EDGAR response: %s", str(search_data)[:500])
-                    return NodeResult(
-                        success=True,
-                        output_data={"documents": []},
-                        items_processed=0,
-                        metadata={"identifier": identifier, "filing_type": filing_type, "warning": "No filings found", "raw_response_keys": list(search_data.keys()) if isinstance(search_data, dict) else str(type(search_data))},
+                    # Debug: log raw response structure for diagnosis
+                    logger.info(
+                        "EDGAR search response keys for %s: %s",
+                        ticker,
+                        list(search_data.keys()) if isinstance(search_data, dict) else type(search_data),
                     )
 
-                # Extract document URLs from filings
-                filing_urls: list[tuple[str, str, str]] = []  # (url, filename, cik)
-                for hit in hits[:max_filings]:
-                    # EDGAR wraps results in _source
-                    hit_data = hit.get("_source", hit) if isinstance(hit, dict) else hit
-                    if not isinstance(hit_data, dict):
+                    # Extract filing entries from response.
+                    # EDGAR full-text search returns: {"hits": {"hits": [{"_source": {...}}]}}
+                    hits: list[dict[str, Any]] = []
+                    if isinstance(search_data, dict):
+                        # Try nested hits.hits
+                        outer_hits = search_data.get("hits")
+                        if isinstance(outer_hits, dict):
+                            inner_hits = outer_hits.get("hits")
+                            if isinstance(inner_hits, list):
+                                hits = inner_hits
+                        # Also try flat structures
+                        if not hits:
+                            for key in ("hits", "filings", "results", "entries"):
+                                val = search_data.get(key)
+                                if isinstance(val, list):
+                                    hits = val
+                                    break
+                                elif isinstance(val, dict):
+                                    sub = val.get("hits", val.get("filings", val.get("results", [])))
+                                    if isinstance(sub, list):
+                                        hits = sub
+                                        break
+
+                    if not hits:
+                        logger.warning("No filing entries found for ticker %s", ticker)
                         continue
 
-                    # Build filing detail URL from accession number (adsh)
-                    adsh = hit_data.get("adsh", "")
-                    ciks = hit_data.get("ciks", [])
-                    cik = ciks[0] if isinstance(ciks, list) and ciks else str(ciks)
+                    # Build .txt filing URLs from search hits
+                    filing_urls: list[tuple[str, str, str, str]] = []  # (doc_url, filename, cik, adsh)
+                    for hit in hits[:remaining]:
+                        # EDGAR wraps results in _source
+                        hit_data = hit.get("_source", hit) if isinstance(hit, dict) else hit
+                        if not isinstance(hit_data, dict):
+                            continue
 
-                    if adsh and cik:
-                        # EDGAR filing URL pattern: /Archives/edgar/data/{CIK}/{ADSH}
-                        clean_cik = str(cik).lstrip("0")
-                        clean_adsh = adsh.replace("-", "")
-                        doc_url = f"https://www.sec.gov/Archives/edgar/data/{clean_cik}/{clean_adsh}/{adsh}-index.htm"
-                    else:
-                        doc_url = ""
+                        # Build .txt full submission URL from accession number (adsh) and cik
+                        adsh = hit_data.get("adsh", "")
+                        ciks = hit_data.get("ciks", [])
+                        cik = ciks[0] if isinstance(ciks, list) and ciks else str(ciks)
 
-                    form = hit_data.get("form", filing_type)
-                    file_desc = hit_data.get("file_description", "")
-                    display_names = hit_data.get("display_names", [])
-                    name = display_names[0] if isinstance(display_names, list) and display_names else str(display_names)
-                    filename = f"{form} - {name} - {file_desc}"
+                        if adsh and cik:
+                            clean_cik = str(cik).lstrip("0")
+                            clean_adsh = adsh.replace("-", "")
+                            doc_url = f"https://www.sec.gov/Archives/edgar/data/{clean_cik}/{clean_adsh}/{adsh}.txt"
+                        else:
+                            continue
 
-                    if doc_url:
-                        filing_urls.append((doc_url, filename, cik))
+                        form = hit_data.get("form", filing_type)
+                        file_desc = hit_data.get("file_description", "")
+                        display_names = hit_data.get("display_names", [])
+                        name = display_names[0] if isinstance(display_names, list) and display_names else str(display_names)
+                        filename = f"{form} - {name} - {file_desc}"
 
-                # Download each filing document
-                for idx, (url, filename, cik) in enumerate(filing_urls[:max_filings]):
-                    try:
-                        doc_response = await client.get(url, headers=headers)
-                        doc_response.raise_for_status()
+                        filing_urls.append((doc_url, filename, cik, adsh))
 
-                        # The index page links to the actual filing document.
-                        # Look for the primary document link in the index table.
-                        raw_html = doc_response.text
-                        # Find the primary .htm document link (not .xml, not -index.htm)
-                        import re as _re
-                        doc_link_match = _re.search(
-                            r'href="([^"]*\.(htm)(?!\.xml)[^"]*(?:10-|8-K|DEF |13F|10Q)[^"]*\.htm)"',
-                            raw_html, _re.IGNORECASE
-                        )
-                        if doc_link_match:
-                            doc_path = doc_link_match.group(1)
-                            # Resolve relative URLs
-                            if doc_path.startswith("/"):
-                                doc_url_final = f"https://www.sec.gov{doc_path}"
-                            else:
-                                doc_url_final = f"https://www.sec.gov/Archives/edgar/data/{cik.lstrip('0')}/{doc_path}"
-                            doc_response = await client.get(doc_url_final, headers=headers)
+                    # Download each filing's .txt submission file
+                    for url, filename, cik, adsh in filing_urls:
+                        if total_downloaded >= max_filings:
+                            break
+
+                        try:
+                            doc_response = await client.get(url, headers=headers)
                             doc_response.raise_for_status()
-                            raw_html = doc_response.text
 
-                        cleaned_text = _strip_html(raw_html)
+                            raw_text = doc_response.text
 
-                        if cleaned_text:
-                            documents.append({
-                                "text": cleaned_text,
-                                "metadata": {
-                                    "source": url,
-                                    "name": filename,
-                                    "filing_type": filing_type,
-                                    "cik": str(cik),
-                                    "identifier": identifier,
-                                },
-                            })
+                            # Split on <DOCUMENT> tags to get individual document sections
+                            doc_sections = raw_text.split("<DOCUMENT>")
 
-                        # SEC rate limiting: sleep between requests
-                        if idx < len(filing_urls[:max_filings]) - 1:
-                            await asyncio.sleep(0.15)
+                            primary_content: str | None = None
 
-                    except httpx.HTTPError as e:
-                        logger.error(f"Failed to download filing {url}: {e}")
-                        continue
+                            for section in doc_sections:
+                                section = section.strip()
+                                if not section:
+                                    continue
+
+                                # Extract <TYPE> from the section header
+                                type_match = re.search(r"<TYPE>([^<]+)", section)
+                                doc_type = type_match.group(1).strip() if type_match else ""
+
+                                # Extract content between <TEXT> and </TEXT>
+                                text_match = re.search(r"<TEXT>(.*?)</TEXT>", section, re.DOTALL | re.IGNORECASE)
+                                if not text_match:
+                                    continue
+
+                                content = text_match.group(1)
+
+                                # Keep the primary document that matches the filing type
+                                if doc_type.upper() == filing_type.upper():
+                                    primary_content = content
+                                    break
+
+                            # Fallback: if no matching type found, keep the first section
+                            if primary_content is None and doc_sections:
+                                for section in doc_sections:
+                                    section = section.strip()
+                                    if not section:
+                                        continue
+                                    text_match = re.search(r"<TEXT>(.*?)</TEXT>", section, re.DOTALL | re.IGNORECASE)
+                                    if text_match:
+                                        primary_content = text_match.group(1)
+                                        break
+
+                            if primary_content is not None:
+                                cleaned_text = _strip_html(primary_content)
+
+                                if cleaned_text:
+                                    documents.append({
+                                        "text": cleaned_text,
+                                        "metadata": {
+                                            "source": url,
+                                            "name": filename,
+                                            "filing_type": filing_type,
+                                            "cik": str(cik),
+                                            "adsh": adsh,
+                                            "ticker": ticker,
+                                            "identifier": identifier,
+                                        },
+                                    })
+                                    total_downloaded += 1
+
+                            # SEC rate limiting: sleep between requests
+                            if total_downloaded < max_filings:
+                                await asyncio.sleep(0.15)
+
+                        except httpx.HTTPError as e:
+                            logger.error("Failed to download filing %s: %s", url, e)
+                            continue
+
+                    # Rate limit between ticker searches
+                    if total_downloaded < max_filings:
+                        await asyncio.sleep(0.15)
 
         except httpx.HTTPError as e:
-            logger.error(f"SEC EDGAR request failed: {e}")
+            logger.error("SEC EDGAR request failed: %s", e)
             return NodeResult(
                 success=False,
                 output_data={"documents": documents},
@@ -291,7 +366,7 @@ class SECEdgarSourceNode(BaseNode):
                 error_message=f"SEC EDGAR request failed: {str(e)}",
             )
         except Exception as e:
-            logger.exception(f"SECEdgarSourceNode error: {e}")
+            logger.exception("SECEdgarSourceNode error: %s", e)
             return NodeResult(
                 success=False,
                 output_data={"documents": documents},
@@ -308,6 +383,7 @@ class SECEdgarSourceNode(BaseNode):
                 "filing_type": filing_type,
                 "start_date": start_date,
                 "end_date": end_date,
+                "tickers_processed": len(tickers),
                 "total_documents": len(documents),
             },
         )
