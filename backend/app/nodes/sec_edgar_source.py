@@ -169,58 +169,71 @@ class SECEdgarSourceNode(BaseNode):
 
                 search_data = response.json()
 
-                # Extract filing entries from response
-                filings: list[dict[str, Any]] = []
-                # EDGAR search-index returns filings in different formats;
-                # try common response structures
-                hits = search_data.get("hits", search_data.get("filings", search_data.get("results", [])))
-                if not hits and isinstance(search_data, dict):
-                    # Some EDGAR endpoints nest under keys
-                    for key in ("hits", "filings", "results", "entries"):
-                        nested = search_data.get(key)
-                        if isinstance(nested, dict):
-                            hits = nested.get("hits", nested.get("filings", []))
-                            break
-                        elif isinstance(nested, list):
-                            hits = nested
-                            break
+                # Debug: log raw response structure for diagnosis
+                logger.info(f"EDGAR search response keys: {list(search_data.keys()) if isinstance(search_data, dict) else type(search_data)}")
 
-                if not isinstance(hits, list):
-                    logger.warning("No filing entries found in EDGAR response")
+                # Extract filing entries from response.
+                # EDGAR full-text search returns: {"hits": {"hits": [{"_source": {...}}]}}
+                hits: list[dict[str, Any]] = []
+                if isinstance(search_data, dict):
+                    # Try nested hits.hits
+                    outer_hits = search_data.get("hits")
+                    if isinstance(outer_hits, dict):
+                        inner_hits = outer_hits.get("hits")
+                        if isinstance(inner_hits, list):
+                            hits = inner_hits
+                    # Also try flat structures
+                    if not hits:
+                        for key in ("hits", "filings", "results", "entries"):
+                            val = search_data.get(key)
+                            if isinstance(val, list):
+                                hits = val
+                                break
+                            elif isinstance(val, dict):
+                                sub = val.get("hits", val.get("filings", val.get("results", [])))
+                                if isinstance(sub, list):
+                                    hits = sub
+                                    break
+
+                if not hits:
+                    logger.warning("No filing entries found in EDGAR response: %s", str(search_data)[:500])
                     return NodeResult(
                         success=True,
                         output_data={"documents": []},
                         items_processed=0,
-                        metadata={"identifier": identifier, "filing_type": filing_type, "warning": "No filings found"},
+                        metadata={"identifier": identifier, "filing_type": filing_type, "warning": "No filings found", "raw_response_keys": list(search_data.keys()) if isinstance(search_data, dict) else str(type(search_data))},
                     )
 
                 # Extract document URLs from filings
                 filing_urls: list[tuple[str, str, str]] = []  # (url, filename, cik)
                 for hit in hits[:max_filings]:
-                    if isinstance(hit, dict):
-                        # Look for the primary document URL
-                        doc_url = (
-                            hit.get("linkToFilingDetails")
-                            or hit.get("filingDetailUrl")
-                            or hit.get("url")
-                            or ""
-                        )
-                        # Build full URL if relative
-                        if doc_url and not doc_url.startswith("http"):
-                            doc_url = f"https://www.sec.gov/Archives/edgar/data/{doc_url}"
+                    # EDGAR wraps results in _source: {"_source": {"file_num": "...", ...}}
+                    hit_data = hit.get("_source", hit) if isinstance(hit, dict) else hit
+                    if not isinstance(hit_data, dict):
+                        continue
 
-                        filename = (
-                            hit.get("fileNum")
-                            or hit.get("filename")
-                            or hit.get("displayNames", [{}])[0].get("name", "")
-                            if isinstance(hit.get("displayNames"), list)
-                            else hit.get("displayNames", {}).get("name", "")
-                            or doc_url.split("/")[-1] if doc_url else "unknown"
-                        )
-                        cik = hit.get("cik", hit.get("entityId", ""))
+                    # Look for the primary document URL — EDGAR uses several field names
+                    doc_url = (
+                        hit_data.get("linkToFilingDetails")
+                        or hit_data.get("filingDetailUrl")
+                        or hit_data.get("url")
+                        or hit_data.get("filing_href")
+                        or ""
+                    )
+                    # Build full URL if relative
+                    if doc_url and not doc_url.startswith("http"):
+                        doc_url = f"https://www.sec.gov/Archives/edgar/data/{doc_url}"
 
-                        if doc_url:
-                            filing_urls.append((doc_url, filename, cik))
+                    filename = (
+                        hit_data.get("fileNum")
+                        or hit_data.get("file_num")
+                        or hit_data.get("filename")
+                        or ""
+                    )
+                    cik = str(hit_data.get("cik", hit_data.get("entityId", "")))
+
+                    if doc_url:
+                        filing_urls.append((doc_url, filename, cik))
 
                 # Download each filing document
                 for idx, (url, filename, cik) in enumerate(filing_urls[:max_filings]):
