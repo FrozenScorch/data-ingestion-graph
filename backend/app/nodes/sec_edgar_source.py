@@ -267,7 +267,7 @@ class SECEdgarSourceNode(BaseNode):
                         if adsh and cik:
                             clean_cik = str(cik).lstrip("0")
                             clean_adsh = adsh.replace("-", "")
-                            doc_url = f"https://www.sec.gov/Archives/edgar/data/{clean_cik}/{clean_adsh}/{adsh}.txt"
+                            index_url = f"https://www.sec.gov/Archives/edgar/data/{clean_cik}/{clean_adsh}/{adsh}-index.htm"
                         else:
                             continue
 
@@ -277,80 +277,80 @@ class SECEdgarSourceNode(BaseNode):
                         name = display_names[0] if isinstance(display_names, list) and display_names else str(display_names)
                         filename = f"{form} - {name} - {file_desc}"
 
-                        filing_urls.append((doc_url, filename, cik, adsh))
+                        filing_urls.append((index_url, filename, cik, adsh, form))
 
-                    # Download each filing's .txt submission file
-                    for url, filename, cik, adsh in filing_urls:
+                    # Download each filing's primary document via the index page
+                    for index_url, filename, cik, adsh, form in filing_urls:
                         if total_downloaded >= max_filings:
                             break
 
                         try:
-                            doc_response = await client.get(url, headers=headers)
-                            doc_response.raise_for_status()
+                            # Step 1: Download the index page and find the primary document link
+                            index_response = await client.get(index_url, headers=headers)
+                            index_response.raise_for_status()
 
-                            raw_text = doc_response.text
+                            primary_doc_url: str | None = None
 
-                            # Split on <DOCUMENT> tags to get individual document sections
-                            doc_sections = raw_text.split("<DOCUMENT>")
+                            # Parse the index page table: find first row whose Type column
+                            # matches the filing type. The table has columns: Seq, Type, Document, Description, Size.
+                            rows = re.findall(r"<tr[^>]*>(.*?)</tr>", index_response.text, re.DOTALL | re.IGNORECASE)
+                            for row in rows:
+                                cells = re.findall(r"<td[^>]*>(.*?)</td>", row, re.DOTALL | re.IGNORECASE)
+                                # cells[0]=Seq, cells[1]=Type, cells[2]=Document link, cells[3]=Description, cells[4]=Size
+                                if len(cells) >= 3:
+                                    type_text = re.sub(r"<[^>]+>", "", cells[1]).strip().upper()
+                                    if type_text == form.upper():
+                                        # Found matching row — extract the href from the Document column (cells[2])
+                                        link_match = re.search(r'href="([^"]+)"', cells[2])
+                                        if link_match:
+                                            href = link_match.group(1)
+                                            # Resolve /ix?doc= or absolute /Archives/ links
+                                            if href.startswith("/"):
+                                                primary_doc_url = f"https://www.sec.gov{href}"
+                                            else:
+                                                primary_doc_url = f"https://www.sec.gov/Archives/edgar/data/{cik.lstrip('0')}/{href}"
+                                            break
 
-                            primary_content: str | None = None
-
-                            for section in doc_sections:
-                                section = section.strip()
-                                if not section:
-                                    continue
-
-                                # Extract <TYPE> from the section header
-                                type_match = re.search(r"<TYPE>([^<]+)", section)
-                                doc_type = type_match.group(1).strip() if type_match else ""
-
-                                # Extract content between <TEXT> and </TEXT>
-                                text_match = re.search(r"<TEXT>(.*?)</TEXT>", section, re.DOTALL | re.IGNORECASE)
-                                if not text_match:
-                                    continue
-
-                                content = text_match.group(1)
-
-                                # Keep the primary document that matches the filing type
-                                if doc_type.upper() == filing_type.upper():
-                                    primary_content = content
-                                    break
-
-                            # Fallback: if no matching type found, keep the first section
-                            if primary_content is None and doc_sections:
-                                for section in doc_sections:
-                                    section = section.strip()
-                                    if not section:
-                                        continue
-                                    text_match = re.search(r"<TEXT>(.*?)</TEXT>", section, re.DOTALL | re.IGNORECASE)
-                                    if text_match:
-                                        primary_content = text_match.group(1)
+                            # Fallback: if no table match, try the first .htm link that isn't an exhibit
+                            if not primary_doc_url:
+                                all_links = re.findall(r'href="(/[^"]+\.htm)"', index_response.text, re.IGNORECASE)
+                                for link in all_links:
+                                    if "exhibit" not in link.lower() and "-index.htm" not in link.lower():
+                                        primary_doc_url = f"https://www.sec.gov{link}"
                                         break
 
-                            if primary_content is not None:
-                                cleaned_text = _strip_html(primary_content)
+                            if not primary_doc_url:
+                                logger.warning("Could not find primary document link in %s", index_url)
+                                continue
 
-                                if cleaned_text:
-                                    documents.append({
-                                        "text": cleaned_text,
-                                        "metadata": {
-                                            "source": url,
-                                            "name": filename,
-                                            "filing_type": filing_type,
-                                            "cik": str(cik),
-                                            "adsh": adsh,
-                                            "ticker": ticker,
-                                            "identifier": identifier,
-                                        },
-                                    })
-                                    total_downloaded += 1
+                            # Step 2: Download the actual primary document
+                            doc_response = await client.get(primary_doc_url, headers=headers)
+                            doc_response.raise_for_status()
+
+                            raw_html = doc_response.text
+                            cleaned_text = _strip_html(raw_html)
+
+                            if cleaned_text:
+                                documents.append({
+                                    "text": cleaned_text,
+                                    "metadata": {
+                                        "source": primary_doc_url,
+                                        "name": filename,
+                                        "filing_type": filing_type,
+                                        "cik": str(cik),
+                                        "adsh": adsh,
+                                        "ticker": ticker,
+                                        "identifier": identifier,
+                                    },
+                                })
+                                total_downloaded += 1
 
                             # SEC rate limiting: sleep between requests
                             if total_downloaded < max_filings:
                                 await asyncio.sleep(0.15)
 
                         except httpx.HTTPError as e:
-                            logger.error("Failed to download filing %s: %s", url, e)
+                            logger.error("Failed to download filing from %s: %s", index_url, e)
                             continue
 
                     # Rate limit between ticker searches
