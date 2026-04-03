@@ -131,12 +131,15 @@
         {@const isEmptyRequired = required && !config[key] && !field.default}
         <div>
           <!-- svelte-ignore a11y_label_has_associated_control -->
-          <label class="block text-xs text-gray-400 mb-1" title={field.description}>
-            {field.description || key.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase())}
+          <label class="block text-xs text-gray-300 mb-0.5 font-medium" title={field.description}>
+            {key.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase())}
             {#if required}
               <span class="text-red-400">*</span>
             {/if}
           </label>
+          {#if field.description}
+            <p class="text-xs text-gray-500 mb-1">{field.description}</p>
+          {/if}
 
           {#if field.type === 'string' && field.enum}
             <!-- Enum dropdown -->
