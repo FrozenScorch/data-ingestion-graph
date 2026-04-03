@@ -42,6 +42,14 @@ class Graph(UUIDMixin, TimestampMixin, Base):
     versions = relationship("GraphVersion", back_populates="graph", lazy="noload", order_by="GraphVersion.version_number.desc()")
     runs = relationship("Run", back_populates="graph", lazy="noload")
 
+    # Transient attribute set by get_graph service to carry the latest version
+    _latest_version = None
+
+    @property
+    def latest_version(self):
+        """Return the latest version for Pydantic serialization (via _latest_version)."""
+        return self._latest_version
+
     def __repr__(self) -> str:
         return f"<Graph id={self.id} name={self.name} status={self.status}>"
 

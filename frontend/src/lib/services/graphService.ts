@@ -31,7 +31,7 @@ export const graphService = {
 
   /** Update graph metadata */
   async updateGraph(id: string, data: GraphUpdate): Promise<Graph> {
-    return api.patch<Graph>(`/graphs/${id}`, data);
+    return api.put<Graph>(`/graphs/${id}`, data);
   },
 
   /** Delete a graph */

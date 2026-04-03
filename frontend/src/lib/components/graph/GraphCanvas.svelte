@@ -1,14 +1,29 @@
 <script lang="ts">
-  import { SvelteFlow, Background, Controls, MiniMap } from '@xyflow/svelte';
+  import { SvelteFlow, Background, Controls, MiniMap, applyNodeChanges, applyEdgeChanges } from '@xyflow/svelte';
   import '@xyflow/svelte/dist/style.css';
   import { graph, execution, nodeRegistry } from '$lib/stores';
   import { nodeTypes } from '$lib/components/nodes/nodeTypeRegistry.js';
-  import type { Connection, Node, Edge, NodeTypeDef } from '$lib/types';
+  import type { Connection, Node, Edge, NodeChange, EdgeChange, NodeTypeDef } from '$lib/types';
   import { onMount } from 'svelte';
 
   let {
     onNodeSelect
   }: { onNodeSelect: (nodeId: string | null) => void } = $props();
+
+  // Debounce timer for auto-save
+  let autoSaveTimer: ReturnType<typeof setTimeout> | null = null;
+  const AUTO_SAVE_DELAY = 2000;
+
+  function triggerAutoSave() {
+    // Only auto-save if the graph has been saved at least once (has a graph ID)
+    if (!graph.currentGraph?.id) return;
+
+    if (autoSaveTimer) clearTimeout(autoSaveTimer);
+    autoSaveTimer = setTimeout(() => {
+      graph.saveVersion(graph.currentGraph!.id);
+      autoSaveTimer = null;
+    }, AUTO_SAVE_DELAY);
+  }
 
   let nodeIdCounter = $state(0);
 
@@ -43,10 +58,18 @@
     onNodeSelect(null);
   }
 
-  // Handle node position changes
-  function handleNodesChange(changes: any[]) {
-    // Svelte Flow handles position updates internally when using bind:nodes
-    // This is called for drag events, etc.
+  // Handle node changes (position, selection, removal, etc.)
+  function handleNodesChange(changes: NodeChange[]) {
+    const updated = applyNodeChanges(changes, graph.nodes);
+    graph.setNodes(updated);
+    triggerAutoSave();
+  }
+
+  // Handle edge changes (selection, removal, etc.)
+  function handleEdgesChange(changes: EdgeChange[]) {
+    const updated = applyEdgeChanges(changes, graph.edges);
+    graph.setEdges(updated);
+    triggerAutoSave();
   }
 
   // Handle drag over (from palette)
@@ -134,6 +157,8 @@
     {nodeTypes}
     {defaultEdgeOptions}
     onconnect={handleConnect}
+    onnodeschange={handleNodesChange}
+    onedgeschange={handleEdgesChange}
     onnodeclick={handleNodeClick}
     onpaneclick={handlePaneClick}
     ondelete={handleDelete}

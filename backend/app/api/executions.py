@@ -86,9 +86,15 @@ async def start_run(
     async def execute_background():
         from app.db.session import AsyncSessionLocal
         from app.ws.execution_ws import ws_manager
+        from app.models.execution import Run
 
         async with AsyncSessionLocal() as bg_db:
             try:
+                # Reload run in background session to avoid detached instance error
+                run = await bg_db.get(Run, run.id)
+                if not run:
+                    return
+
                 if graph_version_id:
                     from app.models.graph import GraphVersion
                     result = await bg_db.execute(
@@ -252,7 +258,10 @@ async def retry_failed_run(
 
         async with AsyncSessionLocal() as bg_db:
             try:
-                await bg_db.refresh(run)
+                # Reload run in background session to avoid detached instance error
+                run = await bg_db.get(Run, run.id)
+                if not run:
+                    return
 
                 # Load checkpoints from the original (failed) run to restore
                 # successful node outputs
@@ -409,8 +418,13 @@ async def replay_run(
 
         async with AsyncSessionLocal() as bg_db:
             try:
+                # Reload new_run in background session to avoid detached instance error
+                from app.models.execution import Run
+                new_run = await bg_db.get(Run, new_run.id)
+                if not new_run:
+                    return
+
                 executor = DAGExecutor(bg_db, ws_manager)
-                await bg_db.refresh(new_run)
                 await executor.execute(new_run, nodes_data, edges_data, node_configs)
             except Exception as e:
                 import logging
