@@ -88,19 +88,21 @@ async def start_run(
         from app.ws.execution_ws import ws_manager
         from app.models.execution import Run
 
-        run_id = run.id  # capture before reassignment to avoid UnboundLocalError
+        # Capture outer-scope values before any local reassignment
+        run_id = run.id
+        version_id = graph_version_id
 
         async with AsyncSessionLocal() as bg_db:
             try:
                 # Reload run in background session to avoid detached instance error
-                run = await bg_db.get(Run, run_id)
-                if not run:
+                bg_run = await bg_db.get(Run, run_id)
+                if not bg_run:
                     return
 
-                if graph_version_id:
+                if version_id:
                     from app.models.graph import GraphVersion
                     result = await bg_db.execute(
-                        __import__("sqlalchemy").select(GraphVersion).where(GraphVersion.id == graph_version_id)
+                        __import__("sqlalchemy").select(GraphVersion).where(GraphVersion.id == version_id)
                     )
                     version = result.scalar_one_or_none()
                     raw_nodes = version.nodes_data or {}
@@ -114,7 +116,7 @@ async def start_run(
                 nodes_data, edges_data = _unpack_version_data(raw_nodes, raw_edges)
 
                 executor = DAGExecutor(bg_db, ws_manager)
-                await executor.execute(run, nodes_data, edges_data, node_configs)
+                await executor.execute(bg_run, nodes_data, edges_data, node_configs)
             except Exception as e:
                 import logging
                 logging.getLogger(__name__).exception(f"Background execution failed: {e}")
@@ -258,16 +260,19 @@ async def retry_failed_run(
         from app.engine.runner import run_node_with_retry
         from app.models.execution import RunStatus, CheckpointType
 
+        # Capture outer-scope values to avoid UnboundLocalError
+        orig_run_id = run.id
+
         async with AsyncSessionLocal() as bg_db:
             try:
                 # Reload run in background session to avoid detached instance error
-                run = await bg_db.get(Run, run.id)
-                if not run:
+                bg_run = await bg_db.get(Run, orig_run_id)
+                if not bg_run:
                     return
 
                 # Load checkpoints from the original (failed) run to restore
                 # successful node outputs
-                checkpoints = await get_checkpoints(bg_db, run.id)
+                checkpoints = await get_checkpoints(bg_db, orig_run_id)
                 restored_outputs = {}
                 for cp in checkpoints:
                     if cp.checkpoint_type == CheckpointType.POST_EXEC.value and cp.node_output:
@@ -278,7 +283,7 @@ async def retry_failed_run(
                 from app.models.execution import RunNode, NodeStatus
                 failed_nodes_result = await bg_db.execute(
                     select(RunNode).where(
-                        RunNode.run_id == run.id,
+                        RunNode.run_id == orig_run_id,
                         RunNode.status == NodeStatus.FAILED.value,
                     )
                 )
@@ -288,7 +293,7 @@ async def retry_failed_run(
                 # If no failed nodes, just run everything from scratch
                 if not failed_node_ids:
                     executor = DAGExecutor(bg_db, ws_manager)
-                    await executor.execute(run, nodes_data, edges_data, node_configs)
+                    await executor.execute(bg_run, nodes_data, edges_data, node_configs)
                     return
 
                 # Compute topological levels
@@ -308,7 +313,7 @@ async def retry_failed_run(
                     if source in nodes_to_reexecute:
                         nodes_to_reexecute.add(target)
 
-                run.status = RunStatus.RUNNING.value
+                bg_run.status = RunStatus.RUNNING.value
                 await bg_db.commit()
 
                 # Execute levels, skipping already-completed nodes
@@ -338,7 +343,7 @@ async def retry_failed_run(
 
                         run_node = await run_node_with_retry(
                             db=bg_db,
-                            run_id=run.id,
+                            run_id=orig_run_id,
                             node_id=node_id,
                             node_type=node_type,
                             config=node_config,
@@ -349,20 +354,20 @@ async def retry_failed_run(
                         if run_node.output_data and run_node.status == "completed":
                             exec_state["outputs"][node_id] = run_node.output_data
                         elif run_node.status == "failed":
-                            run.status = RunStatus.FAILED.value
-                            run.error_message = f"Retry failed at node {node_id}: {run_node.error_message}"
+                            bg_run.status = RunStatus.FAILED.value
+                            bg_run.error_message = f"Retry failed at node {node_id}: {run_node.error_message}"
                             await bg_db.commit()
                             return
 
-                if run.status == RunStatus.RUNNING.value:
-                    run.status = RunStatus.COMPLETED.value
+                if bg_run.status == RunStatus.RUNNING.value:
+                    bg_run.status = RunStatus.COMPLETED.value
                     await bg_db.commit()
 
             except Exception as e:
                 import logging
                 logging.getLogger(__name__).exception(f"Retry execution failed: {e}")
-                run.status = RunStatus.FAILED.value
-                run.error_message = str(e)
+                bg_run.status = RunStatus.FAILED.value
+                bg_run.error_message = str(e)
                 await bg_db.commit()
 
     background_tasks.add_task(retry_background)
@@ -418,16 +423,19 @@ async def replay_run(
         from app.db.session import AsyncSessionLocal
         from app.ws.execution_ws import ws_manager
 
+        # Capture outer-scope values to avoid UnboundLocalError
+        new_run_id = new_run.id
+
         async with AsyncSessionLocal() as bg_db:
             try:
                 # Reload new_run in background session to avoid detached instance error
                 from app.models.execution import Run
-                new_run = await bg_db.get(Run, new_run.id)
-                if not new_run:
+                bg_run = await bg_db.get(Run, new_run_id)
+                if not bg_run:
                     return
 
                 executor = DAGExecutor(bg_db, ws_manager)
-                await executor.execute(new_run, nodes_data, edges_data, node_configs)
+                await executor.execute(bg_run, nodes_data, edges_data, node_configs)
             except Exception as e:
                 import logging
                 logging.getLogger(__name__).exception(f"Replay execution failed: {e}")
