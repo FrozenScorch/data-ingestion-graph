@@ -158,8 +158,10 @@ class DAGExecutor:
             """Execute a single node with its own session and return (node_id, RunNode)."""
             async with AsyncSessionLocal() as node_db:
                 try:
-                    await node_db.refresh(run)
-                    if run.status == RunStatus.CANCELLED.value:
+                    # Reload run in this session to avoid detached instance error
+                    from app.models.execution import Run
+                    node_run = await node_db.get(Run, run.id)
+                    if node_run and node_run.status == RunStatus.CANCELLED.value:
                         from app.models.execution import RunNode as RN, NodeStatus
                         return node_id, RN(
                             run_id=run.id,
