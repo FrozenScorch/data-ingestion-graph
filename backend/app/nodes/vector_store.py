@@ -8,7 +8,10 @@ Output: {stored_count: N, table: "...", index_created: bool}
 """
 import json
 import logging
+import re
 from typing import Any
+
+_SQL_IDENTIFIER_RE = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
 
 from app.nodes.base import BaseNode, NodeContext, NodeResult, PortDef, PortDataType
 
@@ -135,6 +138,24 @@ class VectorStoreNode(BaseNode):
         content_column = config.get("content_column", "content")
         metadata_column = config.get("metadata_column", "metadata")
         vector_column = config.get("vector_column", "embedding")
+
+        # Validate all SQL identifiers before interpolation to prevent injection
+        for field, value in [
+            ("table_name", table_name),
+            ("id_column", id_column),
+            ("content_column", content_column),
+            ("metadata_column", metadata_column),
+            ("vector_column", vector_column),
+        ]:
+            if not _SQL_IDENTIFIER_RE.match(str(value)):
+                return NodeResult(
+                    success=False,
+                    error_message=(
+                        f"Invalid SQL identifier for {field}: {value!r}. "
+                        "Must start with a letter or underscore and contain only "
+                        "letters, digits, or underscores."
+                    ),
+                )
 
         # Extract embeddings from input data
         input_data = context.input_data
