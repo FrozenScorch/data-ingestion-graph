@@ -1,9 +1,9 @@
 <script lang="ts">
-  import { SvelteFlow, Background, Controls, MiniMap, applyNodeChanges, applyEdgeChanges } from '@xyflow/svelte';
+  import { SvelteFlow, Background, Controls, MiniMap } from '@xyflow/svelte';
   import '@xyflow/svelte/dist/style.css';
   import { graph, execution, nodeRegistry } from '$lib/stores';
   import { nodeTypes } from '$lib/components/nodes/nodeTypeRegistry.js';
-  import type { Connection, Node, Edge, NodeChange, EdgeChange, NodeTypeDef } from '$lib/types';
+  import type { Connection, Node, Edge, NodeTypeDef } from '$lib/types';
   import { onMount } from 'svelte';
 
   let {
@@ -15,7 +15,6 @@
   const AUTO_SAVE_DELAY = 2000;
 
   function triggerAutoSave() {
-    // Only auto-save if the graph has been saved at least once (has a graph ID)
     if (!graph.currentGraph?.id) return;
 
     if (autoSaveTimer) clearTimeout(autoSaveTimer);
@@ -23,6 +22,17 @@
       graph.saveVersion(graph.currentGraph!.id);
       autoSaveTimer = null;
     }, AUTO_SAVE_DELAY);
+  }
+
+  // Sync nodes back to store when SvelteFlow mutates them (position, selection, removal)
+  function syncNodesFromFlow(flowNodes: Node[]) {
+    graph.setNodes(flowNodes);
+    triggerAutoSave();
+  }
+
+  function syncEdgesFromFlow(flowEdges: Edge[]) {
+    graph.setEdges(flowEdges);
+    triggerAutoSave();
   }
 
   let nodeIdCounter = $state(0);
@@ -56,20 +66,6 @@
   function handlePaneClick() {
     graph.selectNode(null);
     onNodeSelect(null);
-  }
-
-  // Handle node changes (position, selection, removal, etc.)
-  function handleNodesChange(changes: NodeChange[]) {
-    const updated = applyNodeChanges(changes, graph.nodes);
-    graph.setNodes(updated);
-    triggerAutoSave();
-  }
-
-  // Handle edge changes (selection, removal, etc.)
-  function handleEdgesChange(changes: EdgeChange[]) {
-    const updated = applyEdgeChanges(changes, graph.edges);
-    graph.setEdges(updated);
-    triggerAutoSave();
   }
 
   // Handle drag over (from palette)
@@ -152,13 +148,13 @@
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <div class="flex-1 relative" role="region" ondragover={handleDragOver} ondrop={handleDrop}>
   <SvelteFlow
-    nodes={graph.nodes}
-    edges={graph.edges}
+    bind:nodes={graph.nodes}
+    bind:edges={graph.edges}
+    onnodeschange={() => syncNodesFromFlow(graph.nodes)}
+    onedgeschange={() => syncEdgesFromFlow(graph.edges)}
     {nodeTypes}
     {defaultEdgeOptions}
     onconnect={handleConnect}
-    onnodeschange={handleNodesChange}
-    onedgeschange={handleEdgesChange}
     onnodeclick={handleNodeClick}
     onpaneclick={handlePaneClick}
     ondelete={handleDelete}
