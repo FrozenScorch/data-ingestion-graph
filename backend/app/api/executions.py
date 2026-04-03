@@ -30,6 +30,17 @@ from app.engine.executor import DAGExecutor
 router = APIRouter(tags=["executions"])
 
 
+def _check_run_access(run, current_user: dict, db) -> None:
+    """Verify the current user has access to the run's graph."""
+    if current_user["role"] == "admin":
+        return
+    graph = db.get(type(run), run.graph_id) if run.graph_id else None
+    if not graph:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Associated graph not found")
+    if str(graph.owner_id) != str(current_user["user_id"]):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No permission")
+
+
 def _unpack_version_data(nodes_data: dict | None, edges_data: dict | list | None) -> tuple[dict, list]:
     """Unpack version data from frontend storage format into executor format.
 
