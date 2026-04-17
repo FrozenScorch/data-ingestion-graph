@@ -132,7 +132,8 @@ class FileSourceNode(BaseNode):
                 if recursive:
                     matched = sorted(base_path.glob(file_pattern))
                 else:
-                    matched = sorted(base_path.glob(file_pattern))
+                    # Non-recursive: only files in the immediate directory
+                    matched = sorted(p for p in base_path.iterdir() if p.is_file())
 
                 # Filter to files only (not directories), and validate containment
                 for p in matched:
@@ -155,7 +156,7 @@ class FileSourceNode(BaseNode):
                     matched = sorted(base_path.glob(file_pattern))
                 else:
                     # Non-recursive: only match in the top-level directory
-                    matched = sorted(Path(base_path).glob(file_pattern))
+                    matched = sorted(p for p in base_path.iterdir() if p.is_file())
 
                 for p in matched:
                     resolved = _validate_path_within_allowed(p, base_path)

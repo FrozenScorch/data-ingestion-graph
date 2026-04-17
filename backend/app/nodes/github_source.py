@@ -44,7 +44,12 @@ class GitHubSourceNode(BaseNode):
         }
 
     async def execute(self, context: NodeContext) -> NodeResult:
-        return NodeResult(success=True, output_data={"json": []}, items_processed=0)
+        return NodeResult(
+            success=False,
+            output_data={"json": []},
+            items_processed=0,
+            error_message="GitHub Source node is not yet implemented",
+        )
 
 
 def register():

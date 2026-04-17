@@ -126,39 +126,46 @@ async def retry_dlq_item(
             detail="No input data available for retry",
         )
 
-    # Attempt to re-execute the node
+    # Attempt to re-execute the node through the retry infrastructure
     try:
-        from app.nodes.base import NodeContext
-        from app.nodes.registry import get_node as registry_get_node
+        from app.engine.runner import run_node_with_retry
+        from app.models.execution import Run
+        from sqlalchemy import select as _s
 
-        node_impl = registry_get_node(item.node_type)
-        if not node_impl:
+        # Retrieve parent run for proper retry context
+        run_result = await db.execute(_s(Run).where(Run.id == item.run_id))
+        run = run_result.scalar_one_or_none()
+        if not run:
             raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Unknown node type: {item.node_type}",
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Parent run not found",
             )
 
-        context = NodeContext(
-            run_id=str(item.run_id) if item.run_id else "dlq-retry",
+        # Execute through the full retry infrastructure
+        run_node = await run_node_with_retry(
+            db=db,
+            run_id=run.id,
             node_id=item.node_id or "dlq-retry-node",
+            node_type=item.node_type,
             config={},
             input_data=item.input_data,
             state={},
+            max_retries=1,
         )
 
-        node_result = await node_impl.execute(context)
+        node_success = run_node.status == "completed"
 
-        if node_result.success:
+        if node_success:
             # Mark as resolved on successful retry
             item.resolved = True
-            item.resolution_note = f"Retry succeeded. Items processed: {node_result.items_processed}"
+            item.resolution_note = f"Retry succeeded. Items processed: {run_node.items_processed}"
             await db.commit()
             await db.refresh(item)
 
             return {
                 "success": True,
                 "message": "Retry succeeded",
-                "items_processed": node_result.items_processed,
+                "items_processed": run_node.items_processed,
                 "item": {
                     "id": str(item.id),
                     "resolved": item.resolved,
@@ -168,13 +175,13 @@ async def retry_dlq_item(
         else:
             # Increment retry count but leave unresolved
             item.retry_count += 1
-            item.error_message = node_result.error_message
+            item.error_message = run_node.error_message
             await db.commit()
             await db.refresh(item)
 
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail=f"Retry failed: {node_result.error_message}",
+                detail=f"Retry failed: {run_node.error_message}",
             )
 
     except HTTPException:
