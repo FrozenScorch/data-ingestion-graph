@@ -147,6 +147,7 @@ class SemanticChunkerNode(BaseNode):
 
             # Get embeddings for all sentences in batches
             all_embeddings: list[list[float]] = []
+            fallback_emitted = False  # Track whether we already emitted fallback chunks for this doc
             for i in range(0, len(all_sentences), batch_size):
                 batch = all_sentences[i : i + batch_size]
                 try:
@@ -160,7 +161,29 @@ class SemanticChunkerNode(BaseNode):
 
                 except Exception as e:
                     logger.error(f"Embedding failed for doc {doc_idx} at offset {i}: {e}")
-                    # Fall back to naive sentence-based chunks
+                    # Fall back to naive sentence-based chunks (only once per document)
+                    if not fallback_emitted:
+                        fallback_emitted = True
+                        for group in candidate_groups:
+                            group_text = " ".join(group["sentences"])
+                            if group_text.strip():
+                                all_chunks.append({
+                                    "text": group_text,
+                                    "metadata": {
+                                        **doc_metadata,
+                                        "source": source,
+                                        "doc_index": doc_idx,
+                                        "chunk_index": global_chunk_index,
+                                        "similarity_score": None,
+                                    },
+                                })
+                                global_chunk_index += 1
+                    continue
+
+            # If embeddings are incomplete or fallback was already emitted, skip semantic splitting
+            if fallback_emitted or not all_embeddings or len(all_embeddings) != len(all_sentences):
+                if not fallback_emitted:
+                    # Only emit fallback chunks if we haven't already
                     for group in candidate_groups:
                         group_text = " ".join(group["sentences"])
                         if group_text.strip():
@@ -175,24 +198,6 @@ class SemanticChunkerNode(BaseNode):
                                 },
                             })
                             global_chunk_index += 1
-                    continue
-
-            if not all_embeddings or len(all_embeddings) != len(all_sentences):
-                # Embeddings incomplete; fall back to naive chunks
-                for group in candidate_groups:
-                    group_text = " ".join(group["sentences"])
-                    if group_text.strip():
-                        all_chunks.append({
-                            "text": group_text,
-                            "metadata": {
-                                **doc_metadata,
-                                "source": source,
-                                "doc_index": doc_idx,
-                                "chunk_index": global_chunk_index,
-                                "similarity_score": None,
-                            },
-                        })
-                        global_chunk_index += 1
                 continue
 
             # Compute cosine similarity between adjacent sentences

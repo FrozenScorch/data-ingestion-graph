@@ -8,11 +8,14 @@ Output: {stored_count: N, table: "...", index_created: bool}
 """
 import json
 import logging
+import re
 from typing import Any
 
 from app.nodes.base import BaseNode, NodeContext, NodeResult, PortDef, PortDataType
 
 logger = logging.getLogger(__name__)
+
+_SQL_IDENTIFIER_RE = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
 
 
 class VectorStoreNode(BaseNode):
@@ -136,6 +139,16 @@ class VectorStoreNode(BaseNode):
         metadata_column = config.get("metadata_column", "metadata")
         vector_column = config.get("vector_column", "embedding")
 
+        # Validate all SQL identifiers to prevent injection
+        for name, value in [("table_name", table_name), ("id_column", id_column),
+                            ("content_column", content_column), ("metadata_column", metadata_column),
+                            ("vector_column", vector_column)]:
+            if not _SQL_IDENTIFIER_RE.match(value):
+                return NodeResult(
+                    success=False,
+                    error_message=f"Invalid {name}: '{value}'. Only alphanumeric characters and underscores are allowed.",
+                )
+
         # Extract embeddings from input data
         input_data = context.input_data
         embeddings_data = input_data.get("embeddings", [])
@@ -166,8 +179,13 @@ class VectorStoreNode(BaseNode):
             """
             await conn.execute(create_table_sql)
 
-            # Insert embeddings
+            # Insert embeddings in batches for performance
             stored_count = 0
+            insert_sql = f"""
+                INSERT INTO "{table_name}" ({content_column}, {metadata_column}, {vector_column})
+                VALUES ($1, $2, $3::vector)
+            """
+            batch_args = []
             for item in embeddings_data:
                 content = item.get("content", item.get("text", ""))
                 metadata = item.get("metadata", {})
@@ -176,24 +194,30 @@ class VectorStoreNode(BaseNode):
                 if not embedding:
                     continue
 
-                # Convert embedding list to pgvector string format: [1.0, 2.0, 3.0, ...]
+                # Validate embedding dimension matches config
+                if len(embedding) != embedding_dim:
+                    return NodeResult(
+                        success=False,
+                        error_message=f"Embedding dimension mismatch: expected {embedding_dim}, got {len(embedding)}. "
+                                      f"Update the embedding_dim config or use a different model.",
+                    )
+
                 embedding_str = "[" + ",".join(str(float(v)) for v in embedding) + "]"
                 metadata_str = json.dumps(metadata) if isinstance(metadata, dict) else str(metadata)
-
-                insert_sql = f"""
-                    INSERT INTO "{table_name}" ({content_column}, {metadata_column}, {vector_column})
-                    VALUES ($1, $2, $3::vector)
-                """
-                await conn.execute(insert_sql, content, metadata_str, embedding_str)
+                batch_args.append((content, metadata_str, embedding_str))
                 stored_count += 1
 
-            # Create HNSW index if requested
+            # Batch insert using executemany
+            if batch_args:
+                await conn.executemany(insert_sql, batch_args)
+
+            # Create HNSW index if requested (index_name is safe: all components validated by _SQL_IDENTIFIER_RE)
             index_created = False
-            if create_index:
+            if create_index and stored_count > 0:
                 index_name = f"idx_{table_name}_{vector_column}_hnsw"
                 try:
                     index_sql = f"""
-                        CREATE INDEX IF NOT EXISTS {index_name}
+                        CREATE INDEX IF NOT EXISTS "{index_name}"
                         ON "{table_name}" USING hnsw ({vector_column} vector_cosine_ops)
                     """
                     await conn.execute(index_sql)
@@ -219,9 +243,11 @@ class VectorStoreNode(BaseNode):
 
         except Exception as e:
             logger.error(f"VectorStoreNode error: {e}", exc_info=True)
+            # Sanitize error message to avoid leaking connection credentials
+            error_msg = f"Vector store failed: {type(e).__name__}"
             return NodeResult(
                 success=False,
-                error_message=f"Vector store failed: {e}",
+                error_message=error_msg,
             )
         finally:
             if conn is not None:

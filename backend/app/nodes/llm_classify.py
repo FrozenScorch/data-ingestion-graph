@@ -161,6 +161,9 @@ class LLMClassifyNode(BaseNode):
                 else:
                     result = {"category": None, "confidence": 0.0, "all_scores": {}, "parse_error": True}
 
+            # If parsing failed, return success=False so downstream nodes don't process garbage
+            parse_failed = isinstance(result, dict) and result.get("parse_error")
+
             # Ensure valid structure
             category = result.get("category")
             confidence = result.get("confidence", 0.0)
@@ -196,9 +199,10 @@ class LLMClassifyNode(BaseNode):
             cost_info = openrouter_service.calculate_cost(model, input_tokens, output_tokens)
 
             return NodeResult(
-                success=True,
+                success=not parse_failed,
                 output_data={"json": classification_result},
-                items_processed=1,
+                items_processed=0 if parse_failed else 1,
+                error_message="Failed to parse LLM classification response as JSON" if parse_failed else None,
                 metadata={
                     "model": model,
                     "tokens_used": {

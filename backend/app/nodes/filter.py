@@ -25,8 +25,8 @@ _RESTRICTED_BUILTINS: dict[str, Any] = {
     "any": any,
     "all": all,
     "isinstance": isinstance,
-    "hasattr": hasattr,
-    "getattr": getattr,
+    # Note: getattr/hasattr intentionally excluded — they enable sandbox escapes
+    # via getattr(item, '__class__') which bypasses AST attribute checks.
     "list": list,
     "dict": dict,
     "set": set,

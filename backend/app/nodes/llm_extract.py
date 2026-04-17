@@ -150,6 +150,9 @@ class LLMExtractNode(BaseNode):
                 else:
                     extracted = {"raw_response": content, "parse_error": True}
 
+            # If parsing failed, return success=False so downstream nodes don't process garbage
+            parse_failed = isinstance(extracted, dict) and extracted.get("parse_error")
+
             # Extract usage
             usage = response.get("usage", {})
             input_tokens = usage.get("prompt_tokens", 0)
@@ -160,9 +163,10 @@ class LLMExtractNode(BaseNode):
             cost_info = openrouter_service.calculate_cost(model, input_tokens, output_tokens)
 
             return NodeResult(
-                success=True,
+                success=not parse_failed,
                 output_data={"json": extracted},
-                items_processed=1,
+                items_processed=0 if parse_failed else 1,
+                error_message="Failed to parse LLM response as JSON" if parse_failed else None,
                 metadata={
                     "extracted": extracted,
                     "model": model,

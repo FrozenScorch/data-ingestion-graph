@@ -15,7 +15,7 @@ from app.nodes.base import BaseNode, NodeContext, NodeResult, PortDef, PortDataT
 
 logger = logging.getLogger(__name__)
 
-# Restricted builtins for Python expression mode -- no getattr/setattr/type to prevent sandbox escapes
+# Restricted builtins for Python expression mode -- no getattr/setattr/type/hasattr to prevent sandbox escapes
 _RESTRICTED_BUILTINS: dict[str, Any] = {
     "len": len,
     "str": str,
@@ -29,7 +29,8 @@ _RESTRICTED_BUILTINS: dict[str, Any] = {
     "any": any,
     "all": all,
     "isinstance": isinstance,
-    "hasattr": hasattr,
+    # Note: getattr/hasattr intentionally excluded — they enable sandbox escapes
+    # via getattr(item, '__class__') which bypasses AST attribute checks.
     "list": list,
     "dict": dict,
     "set": set,

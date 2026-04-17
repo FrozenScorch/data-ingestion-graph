@@ -227,9 +227,11 @@ class DatabaseWriterNode(BaseNode):
 
         except Exception as e:
             logger.error(f"DatabaseWriterNode error: {e}", exc_info=True)
+            # Sanitize error message to avoid leaking connection credentials from URL
+            error_msg = f"Database write failed: {type(e).__name__}"
             return NodeResult(
                 success=False,
-                error_message=f"Database write failed: {e}",
+                error_message=error_msg,
             )
         finally:
             if engine is not None:
