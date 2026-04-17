@@ -229,7 +229,7 @@ class DAGExecutor:
                         })
                     else:
                         # Record in DLQ
-                        error_type = type(run_node.error_message).__name__ if run_node.error_message else "UnknownError"
+                        error_type = "ExecutionError"
                         await self._record_dlq(
                             db=node_db,
                             run_id=run.id,
@@ -345,7 +345,7 @@ class DAGExecutor:
                 })
             else:
                 # Record in DLQ
-                error_type = type(run_node.error_message).__name__ if run_node.error_message else "UnknownError"
+                error_type = "ExecutionError"
                 await self._record_dlq(
                     run_id=run.id,
                     node_id=node_id,
