@@ -1,3 +1,4 @@
+import asyncio
 import os
 import time
 from io import BytesIO
@@ -211,6 +212,21 @@ async def test_owner_storage_quota_is_enforced(upload_root, monkeypatch):
         await upload_service.save_upload(owner, make_upload("extra.txt", b"x"))
     assert exc.value.status_code == 413
     assert [item["name"] for item in upload_service.list_uploads(owner)] == ["full.txt"]
+
+
+@pytest.mark.asyncio
+async def test_concurrent_uploads_cannot_race_owner_quota(upload_root, monkeypatch):
+    monkeypatch.setattr(settings, "max_upload_storage_mb", 1)
+    owner = uuid4()
+    results = await asyncio.gather(
+        upload_service.save_upload(owner, make_upload("one.txt", b"1" * 700_000)),
+        upload_service.save_upload(owner, make_upload("two.txt", b"2" * 700_000)),
+        return_exceptions=True,
+    )
+    assert sum(isinstance(item, dict) for item in results) == 1
+    errors = [item for item in results if isinstance(item, HTTPException)]
+    assert len(errors) == 1 and errors[0].status_code == 413
+    assert sum(item["size"] for item in upload_service.list_uploads(owner)) == 700_000
 
 
 @pytest.mark.asyncio
