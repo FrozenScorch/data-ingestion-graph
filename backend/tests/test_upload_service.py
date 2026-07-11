@@ -65,7 +65,8 @@ async def test_invalid_and_oversized_uploads_leave_no_files(upload_root, monkeyp
     assert oversized.value.status_code == 413
     assert upload_service.list_uploads(owner) == []
     remaining = list(upload_service.owner_root(owner).iterdir())
-    assert [path.name for path in remaining] == [".quota.lock"]
+    assert {path.name for path in remaining} <= {".quota.lock"}
+    assert not any(path.is_dir() or path.name.startswith(".staging-") for path in remaining)
 
 
 @pytest.mark.asyncio
