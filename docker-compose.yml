@@ -41,8 +41,8 @@ services:
   # FastAPI Backend
   ingestion-api:
     build:
-      context: ./backend
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: backend/Dockerfile
     container_name: ingestion-api
     restart: unless-stopped
     environment:
@@ -58,6 +58,7 @@ services:
 
       # Auth
       JWT_SECRET_KEY: ${JWT_SECRET_KEY:-change-this-secret-in-production}
+      CONNECTION_ENCRYPTION_KEY: ${CONNECTION_ENCRYPTION_KEY:?required}
       JWT_ALGORITHM: HS256
       JWT_ACCESS_TOKEN_EXPIRE_MINUTES: 60
 
@@ -70,9 +71,11 @@ services:
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
 
       # App
+      APP_NAME: enterprise-data-ingestion-graph-studio
       APP_ENV: ${APP_ENV:-development}
       APP_DEBUG: ${APP_DEBUG:-true}
       APP_PORT: 8040
+      QUERY_ARTIFACT_TTL_HOURS: ${QUERY_ARTIFACT_TTL_HOURS:-168}
 
       # CORS
       CORS_ORIGINS: http://localhost:3000,http://localhost:8040

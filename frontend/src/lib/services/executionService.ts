@@ -10,6 +10,18 @@ import type {
   RunCreate
 } from '$lib/types';
 
+export interface QueryHit {
+  score: number | null;
+  envelope: Record<string, unknown>;
+}
+
+export interface RunQueryResponse {
+  run_id: string;
+  query: string | null;
+  count: number;
+  hits: QueryHit[];
+}
+
 export const executionService = {
   /** Start a run on a graph */
   async startRun(graphId: string, data?: RunCreate): Promise<Run> {
@@ -34,5 +46,12 @@ export const executionService = {
   /** Cancel a running execution */
   async cancelRun(runId: string): Promise<Run> {
     return api.post<Run>(`/executions/${runId}/cancel`);
+  },
+
+  /** Search output materialized by the SDK Queryable Test Store node. */
+  async queryRun(runId: string, query = ''): Promise<RunQueryResponse> {
+    const params = new URLSearchParams();
+    if (query.trim()) params.set('q', query.trim());
+    return api.get<RunQueryResponse>(`/executions/${runId}/query?${params.toString()}`);
   }
 };

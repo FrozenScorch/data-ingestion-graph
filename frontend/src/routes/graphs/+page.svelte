@@ -2,25 +2,35 @@
   import { graph } from '$lib/stores';
   import { onMount } from 'svelte';
   import { goto } from '$app/navigation';
+  import { graphTemplateService } from '$lib/services/graphTemplateService.js';
+  import type { GraphTemplateSummary } from '$lib/types/graphTemplate.js';
 
   let showCreateDialog = $state(false);
   let newName = $state('');
   let newDescription = $state('');
   let creating = $state(false);
+  let templates = $state<GraphTemplateSummary[]>([]);
+  let selectedTemplate = $state<string | null>(null);
 
   onMount(() => {
     graph.listGraphs();
+    graphTemplateService.list().then(response => templates = response.templates);
   });
 
   async function handleCreate() {
     if (!newName.trim()) return;
     creating = true;
-    const g = await graph.createGraph(newName.trim(), newDescription.trim() || undefined);
+    const g = await graph.createGraph(
+      newName.trim(),
+      newDescription.trim() || undefined,
+      selectedTemplate || undefined
+    );
     creating = false;
     if (g) {
       showCreateDialog = false;
       newName = '';
       newDescription = '';
+      selectedTemplate = null;
       goto(`/graphs/${g.id}`);
     }
   }
@@ -59,12 +69,48 @@
 
   <!-- Create dialog -->
   {#if showCreateDialog}
-    <!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events a11y_interactive_supports_focus -->
-    <div class="fixed inset-0 bg-black/50 flex items-center justify-center z-50" role="dialog" tabindex="-1" onclick={() => showCreateDialog = false}>
-      <!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
-      <div class="bg-gray-900 border border-gray-800 rounded-xl p-6 w-full max-w-md" onclick={(e) => e.stopPropagation()}>
-        <h2 class="text-lg font-medium text-gray-200 mb-4">Create New Graph</h2>
+    <div class="fixed inset-0 flex items-center justify-center z-50" role="dialog" aria-modal="true" aria-labelledby="create-graph-title">
+      <button
+        type="button"
+        class="absolute inset-0 bg-black/50 cursor-default"
+        aria-label="Close create graph dialog"
+        onclick={() => showCreateDialog = false}
+      ></button>
+      <div class="relative bg-gray-900 border border-gray-800 rounded-xl p-6 w-full max-w-md">
+        <h2 id="create-graph-title" class="text-lg font-medium text-gray-200 mb-4">Create New Graph</h2>
         <div class="space-y-3">
+          <div>
+            <span class="block text-sm text-gray-400 mb-2">Starting point</span>
+            <div class="grid grid-cols-2 gap-2 max-h-56 overflow-y-auto">
+              <button
+                type="button"
+                onclick={() => selectedTemplate = null}
+                class="rounded-lg border p-2 text-left {selectedTemplate === null ? 'border-indigo-500 bg-indigo-500/10' : 'border-gray-700 bg-gray-800'}"
+              >
+                <span class="block text-xs font-medium text-gray-200">Blank canvas</span>
+                <span class="block text-[10px] text-gray-500 mt-1">Build from individual nodes</span>
+              </button>
+              {#each templates as template (template.id)}
+                <button
+                  type="button"
+                  onclick={() => { selectedTemplate = template.id; if (!newName) newName = template.name; }}
+                  class="rounded-lg border p-2 text-left {selectedTemplate === template.id ? 'border-indigo-500 bg-indigo-500/10' : 'border-gray-700 bg-gray-800'}"
+                >
+                  <span class="flex items-center gap-1 text-xs font-medium text-gray-200">
+                    {template.name}
+                    {#if template.sdk_node_count > 0}<span class="rounded bg-cyan-500/15 px-1 text-[9px] text-cyan-300">SDK</span>{/if}
+                  </span>
+                  <span class="block text-[10px] text-gray-500 mt-1">{template.node_count} nodes · {template.category}</span>
+                </button>
+              {/each}
+            </div>
+            {#if selectedTemplate}
+              {@const template = templates.find(item => item.id === selectedTemplate)}
+              {#if template}
+                <p class="mt-2 text-[10px] text-gray-500">Setup: {template.setup.join(' · ')}</p>
+              {/if}
+            {/if}
+          </div>
           <div>
             <!-- svelte-ignore a11y_label_has_associated_control -->
             <label class="block text-sm text-gray-400 mb-1">Name</label>

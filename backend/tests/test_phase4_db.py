@@ -8,6 +8,7 @@ Tests:
 - Connection service CRUD operations (mock DB session)
 - Connection test endpoint (mock DB connection)
 """
+
 import uuid
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -22,6 +23,7 @@ from app.nodes.base import NodeContext, PortDataType
 # ---------------------------------------------------------------------------
 # Helper fixtures
 # ---------------------------------------------------------------------------
+
 
 @pytest.fixture
 def sample_connection_config():
@@ -42,14 +44,9 @@ def base_context(sample_connection_config):
         node_id="test-node-1",
         config={
             "connection_id": "conn-123",
-            "host": sample_connection_config["host"],
-            "port": sample_connection_config["port"],
-            "database": sample_connection_config["database"],
-            "username": sample_connection_config["username"],
-            "password": sample_connection_config["password"],
         },
         input_data={},
-        state={},
+        state={"connections": {"conn-123": sample_connection_config}},
     )
 
 
@@ -99,6 +96,32 @@ class TestDatabaseSourceNode:
         assert "batch_size" in schema["properties"]
         assert "connection_id" in schema["properties"]
         assert "query" in schema["required"]
+        assert "connection_id" in schema["required"]
+
+    @pytest.mark.asyncio
+    async def test_inline_credentials_are_not_accepted(self, sample_connection_config):
+        node = DatabaseSourceNode()
+        context = NodeContext(
+            run_id=str(uuid.uuid4()),
+            node_id="source",
+            config={**sample_connection_config, "query": "SELECT 1"},
+            input_data={},
+            state={},
+        )
+
+        errors = await node.validate_config(context.config)
+        assert "connection_id" in str(errors)
+        with pytest.raises(ValueError, match="requires connection_id"):
+            node._build_connection_url(context)
+
+    def test_rejects_ctes_and_multiple_statements(self):
+        node = DatabaseSourceNode()
+        with pytest.raises(ValueError, match="Only SELECT"):
+            node._validate_query(
+                "WITH changed AS (DELETE FROM users RETURNING *) SELECT * FROM changed"
+            )
+        with pytest.raises(ValueError, match="Multiple SQL"):
+            node._validate_query("SELECT 1; DELETE FROM users")
 
     @pytest.mark.asyncio
     async def test_execute_returns_rows(self, base_context):
@@ -120,12 +143,15 @@ class TestDatabaseSourceNode:
         mock_engine = AsyncMock()
         mock_engine.dispose = AsyncMock()
 
-        with patch(
-            "app.nodes.database_source.create_async_engine",
-            return_value=mock_engine,
-        ), patch(
-            "app.nodes.database_source.async_sessionmaker",
-            return_value=lambda: mock_session,
+        with (
+            patch(
+                "app.nodes.database_source.create_async_engine",
+                return_value=mock_engine,
+            ),
+            patch(
+                "app.nodes.database_source.async_sessionmaker",
+                return_value=lambda: mock_session,
+            ),
         ):
             result = await node.execute(base_context)
 
@@ -154,12 +180,15 @@ class TestDatabaseSourceNode:
         mock_engine = AsyncMock()
         mock_engine.dispose = AsyncMock()
 
-        with patch(
-            "app.nodes.database_source.create_async_engine",
-            return_value=mock_engine,
-        ), patch(
-            "app.nodes.database_source.async_sessionmaker",
-            return_value=lambda: mock_session,
+        with (
+            patch(
+                "app.nodes.database_source.create_async_engine",
+                return_value=mock_engine,
+            ),
+            patch(
+                "app.nodes.database_source.async_sessionmaker",
+                return_value=lambda: mock_session,
+            ),
         ):
             result = await node.execute(base_context)
 
@@ -187,17 +216,21 @@ class TestDatabaseSourceNode:
         mock_engine = AsyncMock()
         mock_engine.dispose = AsyncMock()
 
-        with patch(
-            "app.nodes.database_source.create_async_engine",
-            return_value=mock_engine,
-        ), patch(
-            "app.nodes.database_source.async_sessionmaker",
-            side_effect=Exception("Connection refused"),
+        with (
+            patch(
+                "app.nodes.database_source.create_async_engine",
+                return_value=mock_engine,
+            ),
+            patch(
+                "app.nodes.database_source.async_sessionmaker",
+                side_effect=Exception("Connection refused"),
+            ),
         ):
             result = await node.execute(base_context)
 
         assert result.success is False
-        assert "Connection refused" in result.error_message
+        assert result.error_message == "Database query failed: Exception"
+        assert "Connection refused" not in result.error_message
 
     @pytest.mark.asyncio
     async def test_execute_uses_state_connection(self, base_context):
@@ -224,12 +257,15 @@ class TestDatabaseSourceNode:
         mock_engine = AsyncMock()
         mock_engine.dispose = AsyncMock()
 
-        with patch(
-            "app.nodes.database_source.create_async_engine",
-            return_value=mock_engine,
-        ) as mock_create_engine, patch(
-            "app.nodes.database_source.async_sessionmaker",
-            return_value=lambda: mock_session,
+        with (
+            patch(
+                "app.nodes.database_source.create_async_engine",
+                return_value=mock_engine,
+            ) as mock_create_engine,
+            patch(
+                "app.nodes.database_source.async_sessionmaker",
+                return_value=lambda: mock_session,
+            ),
         ):
             await node.execute(base_context)
 
@@ -245,19 +281,23 @@ class TestDatabaseSourceNode:
         errors = await node.validate_config({})
         assert "query" in str(errors)
 
-        errors = await node.validate_config({
-            "connection_id": "conn-1",
-            "query": "SELECT 1",
-        })
+        errors = await node.validate_config(
+            {
+                "connection_id": "conn-1",
+                "query": "SELECT 1",
+            }
+        )
         assert errors == []
 
-        # Inline connection fields also work
-        errors = await node.validate_config({
-            "host": "localhost",
-            "database": "mydb",
-            "query": "SELECT 1",
-        })
-        assert errors == []
+        # Inline connection fields are not persisted in graph configs.
+        errors = await node.validate_config(
+            {
+                "host": "localhost",
+                "database": "mydb",
+                "query": "SELECT 1",
+            }
+        )
+        assert "connection_id" in str(errors)
 
 
 # ===========================================================================
@@ -267,6 +307,17 @@ class TestDatabaseSourceNode:
 
 class TestDatabaseWriterNode:
     """Tests for the DatabaseWriterNode."""
+
+    @pytest.mark.asyncio
+    async def test_rejects_untrusted_column_identifiers(self, base_context):
+        node = DatabaseWriterNode()
+        base_context.config["table_name"] = "output_table"
+        base_context.input_data = {"rows": [{'safe") VALUES (1); DROP TABLE users;--': 1}]}
+
+        result = await node.execute(base_context)
+
+        assert result.success is False
+        assert "Invalid input column" in result.error_message
 
     def test_node_metadata(self):
         """Test node type, category, and port definitions."""
@@ -315,12 +366,15 @@ class TestDatabaseWriterNode:
         mock_engine = AsyncMock()
         mock_engine.dispose = AsyncMock()
 
-        with patch(
-            "app.nodes.db_writer.create_async_engine",
-            return_value=mock_engine,
-        ), patch(
-            "app.nodes.db_writer.async_sessionmaker",
-            return_value=lambda: mock_session,
+        with (
+            patch(
+                "app.nodes.db_writer.create_async_engine",
+                return_value=mock_engine,
+            ),
+            patch(
+                "app.nodes.db_writer.async_sessionmaker",
+                return_value=lambda: mock_session,
+            ),
         ):
             result = await node.execute(base_context)
 
@@ -338,9 +392,7 @@ class TestDatabaseWriterNode:
         node = DatabaseWriterNode()
         base_context.config["table_name"] = "output_table"
         base_context.config["mode"] = "replace"
-        base_context.input_data = {
-            "rows": [{"id": 1, "name": "Test"}]
-        }
+        base_context.input_data = {"rows": [{"id": 1, "name": "Test"}]}
 
         mock_session = AsyncMock()
         mock_session.execute = AsyncMock()
@@ -351,12 +403,15 @@ class TestDatabaseWriterNode:
         mock_engine = AsyncMock()
         mock_engine.dispose = AsyncMock()
 
-        with patch(
-            "app.nodes.db_writer.create_async_engine",
-            return_value=mock_engine,
-        ), patch(
-            "app.nodes.db_writer.async_sessionmaker",
-            return_value=lambda: mock_session,
+        with (
+            patch(
+                "app.nodes.db_writer.create_async_engine",
+                return_value=mock_engine,
+            ),
+            patch(
+                "app.nodes.db_writer.async_sessionmaker",
+                return_value=lambda: mock_session,
+            ),
         ):
             result = await node.execute(base_context)
 
@@ -398,17 +453,21 @@ class TestDatabaseWriterNode:
         mock_engine = AsyncMock()
         mock_engine.dispose = AsyncMock()
 
-        with patch(
-            "app.nodes.db_writer.create_async_engine",
-            return_value=mock_engine,
-        ), patch(
-            "app.nodes.db_writer.async_sessionmaker",
-            side_effect=Exception("Table does not exist"),
+        with (
+            patch(
+                "app.nodes.db_writer.create_async_engine",
+                return_value=mock_engine,
+            ),
+            patch(
+                "app.nodes.db_writer.async_sessionmaker",
+                side_effect=Exception("Table does not exist"),
+            ),
         ):
             result = await node.execute(base_context)
 
         assert result.success is False
-        assert "Table does not exist" in result.error_message
+        assert result.error_message == "Database write failed: Exception"
+        assert "Table does not exist" not in result.error_message
 
     @pytest.mark.asyncio
     async def test_validate_config(self):
@@ -418,10 +477,12 @@ class TestDatabaseWriterNode:
         assert "connection_id" in str(errors)
         assert "table_name" in str(errors)
 
-        errors = await node.validate_config({
-            "connection_id": "conn-1",
-            "table_name": "my_table",
-        })
+        errors = await node.validate_config(
+            {
+                "connection_id": "conn-1",
+                "table_name": "my_table",
+            }
+        )
         assert errors == []
 
 
@@ -432,6 +493,19 @@ class TestDatabaseWriterNode:
 
 class TestVectorStoreNode:
     """Tests for the VectorStoreNode."""
+
+    @pytest.mark.asyncio
+    async def test_rejects_non_integer_embedding_dimension(self, base_context):
+        node = VectorStoreNode()
+        base_context.config["embedding_dim"] = "3); DROP TABLE users;--"
+        base_context.input_data = {
+            "embeddings": [{"content": "unsafe", "embedding": [0.1, 0.2, 0.3]}]
+        }
+
+        result = await node.execute(base_context)
+
+        assert result.success is False
+        assert result.error_message == "embedding_dim must be an integer"
 
     def test_node_metadata(self):
         """Test node type, category, and port definitions."""
@@ -499,8 +573,10 @@ class TestVectorStoreNode:
         assert result.output_data["stored_count"] == 2
         assert result.output_data["table"] == "documents"
         assert result.items_processed == 2
-        # Should have: CREATE EXTENSION, CREATE TABLE, 2 INSERTs, CREATE INDEX
-        assert mock_conn.execute.call_count == 5
+        # CREATE EXTENSION, CREATE TABLE, and CREATE INDEX use execute; inserts
+        # are sent as one optimized executemany batch.
+        assert mock_conn.execute.call_count == 3
+        mock_conn.executemany.assert_awaited_once()
         mock_conn.close.assert_called_once()
 
     @pytest.mark.asyncio
@@ -535,6 +611,7 @@ class TestVectorStoreNode:
         """Test that HNSW index is created when create_index is True."""
         node = VectorStoreNode()
         base_context.config["create_index"] = True
+        base_context.config["embedding_dim"] = 3
         base_context.config["table_name"] = "documents"
         base_context.config["vector_column"] = "embedding"
         base_context.input_data = {
@@ -559,6 +636,7 @@ class TestVectorStoreNode:
         """Test that HNSW index is NOT created when create_index is False."""
         node = VectorStoreNode()
         base_context.config["create_index"] = False
+        base_context.config["embedding_dim"] = 3
         base_context.input_data = {
             "embeddings": [
                 {"content": "test", "embedding": [0.1, 0.2, 0.3], "metadata": {}},
@@ -591,6 +669,7 @@ class TestVectorStoreNode:
     async def test_execute_skips_items_without_embedding(self, base_context):
         """Test that items without an embedding vector are skipped."""
         node = VectorStoreNode()
+        base_context.config["embedding_dim"] = 3
         base_context.input_data = {
             "embeddings": [
                 {"content": "has embedding", "embedding": [0.1, 0.2, 0.3]},
@@ -612,6 +691,7 @@ class TestVectorStoreNode:
     async def test_execute_handles_vector_key(self, base_context):
         """Test that 'vector' key is also accepted as embedding key."""
         node = VectorStoreNode()
+        base_context.config["embedding_dim"] = 3
         base_context.input_data = {
             "embeddings": [
                 {"text": "doc text", "vector": [0.1, 0.2, 0.3], "metadata": {"k": "v"}},
@@ -632,11 +712,11 @@ class TestVectorStoreNode:
     async def test_execute_error(self, base_context):
         """Test that errors are handled gracefully."""
         node = VectorStoreNode()
-        base_context.input_data = {
-            "embeddings": [{"content": "test", "embedding": [0.1]}]
-        }
+        base_context.input_data = {"embeddings": [{"content": "test", "embedding": [0.1]}]}
 
-        with patch("asyncpg.connect", new_callable=AsyncMock, side_effect=Exception("Connection refused")):
+        with patch(
+            "asyncpg.connect", new_callable=AsyncMock, side_effect=Exception("Connection refused")
+        ):
             result = await node.execute(base_context)
 
         assert result.success is False
@@ -646,9 +726,7 @@ class TestVectorStoreNode:
     async def test_execute_closes_connection_on_error(self, base_context):
         """Test that the connection is closed even when an error occurs."""
         node = VectorStoreNode()
-        base_context.input_data = {
-            "embeddings": [{"content": "test", "embedding": [0.1]}]
-        }
+        base_context.input_data = {"embeddings": [{"content": "test", "embedding": [0.1]}]}
 
         mock_conn = AsyncMock()
         mock_conn.execute = AsyncMock(side_effect=Exception("Query error"))
@@ -679,12 +757,108 @@ class TestVectorStoreNode:
 class TestConnectionService:
     """Tests for the connection service CRUD operations."""
 
+    def test_connection_configs_are_encrypted_at_rest(self):
+        from app.services.connection_crypto import (
+            decrypt_connection_config,
+            encrypt_connection_config,
+        )
+
+        original = {"host": "db.internal", "password": "do-not-store-in-plaintext"}
+        encrypted = encrypt_connection_config(original)
+
+        assert encrypted != original
+        assert "do-not-store-in-plaintext" not in str(encrypted)
+        assert decrypt_connection_config(encrypted) == original
+
+    def test_graph_versions_reject_inline_secrets(self):
+        from app.services.graph_service import _assert_no_inline_secrets
+
+        with pytest.raises(ValueError, match="use connection_id"):
+            _assert_no_inline_secrets({"database-node": {"host": "db", "password": "plaintext"}})
+
+        _assert_no_inline_secrets({"database-node": {"connection_id": str(uuid.uuid4())}})
+
+        with pytest.raises(ValueError, match="nodes_data"):
+            _assert_no_inline_secrets(
+                {"nodes": [{"data": {"config": {"bot_token": "plaintext"}}}]},
+                "nodes_data",
+            )
+
+        # Token-related non-secret settings must remain usable.
+        _assert_no_inline_secrets(
+            {"llm": {"max_tokens": 500}, "chunker": {"tokenizer": "cl100k_base"}}
+        )
+
+    def test_graph_response_redacts_defense_in_depth_nodes_data(self):
+        from datetime import UTC, datetime
+
+        from app.schemas.graph import GraphVersionResponse
+
+        response = GraphVersionResponse(
+            id=uuid.uuid4(),
+            graph_id=uuid.uuid4(),
+            version_number=1,
+            nodes_data={"nodes": [{"data": {"config": {"bot_token": "secret"}}}]},
+            edges_data=None,
+            node_configs=None,
+            checksum=None,
+            created_at=datetime.now(UTC),
+        ).model_dump()
+
+        assert response["nodes_data"]["nodes"][0]["data"]["config"]["bot_token"] == "********"
+
+    def test_discord_uses_encrypted_saved_connection_schema(self):
+        from app.nodes.discord_source import DiscordSourceNode
+        from app.services.connection_service import SUPPORTED_CONNECTION_TYPES
+
+        schema = DiscordSourceNode().config_schema
+        assert "discord" in SUPPORTED_CONNECTION_TYPES
+        assert "connection_id" in schema["required"]
+        assert "bot_token" not in schema["properties"]
+
+    def test_production_rejects_documented_connection_key_placeholder(self):
+        from app.config import Settings
+
+        config = Settings(
+            app_env="production",
+            jwt_secret_key="a-real-jwt-secret-that-is-long-enough",
+            connection_encryption_key="change-this-connection-encryption-key",
+            _env_file=None,
+        )
+
+        with pytest.raises(RuntimeError, match="CONNECTION_ENCRYPTION_KEY"):
+            config.validate_security()
+
+    def test_connection_response_redacts_nested_secrets(self):
+        from datetime import UTC, datetime
+
+        from app.schemas.graph import ConnectionResponse
+
+        response = ConnectionResponse(
+            id=uuid.uuid4(),
+            user_id=uuid.uuid4(),
+            name="Secret DB",
+            type="postgres",
+            config={
+                "host": "db.internal",
+                "password": "do-not-return",
+                "headers": {"Authorization": "Bearer do-not-return"},
+            },
+            is_valid=True,
+            created_at=datetime.now(UTC),
+        ).model_dump()
+
+        assert response["config"]["host"] == "db.internal"
+        assert response["config"]["password"] == "********"
+        assert response["config"]["headers"]["Authorization"] == "********"
+
     @pytest.mark.asyncio
     async def test_create_connection(self):
         """Test creating a connection."""
         from app.services.connection_service import create_connection
 
         mock_db = AsyncMock()
+        mock_db.add = MagicMock()
         user_id = uuid.uuid4()
 
         with patch("app.services.connection_service.Connection") as MockConnection:
@@ -702,7 +876,12 @@ class TestConnectionService:
                 user_id=user_id,
                 name="Test DB",
                 type="postgres",
-                config={"host": "localhost"},
+                config={
+                    "host": "localhost",
+                    "database": "testdb",
+                    "username": "testuser",
+                    "password": "testpass",
+                },
             )
 
         assert result is not None
@@ -810,6 +989,7 @@ class TestConnectionService:
         mock_connection = MagicMock()
         mock_connection.user_id = user_id
         mock_connection.name = "Old Name"
+        mock_connection.type = "postgres"
 
         with patch(
             "app.services.connection_service.get_connection",
@@ -820,12 +1000,24 @@ class TestConnectionService:
                 connection_id=conn_id,
                 user_id=user_id,
                 name="New Name",
-                config={"host": "new-host"},
+                config={
+                    "host": "new-host",
+                    "database": "testdb",
+                    "username": "testuser",
+                    "password": "testpass",
+                },
             )
 
         assert result is not None
         assert result.name == "New Name"
-        assert result.config == {"host": "new-host"}
+        from app.services.connection_crypto import decrypt_connection_config
+
+        assert decrypt_connection_config(result.config) == {
+            "host": "new-host",
+            "database": "testdb",
+            "username": "testuser",
+            "password": "testpass",
+        }
         assert result.is_valid is False  # Reset after config change
         mock_db.commit.assert_called_once()
 
@@ -970,7 +1162,9 @@ class TestConnectionTest:
             "password": "wrongpass",
         }
 
-        with patch("asyncpg.connect", new_callable=AsyncMock, side_effect=Exception("Connection refused")):
+        with patch(
+            "asyncpg.connect", new_callable=AsyncMock, side_effect=Exception("Connection refused")
+        ):
             result = await test_connection(config, "postgres")
 
         assert result["success"] is False
@@ -993,7 +1187,13 @@ class TestConnectionTest:
         mock_conn.fetchval = AsyncMock(side_effect=Exception("Auth failed"))
         mock_conn.close = AsyncMock()
 
-        config = {"host": "localhost", "port": 5432, "database": "db", "username": "u", "password": "p"}
+        config = {
+            "host": "localhost",
+            "port": 5432,
+            "database": "db",
+            "username": "u",
+            "password": "p",
+        }
 
         with patch("asyncpg.connect", new_callable=AsyncMock, return_value=mock_conn):
             result = await test_connection(config, "postgres")

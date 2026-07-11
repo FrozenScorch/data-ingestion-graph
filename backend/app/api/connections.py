@@ -1,15 +1,18 @@
 """
 Connection API routes: CRUD and test for saved database connections.
 """
+
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.connection_catalog import CONNECTION_DEFINITIONS
 from app.db.session import get_session
 from app.middleware.auth import get_current_user
 from app.services import connection_service
+from app.services.connection_crypto import decrypt_connection_config
 from app.schemas.graph import (
     ConnectionCreate,
     ConnectionUpdate,
@@ -22,18 +25,21 @@ router = APIRouter(prefix="/api/connections", tags=["connections"])
 
 class ConnectionTestRequest(BaseModel):
     """Request body for testing a connection with config."""
+
     config: dict = Field(..., description="Connection configuration to test")
     type: str = Field(..., description="Connection type (e.g., postgres)")
 
 
 class ConnectionTestResponse(BaseModel):
     """Response for connection test."""
+
     success: bool
     message: str
 
 
 class ConnectionListResponse(BaseModel):
     """Response for listing connections."""
+
     connections: list[ConnectionResponse]
     total: int
 
@@ -79,6 +85,15 @@ async def list_connections(
     )
 
 
+@router.get("/types")
+async def list_connection_types(
+    current_user: dict = Depends(get_current_user),
+):
+    """Return typed connection forms supported by executable Studio nodes."""
+    del current_user
+    return {"types": list(CONNECTION_DEFINITIONS.values())}
+
+
 @router.get("/{connection_id}", response_model=ConnectionResponse)
 async def get_connection(
     connection_id: UUID,
@@ -93,7 +108,10 @@ async def get_connection(
             detail="Connection not found",
         )
     if current_user["role"] != "admin" and str(connection.user_id) != str(current_user["user_id"]):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You do not have permission to access this connection")
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You do not have permission to access this connection",
+        )
     return connection
 
 
@@ -153,10 +171,13 @@ async def test_connection(
             detail="Connection not found",
         )
     if current_user["role"] != "admin" and str(connection.user_id) != str(current_user["user_id"]):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You do not have permission to access this connection")
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You do not have permission to access this connection",
+        )
 
     result = await connection_service.test_connection(
-        config=connection.config or {},
+        config=decrypt_connection_config(connection.config),
         type=connection.type,
     )
 

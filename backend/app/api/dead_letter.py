@@ -1,6 +1,7 @@
 """
 Dead Letter Queue API routes: list, retry, resolve, and delete DLQ items.
 """
+
 import uuid
 from typing import Optional
 
@@ -20,6 +21,7 @@ async def _check_dlq_item_access(item, current_user, db):
         return
     from app.models.execution import Run
     from sqlalchemy import select as _s
+
     result = await db.execute(_s(Run).where(Run.id == item.run_id))
     run = result.scalar_one_or_none()
     if not run:
@@ -30,11 +32,13 @@ async def _check_dlq_item_access(item, current_user, db):
     if current_user["role"] != "admin" and str(graph.owner_id) != str(current_user["user_id"]):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No permission")
 
+
 router = APIRouter(prefix="/api/dead-letter", tags=["dead-letter"])
 
 
 class DLQResolveRequest(BaseModel):
     """Request body for resolving a DLQ item."""
+
     note: str = Field(..., min_length=1, description="Resolution note")
 
 
@@ -101,9 +105,7 @@ async def retry_dlq_item(
 
     This creates a new attempt using the stored input_data and node_type.
     """
-    result = await db.execute(
-        select(DeadLetterQueue).where(DeadLetterQueue.id == item_id)
-    )
+    result = await db.execute(select(DeadLetterQueue).where(DeadLetterQueue.id == item_id))
     item = result.scalar_one_or_none()
 
     if not item:
@@ -180,7 +182,7 @@ async def retry_dlq_item(
             await db.refresh(item)
 
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                 detail=f"Retry failed: {run_node.error_message}",
             )
 
@@ -203,9 +205,7 @@ async def resolve_dlq_item(
     current_user: dict = Depends(get_current_user),
 ):
     """Mark a DLQ item as resolved with a note."""
-    result = await db.execute(
-        select(DeadLetterQueue).where(DeadLetterQueue.id == item_id)
-    )
+    result = await db.execute(select(DeadLetterQueue).where(DeadLetterQueue.id == item_id))
     item = result.scalar_one_or_none()
 
     if not item:
@@ -242,9 +242,7 @@ async def delete_dlq_item(
     current_user: dict = Depends(get_current_user),
 ):
     """Delete a DLQ item."""
-    result = await db.execute(
-        select(DeadLetterQueue).where(DeadLetterQueue.id == item_id)
-    )
+    result = await db.execute(select(DeadLetterQueue).where(DeadLetterQueue.id == item_id))
     item = result.scalar_one_or_none()
 
     if not item:

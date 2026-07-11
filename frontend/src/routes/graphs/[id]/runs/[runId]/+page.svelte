@@ -2,14 +2,19 @@
   import { page } from '$app/stores';
   import { onMount } from 'svelte';
   import { execution } from '$lib/stores';
+  import { executionService, type QueryHit } from '$lib/services/executionService.js';
   import LineageViewer from '$lib/components/ui/LineageViewer.svelte';
   import type { NodeRunStatus, RunNode } from '$lib/types';
 
-  let graphId = $derived($page.params.id);
-  let runId = $derived($page.params.runId);
+  let graphId = $derived($page.params.id ?? '');
+  let runId = $derived($page.params.runId ?? '');
 
   // Track which nodes have their preview expanded
   let expandedNodes = $state<Set<string>>(new Set());
+  let queryText = $state('');
+  let queryHits = $state<QueryHit[]>([]);
+  let queryLoading = $state(false);
+  let queryError = $state<string | null>(null);
 
   onMount(() => {
     execution.getRun(runId);
@@ -28,6 +33,20 @@
       next.add(nodeId);
     }
     expandedNodes = next;
+  }
+
+  async function queryOutput() {
+    queryLoading = true;
+    queryError = null;
+    try {
+      const response = await executionService.queryRun(runId, queryText);
+      queryHits = response.hits;
+    } catch (error) {
+      queryHits = [];
+      queryError = error instanceof Error ? error.message : 'Unable to query this run';
+    } finally {
+      queryLoading = false;
+    }
   }
 
   function getStatusBadge(status: NodeRunStatus): string {
@@ -193,6 +212,40 @@
             {/each}
           </tbody>
         </table>
+      {/if}
+    </div>
+
+    <!-- SDK-backed ingest-and-query test surface -->
+    <div class="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden">
+      <div class="px-4 py-3 border-b border-gray-800">
+        <h2 class="text-sm font-medium text-gray-300">Query Pipeline Output</h2>
+        <p class="text-xs text-gray-500 mt-1">Add a Queryable Test Store output node to inspect the SDK materialized current view.</p>
+      </div>
+      <form class="p-4 flex gap-2" onsubmit={(event) => { event.preventDefault(); queryOutput(); }}>
+        <input
+          bind:value={queryText}
+          aria-label="Search pipeline output"
+          placeholder="Search text, or leave empty to inspect recent records"
+          class="flex-1 rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-gray-200 placeholder:text-gray-600 focus:border-indigo-500 focus:outline-none"
+        />
+        <button
+          type="submit"
+          disabled={queryLoading}
+          class="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-500 disabled:opacity-50"
+        >
+          {queryLoading ? 'Searching...' : 'Query'}
+        </button>
+      </form>
+      {#if queryError}
+        <p class="px-4 pb-4 text-xs text-amber-400">{queryError}</p>
+      {:else if queryHits.length > 0}
+        <div class="border-t border-gray-800 divide-y divide-gray-800">
+          {#each queryHits as hit}
+            <pre class="px-4 py-3 text-xs text-gray-300 font-mono overflow-x-auto whitespace-pre-wrap">{JSON.stringify(hit.envelope, null, 2)}</pre>
+          {/each}
+        </div>
+      {:else if !queryLoading}
+        <p class="px-4 pb-4 text-xs text-gray-600">Run a query to test the records produced by this ingestion pipeline.</p>
       {/if}
     </div>
 

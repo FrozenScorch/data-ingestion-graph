@@ -5,6 +5,7 @@
 
 import type { GraphNode, GraphEdge, GraphDetail, Graph } from '$lib/types';
 import { graphService } from '$lib/services/graphService.js';
+import { nodeRegistry } from './nodeRegistry.svelte.js';
 
 class GraphState {
   // Current graph metadata
@@ -58,7 +59,8 @@ class GraphState {
         for (const n of rawNodes) {
           if (!seen.has(n.id)) {
             seen.add(n.id);
-            deduped.push(n);
+            const config = (v.node_configs?.[n.id] as Record<string, unknown>) ?? {};
+            deduped.push({ ...n, data: { ...n.data, config } });
           }
         }
         this.nodes = deduped;
@@ -75,9 +77,13 @@ class GraphState {
     }
   }
 
-  async createGraph(name: string, description?: string): Promise<Graph | null> {
+  async createGraph(name: string, description?: string, templateId?: string): Promise<Graph | null> {
     try {
-      const graph = await graphService.createGraph({ name, description });
+      const graph = await graphService.createGraph({
+        name,
+        description,
+        template_id: templateId
+      });
       this.graphs.unshift(graph);
       this.totalGraphs += 1;
       return graph;
@@ -139,11 +145,19 @@ class GraphState {
       // Build node configs from node data
       const nodeConfigs: Record<string, Record<string, unknown>> = {};
       for (const node of this.nodes) {
-        nodeConfigs[node.id] = node.data.config || {};
+        const definition = nodeRegistry.getNodeByType(node.type);
+        const allowed = new Set(Object.keys(definition?.config_schema.properties ?? {}));
+        nodeConfigs[node.id] = Object.fromEntries(
+          Object.entries(node.data.config || {}).filter(([key]) => allowed.has(key))
+        );
       }
 
+      const nodesWithoutConfigs = this.nodes.map(node => ({
+        ...node,
+        data: { ...node.data, config: {} }
+      }));
       await graphService.saveVersion(graphId, {
-        nodes_data: { nodes: this.nodes },
+        nodes_data: { nodes: nodesWithoutConfigs },
         edges_data: { edges: this.edges },
         node_configs: nodeConfigs
       });

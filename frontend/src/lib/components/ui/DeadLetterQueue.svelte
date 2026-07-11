@@ -121,7 +121,7 @@
               <td class="px-4 py-2 text-gray-300">{item.node_id}</td>
               <td class="px-4 py-2 text-red-400 max-w-xs truncate">{item.error_message}</td>
               <td class="px-4 py-2 text-gray-500">{item.run_id?.slice(0, 8)}</td>
-              <td class="px-4 py-2 text-gray-500">{new Date(item.created_at).toLocaleString()}</td>
+              <td class="px-4 py-2 text-gray-500">{item.created_at ? new Date(item.created_at).toLocaleString() : '-'}</td>
               <td class="px-4 py-2 text-right">
                 <div class="flex items-center justify-end gap-1">
                   <button onclick={() => retryItem(item)} class="text-xs px-2 py-1 text-indigo-400 hover:bg-indigo-500/10 rounded transition-colors">Retry</button>

@@ -11,6 +11,7 @@ Tests cover:
 - Free model validation passes for glm-4.5-air:free
 - Free model validation rejects paid models
 """
+
 import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -27,6 +28,7 @@ from app.services.openrouter_service import OpenRouterService, SUPPORTED_EMBEDDI
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
+
 
 @pytest.fixture
 def mock_openrouter_service():
@@ -65,6 +67,7 @@ def mock_openrouter_service():
 @pytest.fixture
 def make_context():
     """Factory fixture for creating NodeContext instances."""
+
     def _make(config=None, input_data=None):
         return NodeContext(
             run_id="test-run-001",
@@ -72,6 +75,7 @@ def make_context():
             config=config or {},
             input_data=input_data or {},
         )
+
     return _make
 
 
@@ -79,7 +83,14 @@ def make_context():
 # OpenRouter Service Tests
 # ---------------------------------------------------------------------------
 
+
 class TestOpenRouterService:
+    def test_keyless_construction_defers_configuration_error(self):
+        service = OpenRouterService()
+        assert service._client is None
+        with patch("app.services.openrouter_service.settings.openrouter_api_key", ""):
+            with pytest.raises(RuntimeError, match="OPENROUTER_API_KEY"):
+                _ = service.client
 
     def test_free_model_validation_passes(self, mock_openrouter_service):
         """Free model validation should pass for allowed free models."""
@@ -154,8 +165,8 @@ class TestOpenRouterService:
 # EmbedderNode Tests
 # ---------------------------------------------------------------------------
 
-class TestEmbedderNode:
 
+class TestEmbedderNode:
     @pytest.mark.asyncio
     async def test_embedder_processes_chunks(self, make_context):
         """Embedder should process chunks and return embeddings."""
@@ -186,11 +197,13 @@ class TestEmbedderNode:
             mock_service.create_embeddings = AsyncMock(
                 side_effect=[batch1_response, batch2_response]
             )
-            mock_service.calculate_cost = MagicMock(return_value={
-                "input_cost_usd": 0.0,
-                "output_cost_usd": 0.0,
-                "total_cost_usd": 0.0,
-            })
+            mock_service.calculate_cost = MagicMock(
+                return_value={
+                    "input_cost_usd": 0.0,
+                    "output_cost_usd": 0.0,
+                    "total_cost_usd": 0.0,
+                }
+            )
 
             context = make_context(
                 config={"model": "openai/text-embedding-3-small", "batch_size": 2},
@@ -258,11 +271,13 @@ class TestEmbedderNode:
 
         with patch("app.nodes.embedder.openrouter_service") as mock_service:
             mock_service.create_embeddings = AsyncMock(return_value=mock_response)
-            mock_service.calculate_cost = MagicMock(return_value={
-                "input_cost_usd": 0.0,
-                "output_cost_usd": 0.0,
-                "total_cost_usd": 0.0,
-            })
+            mock_service.calculate_cost = MagicMock(
+                return_value={
+                    "input_cost_usd": 0.0,
+                    "output_cost_usd": 0.0,
+                    "total_cost_usd": 0.0,
+                }
+            )
 
             context = make_context(
                 config={"model": "baai/bge-m3", "input_field": "content"},
@@ -304,11 +319,13 @@ class TestEmbedderNode:
 
         with patch("app.nodes.embedder.openrouter_service") as mock_service:
             mock_service.create_embeddings = AsyncMock(side_effect=mock_create)
-            mock_service.calculate_cost = MagicMock(return_value={
-                "input_cost_usd": 0.0,
-                "output_cost_usd": 0.0,
-                "total_cost_usd": 0.0,
-            })
+            mock_service.calculate_cost = MagicMock(
+                return_value={
+                    "input_cost_usd": 0.0,
+                    "output_cost_usd": 0.0,
+                    "total_cost_usd": 0.0,
+                }
+            )
 
             context = make_context(
                 config={"model": "qwen/qwen3-embedding-8b", "batch_size": 2},
@@ -348,8 +365,8 @@ class TestEmbedderNode:
 # LLMExtractNode Tests
 # ---------------------------------------------------------------------------
 
-class TestLLMExtractNode:
 
+class TestLLMExtractNode:
     @pytest.mark.asyncio
     async def test_extract_returns_structured_output(self, make_context):
         """LLM extract should parse structured JSON from LLM response."""
@@ -368,11 +385,13 @@ class TestLLMExtractNode:
 
         with patch("app.nodes.llm_extract.openrouter_service") as mock_service:
             mock_service.chat_completion = AsyncMock(return_value=mock_response)
-            mock_service.calculate_cost = MagicMock(return_value={
-                "input_cost_usd": 0.0,
-                "output_cost_usd": 0.0,
-                "total_cost_usd": 0.0,
-            })
+            mock_service.calculate_cost = MagicMock(
+                return_value={
+                    "input_cost_usd": 0.0,
+                    "output_cost_usd": 0.0,
+                    "total_cost_usd": 0.0,
+                }
+            )
 
             context = make_context(
                 config={
@@ -415,11 +434,13 @@ class TestLLMExtractNode:
 
         with patch("app.nodes.llm_extract.openrouter_service") as mock_service:
             mock_service.chat_completion = AsyncMock(return_value=mock_response)
-            mock_service.calculate_cost = MagicMock(return_value={
-                "input_cost_usd": 0.0,
-                "output_cost_usd": 0.0,
-                "total_cost_usd": 0.0,
-            })
+            mock_service.calculate_cost = MagicMock(
+                return_value={
+                    "input_cost_usd": 0.0,
+                    "output_cost_usd": 0.0,
+                    "total_cost_usd": 0.0,
+                }
+            )
 
             context = make_context(
                 config={"model": "qwen/qwen3.5-9b", "prompt": "Extract info"},
@@ -450,7 +471,10 @@ class TestLLMExtractNode:
         mock_response = {
             "choices": [
                 {
-                    "message": {"role": "assistant", "content": '{"title": "Great product", "sentiment": "positive"}'},
+                    "message": {
+                        "role": "assistant",
+                        "content": '{"title": "Great product", "sentiment": "positive"}',
+                    },
                     "finish_reason": "stop",
                 }
             ],
@@ -459,11 +483,13 @@ class TestLLMExtractNode:
 
         with patch("app.nodes.llm_extract.openrouter_service") as mock_service:
             mock_service.chat_completion = AsyncMock(return_value=mock_response)
-            mock_service.calculate_cost = MagicMock(return_value={
-                "input_cost_usd": 0.0,
-                "output_cost_usd": 0.0,
-                "total_cost_usd": 0.0,
-            })
+            mock_service.calculate_cost = MagicMock(
+                return_value={
+                    "input_cost_usd": 0.0,
+                    "output_cost_usd": 0.0,
+                    "total_cost_usd": 0.0,
+                }
+            )
 
             context = make_context(
                 config={
@@ -525,7 +551,10 @@ class TestLLMExtractNode:
         mock_response = {
             "choices": [
                 {
-                    "message": {"role": "assistant", "content": "I cannot extract data from this text."},
+                    "message": {
+                        "role": "assistant",
+                        "content": "I cannot extract data from this text.",
+                    },
                     "finish_reason": "stop",
                 }
             ],
@@ -534,11 +563,13 @@ class TestLLMExtractNode:
 
         with patch("app.nodes.llm_extract.openrouter_service") as mock_service:
             mock_service.chat_completion = AsyncMock(return_value=mock_response)
-            mock_service.calculate_cost = MagicMock(return_value={
-                "input_cost_usd": 0.0,
-                "output_cost_usd": 0.0,
-                "total_cost_usd": 0.0,
-            })
+            mock_service.calculate_cost = MagicMock(
+                return_value={
+                    "input_cost_usd": 0.0,
+                    "output_cost_usd": 0.0,
+                    "total_cost_usd": 0.0,
+                }
+            )
 
             context = make_context(
                 config={"model": "z-ai/glm-4.5-air:free", "prompt": "Extract info"},
@@ -547,8 +578,9 @@ class TestLLMExtractNode:
 
             result = await node.execute(context)
 
-        # Should still succeed but with raw_response
-        assert result.success is True
+        # Invalid structured output is a failed extraction, while preserving the
+        # raw response for diagnostics.
+        assert result.success is False
         extracted = result.output_data["json"]
         assert extracted.get("parse_error") is True
         assert "raw_response" in extracted
@@ -558,8 +590,8 @@ class TestLLMExtractNode:
 # LLMClassifyNode Tests
 # ---------------------------------------------------------------------------
 
-class TestLLMClassifyNode:
 
+class TestLLMClassifyNode:
     @pytest.mark.asyncio
     async def test_classify_returns_category_and_confidence(self, make_context):
         """LLM classify should return category and confidence scores."""
@@ -582,11 +614,13 @@ class TestLLMClassifyNode:
 
         with patch("app.nodes.llm_classify.openrouter_service") as mock_service:
             mock_service.chat_completion = AsyncMock(return_value=mock_response)
-            mock_service.calculate_cost = MagicMock(return_value={
-                "input_cost_usd": 0.0,
-                "output_cost_usd": 0.0,
-                "total_cost_usd": 0.0,
-            })
+            mock_service.calculate_cost = MagicMock(
+                return_value={
+                    "input_cost_usd": 0.0,
+                    "output_cost_usd": 0.0,
+                    "total_cost_usd": 0.0,
+                }
+            )
 
             context = make_context(
                 config={
@@ -630,11 +664,13 @@ class TestLLMClassifyNode:
 
         with patch("app.nodes.llm_classify.openrouter_service") as mock_service:
             mock_service.chat_completion = AsyncMock(return_value=mock_response)
-            mock_service.calculate_cost = MagicMock(return_value={
-                "input_cost_usd": 0.0,
-                "output_cost_usd": 0.0,
-                "total_cost_usd": 0.0,
-            })
+            mock_service.calculate_cost = MagicMock(
+                return_value={
+                    "input_cost_usd": 0.0,
+                    "output_cost_usd": 0.0,
+                    "total_cost_usd": 0.0,
+                }
+            )
 
             context = make_context(
                 config={
@@ -657,7 +693,11 @@ class TestLLMClassifyNode:
         """LLM classify should clamp confidence to [0.0, 1.0]."""
         node = LLMClassifyNode()
 
-        classify_response = {"category": "tech", "confidence": 1.5, "all_scores": {"tech": 1.5, "sports": -0.5}}
+        classify_response = {
+            "category": "tech",
+            "confidence": 1.5,
+            "all_scores": {"tech": 1.5, "sports": -0.5},
+        }
         mock_response = {
             "choices": [
                 {
@@ -670,11 +710,13 @@ class TestLLMClassifyNode:
 
         with patch("app.nodes.llm_classify.openrouter_service") as mock_service:
             mock_service.chat_completion = AsyncMock(return_value=mock_response)
-            mock_service.calculate_cost = MagicMock(return_value={
-                "input_cost_usd": 0.0,
-                "output_cost_usd": 0.0,
-                "total_cost_usd": 0.0,
-            })
+            mock_service.calculate_cost = MagicMock(
+                return_value={
+                    "input_cost_usd": 0.0,
+                    "output_cost_usd": 0.0,
+                    "total_cost_usd": 0.0,
+                }
+            )
 
             context = make_context(
                 config={
@@ -731,7 +773,10 @@ class TestLLMClassifyNode:
         mock_response = {
             "choices": [
                 {
-                    "message": {"role": "assistant", "content": '{"category": "a", "confidence": 1.0, "all_scores": {"a": 1.0}}'},
+                    "message": {
+                        "role": "assistant",
+                        "content": '{"category": "a", "confidence": 1.0, "all_scores": {"a": 1.0}}',
+                    },
                     "finish_reason": "stop",
                 }
             ],
@@ -740,11 +785,13 @@ class TestLLMClassifyNode:
 
         with patch("app.nodes.llm_classify.openrouter_service") as mock_service:
             mock_service.chat_completion = AsyncMock(return_value=mock_response)
-            mock_service.calculate_cost = MagicMock(return_value={
-                "input_cost_usd": 0.0,
-                "output_cost_usd": 0.0,
-                "total_cost_usd": 0.0,
-            })
+            mock_service.calculate_cost = MagicMock(
+                return_value={
+                    "input_cost_usd": 0.0,
+                    "output_cost_usd": 0.0,
+                    "total_cost_usd": 0.0,
+                }
+            )
 
             context = make_context(
                 config={
@@ -770,8 +817,8 @@ class TestLLMClassifyNode:
 # LLMSummarizeNode Tests
 # ---------------------------------------------------------------------------
 
-class TestLLMSummarizeNode:
 
+class TestLLMSummarizeNode:
     @pytest.mark.asyncio
     async def test_summarize_returns_summary(self, make_context):
         """LLM summarize should return the LLM summary text."""
@@ -792,11 +839,13 @@ class TestLLMSummarizeNode:
 
         with patch("app.nodes.llm_summarize.openrouter_service") as mock_service:
             mock_service.chat_completion = AsyncMock(return_value=mock_response)
-            mock_service.calculate_cost = MagicMock(return_value={
-                "input_cost_usd": 0.0,
-                "output_cost_usd": 0.0,
-                "total_cost_usd": 0.0,
-            })
+            mock_service.calculate_cost = MagicMock(
+                return_value={
+                    "input_cost_usd": 0.0,
+                    "output_cost_usd": 0.0,
+                    "total_cost_usd": 0.0,
+                }
+            )
 
             context = make_context(
                 config={
@@ -842,11 +891,13 @@ class TestLLMSummarizeNode:
 
         with patch("app.nodes.llm_summarize.openrouter_service") as mock_service:
             mock_service.chat_completion = AsyncMock(return_value=mock_response)
-            mock_service.calculate_cost = MagicMock(return_value={
-                "input_cost_usd": 0.0,
-                "output_cost_usd": 0.0,
-                "total_cost_usd": 0.0,
-            })
+            mock_service.calculate_cost = MagicMock(
+                return_value={
+                    "input_cost_usd": 0.0,
+                    "output_cost_usd": 0.0,
+                    "total_cost_usd": 0.0,
+                }
+            )
 
             context = make_context(
                 config={"model": "qwen/qwen3.5-9b"},
@@ -912,11 +963,13 @@ class TestLLMSummarizeNode:
 
         with patch("app.nodes.llm_summarize.openrouter_service") as mock_service:
             mock_service.chat_completion = AsyncMock(return_value=mock_response)
-            mock_service.calculate_cost = MagicMock(return_value={
-                "input_cost_usd": 0.0,
-                "output_cost_usd": 0.0,
-                "total_cost_usd": 0.0,
-            })
+            mock_service.calculate_cost = MagicMock(
+                return_value={
+                    "input_cost_usd": 0.0,
+                    "output_cost_usd": 0.0,
+                    "total_cost_usd": 0.0,
+                }
+            )
 
             context = make_context(
                 config={"model": "z-ai/glm-4.5-air:free"},
@@ -956,8 +1009,8 @@ class TestLLMSummarizeNode:
 # Cost Tracking Tests
 # ---------------------------------------------------------------------------
 
-class TestCostTracking:
 
+class TestCostTracking:
     @pytest.mark.asyncio
     async def test_embedder_cost_tracking(self, make_context):
         """Embedder should record cost metadata after embedding."""
@@ -970,11 +1023,13 @@ class TestCostTracking:
 
         with patch("app.nodes.embedder.openrouter_service") as mock_service:
             mock_service.create_embeddings = AsyncMock(return_value=mock_response)
-            mock_service.calculate_cost = MagicMock(return_value={
-                "input_cost_usd": 0.0000003,
-                "output_cost_usd": 0.0,
-                "total_cost_usd": 0.0000003,
-            })
+            mock_service.calculate_cost = MagicMock(
+                return_value={
+                    "input_cost_usd": 0.0000003,
+                    "output_cost_usd": 0.0,
+                    "total_cost_usd": 0.0000003,
+                }
+            )
 
             context = make_context(
                 config={"model": "openai/text-embedding-3-small"},
@@ -997,18 +1052,23 @@ class TestCostTracking:
 
         mock_response = {
             "choices": [
-                {"message": {"role": "assistant", "content": '{"key": "value"}'}, "finish_reason": "stop"}
+                {
+                    "message": {"role": "assistant", "content": '{"key": "value"}'},
+                    "finish_reason": "stop",
+                }
             ],
             "usage": {"prompt_tokens": 80, "completion_tokens": 10, "total_tokens": 90},
         }
 
         with patch("app.nodes.llm_extract.openrouter_service") as mock_service:
             mock_service.chat_completion = AsyncMock(return_value=mock_response)
-            mock_service.calculate_cost = MagicMock(return_value={
-                "input_cost_usd": 0.001,
-                "output_cost_usd": 0.002,
-                "total_cost_usd": 0.003,
-            })
+            mock_service.calculate_cost = MagicMock(
+                return_value={
+                    "input_cost_usd": 0.001,
+                    "output_cost_usd": 0.002,
+                    "total_cost_usd": 0.003,
+                }
+            )
 
             context = make_context(
                 config={"model": "z-ai/glm-4.5-air:free", "prompt": "Extract"},
@@ -1032,7 +1092,10 @@ class TestCostTracking:
         mock_response = {
             "choices": [
                 {
-                    "message": {"role": "assistant", "content": '{"category": "a", "confidence": 0.9, "all_scores": {"a": 0.9}}'},
+                    "message": {
+                        "role": "assistant",
+                        "content": '{"category": "a", "confidence": 0.9, "all_scores": {"a": 0.9}}',
+                    },
                     "finish_reason": "stop",
                 }
             ],
@@ -1041,11 +1104,13 @@ class TestCostTracking:
 
         with patch("app.nodes.llm_classify.openrouter_service") as mock_service:
             mock_service.chat_completion = AsyncMock(return_value=mock_response)
-            mock_service.calculate_cost = MagicMock(return_value={
-                "input_cost_usd": 0.0005,
-                "output_cost_usd": 0.0003,
-                "total_cost_usd": 0.0008,
-            })
+            mock_service.calculate_cost = MagicMock(
+                return_value={
+                    "input_cost_usd": 0.0005,
+                    "output_cost_usd": 0.0003,
+                    "total_cost_usd": 0.0008,
+                }
+            )
 
             context = make_context(
                 config={
@@ -1070,18 +1135,23 @@ class TestCostTracking:
 
         mock_response = {
             "choices": [
-                {"message": {"role": "assistant", "content": "Summary text"}, "finish_reason": "stop"}
+                {
+                    "message": {"role": "assistant", "content": "Summary text"},
+                    "finish_reason": "stop",
+                }
             ],
             "usage": {"prompt_tokens": 200, "completion_tokens": 50, "total_tokens": 250},
         }
 
         with patch("app.nodes.llm_summarize.openrouter_service") as mock_service:
             mock_service.chat_completion = AsyncMock(return_value=mock_response)
-            mock_service.calculate_cost = MagicMock(return_value={
-                "input_cost_usd": 0.01,
-                "output_cost_usd": 0.015,
-                "total_cost_usd": 0.025,
-            })
+            mock_service.calculate_cost = MagicMock(
+                return_value={
+                    "input_cost_usd": 0.01,
+                    "output_cost_usd": 0.015,
+                    "total_cost_usd": 0.025,
+                }
+            )
 
             context = make_context(
                 config={"model": "z-ai/glm-4.5-air:free"},
@@ -1100,8 +1170,8 @@ class TestCostTracking:
 # Node Interface Tests
 # ---------------------------------------------------------------------------
 
-class TestNodeInterfaces:
 
+class TestNodeInterfaces:
     def test_embedder_node_properties(self):
         """EmbedderNode should have correct base node properties."""
         node = EmbedderNode()

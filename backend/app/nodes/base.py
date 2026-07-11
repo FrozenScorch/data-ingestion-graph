@@ -2,14 +2,16 @@
 Base node ABC, NodeContext, NodeResult, PortDef, NodeTypeDef.
 All node implementations inherit from BaseNode.
 """
+
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Optional
+from typing import Any
 
 
 class PortDataType(str, Enum):
     """Data types that can flow between ports."""
+
     ANY = "any"
     FILE_LIST = "file_list"
     TABLE = "table"
@@ -29,6 +31,7 @@ class PortDirection(str, Enum):
 @dataclass
 class PortDef:
     """Definition of a node input or output port."""
+
     name: str
     data_type: PortDataType
     label: str = ""
@@ -43,6 +46,7 @@ class PortDef:
 @dataclass
 class NodeResult:
     """Result returned by a node after execution."""
+
     success: bool
     output_data: dict[str, Any] = field(default_factory=dict)
     items_processed: int = 0
@@ -54,6 +58,7 @@ class NodeResult:
 @dataclass
 class NodeContext:
     """Execution context passed to each node."""
+
     run_id: str
     node_id: str
     config: dict[str, Any] = field(default_factory=dict)
@@ -77,6 +82,16 @@ class BaseNode(ABC):
     - config_schema: JSON schema for node configuration
     - execute(): main execution logic
     """
+
+    @property
+    def implementation(self) -> str:
+        """Implementation boundary shown by Studio: native or SDK adapter."""
+        return "studio"
+
+    @property
+    def sdk_component(self) -> str | None:
+        """Public SDK component used by this node, when applicable."""
+        return None
 
     @property
     @abstractmethod
@@ -154,6 +169,8 @@ class BaseNode(ABC):
             "display_name": self.display_name,
             "category": self.category,
             "description": self.description,
+            "implementation": self.implementation,
+            "sdk_component": self.sdk_component,
             "inputs": [
                 {
                     "name": p.name,

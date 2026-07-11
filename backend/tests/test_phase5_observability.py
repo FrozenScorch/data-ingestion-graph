@@ -10,6 +10,7 @@ Tests:
 - Run retry (re-run failed nodes from checkpoints)
 - Run replay (full new run)
 """
+
 import uuid
 from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -24,6 +25,7 @@ from app.models.execution import Run, RunStatus, RunNode, NodeStatus, Checkpoint
 # ---------------------------------------------------------------------------
 # Helper fixtures and factories
 # ---------------------------------------------------------------------------
+
 
 def _make_uuid() -> uuid.UUID:
     return uuid.uuid4()
@@ -156,6 +158,56 @@ class TestLineageRecording:
     """Tests for lineage recording in the executor."""
 
     @pytest.mark.asyncio
+    async def test_executor_resolves_only_graph_owner_connections(self):
+        from app.engine.executor import DAGExecutor
+        from app.services.connection_crypto import encrypt_connection_config
+
+        graph_id = _make_uuid()
+        owner_id = _make_uuid()
+        connection_id = _make_uuid()
+        connection = MagicMock()
+        connection.id = connection_id
+        connection.user_id = owner_id
+        connection.config = encrypt_connection_config(
+            {"host": "postgres", "database": "data", "password": "secret"}
+        )
+
+        owner_result = MagicMock()
+        owner_result.scalar_one_or_none.return_value = owner_id
+        connection_result = MagicMock()
+        connection_result.scalars.return_value.all.return_value = [connection]
+        mock_db = AsyncMock()
+        mock_db.execute = AsyncMock(side_effect=[owner_result, connection_result])
+
+        resolved = await DAGExecutor(mock_db)._resolve_connections(
+            graph_id,
+            {"source": {"connection_id": str(connection_id)}},
+        )
+
+        assert resolved[str(connection_id)]["host"] == "postgres"
+        assert resolved[str(connection_id)]["password"] == "secret"
+
+    def test_executor_scopes_credentials_to_referencing_node(self):
+        from app.engine.executor import DAGExecutor
+
+        state = {
+            "outputs": {"previous": {"rows": []}},
+            "connections": {
+                "allowed": {"password": "allowed-secret"},
+                "other": {"password": "other-secret"},
+            },
+        }
+        scoped = DAGExecutor._state_for_node(
+            "source",
+            {"source": {"connection_id": "allowed"}},
+            state,
+        )
+
+        assert scoped["connections"] == {"allowed": {"password": "allowed-secret"}}
+        assert "outputs" not in scoped
+        assert state["connections"]["other"]["password"] == "other-secret"
+
+    @pytest.mark.asyncio
     async def test_record_lineage_with_list_data(self):
         """Test that lineage is recorded for list data."""
         from app.engine.executor import DAGExecutor
@@ -263,6 +315,7 @@ class TestLineageRecording:
         from app.engine.executor import DAGExecutor
 
         mock_db = AsyncMock()
+        mock_db.add = MagicMock()
         mock_db.add.side_effect = Exception("DB error")
         executor = DAGExecutor(mock_db)
         run_id = _make_uuid()
@@ -363,7 +416,12 @@ class TestCollectInputs:
             }
         }
         edges = [
-            {"source": "source-node", "target": "target-node", "source_port": "output", "target_port": "input"}
+            {
+                "source": "source-node",
+                "target": "target-node",
+                "source_port": "output",
+                "target_port": "input",
+            }
         ]
 
         inputs, lineage_edges = executor._collect_inputs("target-node", edges, exec_state)
@@ -401,8 +459,18 @@ class TestCollectInputs:
             }
         }
         edges = [
-            {"source": "source-a", "target": "merge-node", "source_port": "documents", "target_port": "input_a"},
-            {"source": "source-b", "target": "merge-node", "source_port": "output", "target_port": "input_b"},
+            {
+                "source": "source-a",
+                "target": "merge-node",
+                "source_port": "documents",
+                "target_port": "input_a",
+            },
+            {
+                "source": "source-b",
+                "target": "merge-node",
+                "source_port": "output",
+                "target_port": "input_b",
+            },
         ]
 
         inputs, lineage_edges = executor._collect_inputs("merge-node", edges, exec_state)
@@ -535,6 +603,7 @@ class TestLineageService:
         from app.services.lineage_service import record_provenance
 
         mock_db = AsyncMock()
+        mock_db.add = MagicMock()
         run_id = _make_uuid()
 
         with patch("app.services.lineage_service.Provenance") as MockProvenance:
@@ -779,6 +848,7 @@ class TestDLQRetry:
         from app.nodes.base import NodeResult
 
         mock_db = AsyncMock()
+        mock_db.add = MagicMock()
         item = _make_dlq_item()
 
         mock_result = MagicMock()
@@ -786,13 +856,15 @@ class TestDLQRetry:
         mock_db.execute = AsyncMock(return_value=mock_result)
 
         mock_node_impl = MagicMock()
-        mock_node_impl.execute = AsyncMock(return_value=NodeResult(
-            success=True,
-            output_data={"result": "retried"},
-            items_processed=5,
-        ))
+        mock_node_impl.execute = AsyncMock(
+            return_value=NodeResult(
+                success=True,
+                output_data={"result": "retried"},
+                items_processed=5,
+            )
+        )
 
-        with patch("app.nodes.registry.get_node", return_value=mock_node_impl):
+        with patch("app.engine.runner.registry_get_node", return_value=mock_node_impl):
             result = await retry_dlq_item(
                 item_id=item.id,
                 db=mock_db,
@@ -811,6 +883,7 @@ class TestDLQRetry:
         from app.nodes.base import NodeResult
 
         mock_db = AsyncMock()
+        mock_db.add = MagicMock()
         item = _make_dlq_item()
 
         mock_result = MagicMock()
@@ -818,12 +891,14 @@ class TestDLQRetry:
         mock_db.execute = AsyncMock(return_value=mock_result)
 
         mock_node_impl = MagicMock()
-        mock_node_impl.execute = AsyncMock(return_value=NodeResult(
-            success=False,
-            error_message="Still broken",
-        ))
+        mock_node_impl.execute = AsyncMock(
+            return_value=NodeResult(
+                success=False,
+                error_message="Still broken",
+            )
+        )
 
-        with patch("app.nodes.registry.get_node", return_value=mock_node_impl):
+        with patch("app.engine.runner.registry_get_node", return_value=mock_node_impl):
             with pytest.raises(HTTPException) as exc_info:
                 await retry_dlq_item(
                     item_id=item.id,
@@ -926,7 +1001,9 @@ class TestRunRetry:
         mock_bg_tasks = MagicMock()
 
         with patch("app.api.executions.get_run", new_callable=AsyncMock, return_value=run):
-            with patch("app.api.executions.get_graph_versions", new_callable=AsyncMock, return_value=[]):
+            with patch(
+                "app.api.executions.get_graph_versions", new_callable=AsyncMock, return_value=[]
+            ):
                 # Need to mock the graph version lookup inside the endpoint
                 mock_version_result = MagicMock()
                 mock_version = MagicMock()
@@ -939,6 +1016,7 @@ class TestRunRetry:
                 original_execute = mock_db.execute
 
                 call_count = [0]
+
                 async def execute_side_effect(query):
                     call_count[0] += 1
                     if call_count[0] == 1:
@@ -1028,7 +1106,9 @@ class TestRunReplay:
         mock_db.execute = AsyncMock(return_value=mock_db_result)
 
         with patch("app.api.executions.get_run", new_callable=AsyncMock, return_value=run):
-            with patch("app.api.executions.create_run", new_callable=AsyncMock, return_value=new_run):
+            with patch(
+                "app.api.executions.create_run", new_callable=AsyncMock, return_value=new_run
+            ):
                 mock_bg_tasks = MagicMock()
 
                 result = await replay_run(
@@ -1195,6 +1275,7 @@ class TestDeadLetterHandler:
         from app.engine.dead_letter import add_to_dlq
 
         mock_db = AsyncMock()
+        mock_db.add = MagicMock()
         run_id = _make_uuid()
 
         with patch("app.engine.dead_letter.DeadLetterQueue") as MockDLQ:

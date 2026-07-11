@@ -1,0 +1,69 @@
+[build-system]
+requires = ["setuptools>=75", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ingestion-graph"
+version = "0.3.0"
+description = "Local-first, resumable data ingestion and query SDK"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "LicenseRef-Proprietary"
+authors = [{ name = "FrozenScorch" }]
+dependencies = []
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+]
+
+[project.optional-dependencies]
+discord = ["httpx>=0.28"]
+dev = [
+  "build>=1.2",
+  "httpx>=0.28",
+  "pytest>=8.3",
+  "pytest-asyncio>=0.24",
+  "mypy>=1.15",
+  "ruff>=0.12",
+]
+
+[project.scripts]
+ingestion-graph = "ingestion_graph.cli:main"
+
+[project.entry-points."ingestion_graph.sources"]
+discord = "ingestion_graph.sources:DiscordSource"
+jsonl = "ingestion_graph.sources:JsonlSource"
+
+[project.entry-points."ingestion_graph.destinations"]
+jsonl = "ingestion_graph.destinations:JsonlDestination"
+sqlite = "ingestion_graph.destinations:SQLiteCollection"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+ingestion_graph = ["py.typed"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+asyncio_mode = "auto"
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.mypy]
+python_version = "3.11"
+files = ["src/ingestion_graph"]
+strict = true
+warn_unreachable = true

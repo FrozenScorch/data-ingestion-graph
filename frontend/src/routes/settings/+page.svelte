@@ -1,11 +1,13 @@
 <script lang="ts">
   import { auth } from '$lib/stores';
+  import ConnectionCenter from '$lib/components/ui/ConnectionCenter.svelte';
 </script>
 
 <div class="p-6 space-y-6">
   <h1 class="text-xl font-bold text-gray-100">Settings</h1>
 
   <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+    <ConnectionCenter />
     <!-- User Info -->
     <div class="bg-gray-900 border border-gray-800 rounded-xl p-5">
       <h2 class="text-sm font-medium text-gray-300 mb-4">User Information</h2>
@@ -56,7 +58,8 @@
     <div class="bg-gray-900 border border-gray-800 rounded-xl p-5 md:col-span-2">
       <h2 class="text-sm font-medium text-gray-300 mb-4">About</h2>
       <p class="text-sm text-gray-500">
-        Ingestion Graph is a visual, node-based data ingestion pipeline builder.
+        Enterprise Data Ingestion Graph Studio is the visual control plane. Its SDK-backed
+        nodes import the independently reusable ingestion_graph package.
         Construct DAGs on a canvas, configure AI-powered processing nodes,
         and execute pipelines with checkpointing, parallel fan-out/fan-in, retry logic,
         data lineage, and run replay.

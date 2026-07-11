@@ -1,17 +1,42 @@
 """
 Pydantic schemas for graph operations.
 """
+
 from datetime import datetime
-from typing import Optional, Any
+from typing import Any
 from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_serializer
+
+
+_SECRET_KEY_MARKERS = ("password", "token", "secret", "api_key", "authorization", "cookie")
+
+
+def _is_secret_key(key: object) -> bool:
+    normalized = str(key).lower().replace("-", "_")
+    return any(
+        normalized == marker or normalized.endswith(f"_{marker}") for marker in _SECRET_KEY_MARKERS
+    )
+
+
+def _redact_sensitive(value: Any) -> Any:
+    if isinstance(value, dict):
+        if set(value) == {"$encrypted"}:
+            return {"configured": True}
+        redacted = {}
+        for key, item in value.items():
+            redacted[key] = "********" if _is_secret_key(key) else _redact_sensitive(item)
+        return redacted
+    if isinstance(value, list):
+        return [_redact_sensitive(item) for item in value]
+    return value
 
 
 class GraphCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=255)
     description: str | None = Field(default=None, max_length=5000)
     tags: list[str] = Field(default_factory=list)
+    template_id: str | None = Field(default=None, pattern="^[a-z0-9-]+$")
 
 
 class GraphUpdate(BaseModel):
@@ -39,6 +64,14 @@ class GraphVersionResponse(BaseModel):
 
     model_config = {"from_attributes": True}
 
+    @field_serializer("node_configs")
+    def serialize_node_configs(self, value: dict | None) -> dict | None:
+        return _redact_sensitive(value)
+
+    @field_serializer("nodes_data")
+    def serialize_nodes_data(self, value: dict | None) -> dict | None:
+        return _redact_sensitive(value)
+
 
 class GraphResponse(BaseModel):
     id: UUID
@@ -55,6 +88,7 @@ class GraphResponse(BaseModel):
 
 class GraphDetailResponse(GraphResponse):
     """Graph response with latest version data included."""
+
     latest_version: GraphVersionResponse | None = None
 
 
@@ -65,7 +99,7 @@ class GraphListResponse(BaseModel):
 
 class ConnectionCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=255)
-    type: str = Field(..., pattern="^(postgres|discord|github|webhook)$")
+    type: str = Field(..., pattern="^(postgres|discord)$")
     config: dict | None = None
 
 
@@ -84,3 +118,7 @@ class ConnectionResponse(BaseModel):
     created_at: datetime
 
     model_config = {"from_attributes": True}
+
+    @field_serializer("config")
+    def serialize_config(self, value: dict | None) -> dict | None:
+        return _redact_sensitive(value)

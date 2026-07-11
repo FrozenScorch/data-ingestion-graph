@@ -26,6 +26,7 @@ export interface PortDef {
 export interface ConfigField {
   type: string;
   format?: string;
+  connection_type?: string;
   description?: string;
   enum?: string[];
   default?: unknown;
@@ -39,6 +40,8 @@ export interface NodeTypeDef {
   display_name: string;
   category: NodeCategory;
   description: string;
+  implementation: 'studio' | 'sdk-adapter';
+  sdk_component: string | null;
   inputs: PortDef[];
   outputs: PortDef[];
   config_schema: {

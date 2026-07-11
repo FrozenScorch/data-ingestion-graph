@@ -4,7 +4,7 @@
   import { execution } from '$lib/stores';
   import type { RunStatus } from '$lib/types';
 
-  let graphId = $derived($page.params.id);
+  let graphId = $derived($page.params.id ?? '');
 
   onMount(() => {
     execution.listRuns(graphId);

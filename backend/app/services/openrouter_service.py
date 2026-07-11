@@ -9,11 +9,10 @@ Features:
 """
 import json
 import logging
-from typing import Any, Optional
-
-from openai import AsyncOpenAI
+from typing import Any
 
 from app.config import settings
+from openai import AsyncOpenAI
 
 logger = logging.getLogger(__name__)
 
@@ -37,11 +36,23 @@ class OpenRouterService:
     """
 
     def __init__(self):
-        self.client = AsyncOpenAI(
-            base_url="https://openrouter.ai/api/v1",
-            api_key=settings.openrouter_api_key,
-        )
+        # Keyless Studio startup must remain valid. Construct the network client
+        # only when an OpenRouter operation is actually requested.
+        self._client: AsyncOpenAI | None = None
         self._models_cache: list[dict] | None = None
+
+    @property
+    def client(self) -> AsyncOpenAI:
+        if self._client is None:
+            if not settings.openrouter_api_key:
+                raise RuntimeError(
+                    "OpenRouter is not configured. Set OPENROUTER_API_KEY before using AI nodes."
+                )
+            self._client = AsyncOpenAI(
+                base_url="https://openrouter.ai/api/v1",
+                api_key=settings.openrouter_api_key,
+            )
+        return self._client
 
     async def list_models(self) -> list[dict]:
         """
