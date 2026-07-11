@@ -96,7 +96,7 @@ class DAGExecutor:
             connections = await self._resolve_connections(owner_id, node_configs or {})
         except ValueError:
             run.status = RunStatus.FAILED.value
-            run.error_message = "Invalid or unauthorized saved connection reference"
+            run.error_message = "Invalid or unauthorized graph resource reference"
             await self.db.commit()
             await self._emit_event(run.id, "run_failed", {"error": run.error_message})
             return run

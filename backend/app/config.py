@@ -68,6 +68,9 @@ class Settings(BaseSettings):
     upload_dir: str = "./data/uploads"
     temp_dir: str = "./data/temp"
     max_upload_size_mb: int = 100
+    max_upload_files_per_request: int = Field(default=20, ge=1, le=100)
+    max_upload_request_mb: int = Field(default=250, ge=1)
+    max_upload_storage_mb: int = Field(default=1024, ge=1)
     query_artifact_ttl_hours: int = Field(default=168, ge=1)
 
     # Logging

@@ -29,7 +29,7 @@
   }
 
   async function remove(file: IngestionFile) {
-    if (!confirm(`Delete ${file.name}? Saved graphs selecting it will need another file.`)) return;
+    if (!confirm(`Delete ${file.name}? Files referenced by saved graph history cannot be deleted.`)) return;
     try { await artifactService.delete(file.id); await refresh(); }
     catch (e) { message = e instanceof Error ? e.message : 'Delete failed'; }
   }

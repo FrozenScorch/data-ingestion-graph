@@ -93,7 +93,7 @@ TEMPLATES: dict[str, GraphTemplate] = {
         name="Documents to Search",
         description="Parse and chunk server-side PDF, Word, CSV, or text files for inspection.",
         category="documents",
-        setup=("Upload files in Studio, then select them on the File Source node",),
+        setup=("Upload files in Studio, then explicitly select them on the File Source node",),
         nodes=(
             TemplateNode(
                 "files",

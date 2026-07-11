@@ -68,28 +68,16 @@ class FileSourceNode(BaseNode):
             "properties": {
                 "source_type": {
                     "type": "string",
-                    "enum": ["upload", "glob", "path"],
+                    "enum": ["upload"],
                     "default": "upload",
                     "description": "File source type: upload files, glob pattern, or direct path",
-                },
-                "file_pattern": {
-                    "type": "string",
-                    "default": "**/*",
-                    "description": "Glob pattern to match files (e.g. **/*.pdf)",
-                },
-                "recursive": {
-                    "type": "boolean",
-                    "default": True,
-                    "description": "Search subdirectories recursively",
                 },
                 "artifact_ids": {
                     "type": "array",
                     "items": {"type": "string", "format": "uuid"},
                     "format": "artifact-refs",
                     "default": [],
-                    "description": (
-                        "Studio-managed files to ingest. Empty selects all of your uploaded files."
-                    ),
+                    "description": "Explicit Studio-managed files to ingest. Empty selects none.",
                 },
             },
             "required": ["source_type"],
@@ -100,6 +88,15 @@ class FileSourceNode(BaseNode):
         source_type = context.config.get("source_type", "upload")
         file_pattern = context.config.get("file_pattern", "**/*")
         recursive = context.config.get("recursive", True)
+
+        if source_type != "upload" and not context.state.get("trusted_server_paths"):
+            return NodeResult(
+                success=False,
+                output_data={"file_list": []},
+                error_message=(
+                    "Studio File Source accepts managed uploads only; server paths are disabled"
+                ),
+            )
 
         # The runner owns this root. Graph configuration can never select an
         # arbitrary server directory.
@@ -133,7 +130,7 @@ class FileSourceNode(BaseNode):
                     )
                 try:
                     paths = resolve_uploads(
-                        UUID(str(owner_id)), context.config.get("artifact_ids") or None
+                        UUID(str(owner_id)), context.config.get("artifact_ids") or []
                     )
                 except ValueError as exc:
                     return NodeResult(

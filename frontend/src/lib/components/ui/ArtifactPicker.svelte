@@ -28,8 +28,7 @@
     try {
       const added = await artifactService.upload(selected, percent => progress = percent);
       await refresh();
-      // An empty selection means "all files", including the newly uploaded ones.
-      if (value.length) onValueChange([...new Set([...value, ...added.map(item => item.id)])]);
+      onValueChange([...new Set([...value, ...added.map(item => item.id)])]);
     } catch (e) { error = e instanceof Error ? e.message : 'Upload failed'; }
     finally { uploading = false; input.value = ''; }
   }
@@ -43,7 +42,7 @@
 
 <div class="rounded-lg border border-gray-700 bg-gray-950/40 p-3 space-y-2">
   <div class="flex items-center justify-between gap-2">
-    <span class="text-xs text-gray-400">{value.length ? `${value.length} selected` : 'All uploaded files'}</span>
+    <span class="text-xs text-gray-400">{value.length ? `${value.length} selected` : 'No files selected'}</span>
     <label class="text-xs text-cyan-400 hover:text-cyan-300 cursor-pointer">
       {uploading ? `Uploading ${progress}%` : 'Upload files'}
       <input class="hidden" type="file" multiple accept=".pdf,.doc,.docx,.csv,.txt,.md,.json,.xml,.html,.htm" onchange={upload} disabled={uploading} />

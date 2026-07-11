@@ -1,17 +1,15 @@
 """
 Execution service: run creation, management, and control.
 """
-import asyncio
+
 import logging
-from typing import Optional
 from uuid import UUID
 
-from sqlalchemy import select, func
+from app.models.execution import Run, RunStatus, TriggerType
+from app.models.graph import Graph
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
-
-from app.models.execution import Run, RunStatus, TriggerType
-from app.models.graph import GraphVersion
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +19,7 @@ async def create_run(
     graph_id: UUID,
     triggered_by: UUID,
     trigger_type: str = TriggerType.MANUAL.value,
-    graph_version_id: Optional[UUID] = None,
+    graph_version_id: UUID | None = None,
 ) -> Run:
     """Create a new run for a graph."""
     run = Run(
@@ -42,7 +40,7 @@ async def get_run(
     run_id: UUID,
     *,
     load_nodes: bool = False,
-) -> Optional[Run]:
+) -> Run | None:
     """Get a run by ID with optional relationship loading.
 
     Args:
@@ -59,14 +57,21 @@ async def get_run(
 
 async def list_runs(
     db: AsyncSession,
-    graph_id: Optional[UUID] = None,
-    status: Optional[str] = None,
+    graph_id: UUID | None = None,
+    status: str | None = None,
     offset: int = 0,
     limit: int = 50,
+    owner_id: UUID | None = None,
 ) -> tuple[list[Run], int]:
     """List runs with optional filtering."""
     query = select(Run)
     count_query = select(func.count()).select_from(Run)
+
+    if owner_id is not None:
+        query = query.join(Graph, Graph.id == Run.graph_id).where(Graph.owner_id == owner_id)
+        count_query = count_query.join(Graph, Graph.id == Run.graph_id).where(
+            Graph.owner_id == owner_id
+        )
 
     if graph_id:
         query = query.where(Run.graph_id == graph_id)
@@ -89,17 +94,16 @@ async def update_run_status(
     db: AsyncSession,
     run_id: UUID,
     new_status: str,
-) -> Optional[Run]:
+) -> Run | None:
     """Update a run's status."""
     run = await get_run(db, run_id)
     if not run:
         return None
 
     from app.engine.state import can_transition
+
     if not can_transition(run.status, new_status):
-        raise ValueError(
-            f"Invalid status transition: {run.status} -> {new_status}"
-        )
+        raise ValueError(f"Invalid status transition: {run.status} -> {new_status}")
 
     run.status = new_status
     await db.commit()
@@ -107,16 +111,16 @@ async def update_run_status(
     return run
 
 
-async def cancel_run(db: AsyncSession, run_id: UUID) -> Optional[Run]:
+async def cancel_run(db: AsyncSession, run_id: UUID) -> Run | None:
     """Cancel a run."""
     return await update_run_status(db, run_id, RunStatus.CANCELLED.value)
 
 
-async def pause_run(db: AsyncSession, run_id: UUID) -> Optional[Run]:
+async def pause_run(db: AsyncSession, run_id: UUID) -> Run | None:
     """Pause a running run."""
     return await update_run_status(db, run_id, RunStatus.PAUSED.value)
 
 
-async def resume_run(db: AsyncSession, run_id: UUID) -> Optional[Run]:
+async def resume_run(db: AsyncSession, run_id: UUID) -> Run | None:
     """Resume a paused run."""
     return await update_run_status(db, run_id, RunStatus.RUNNING.value)

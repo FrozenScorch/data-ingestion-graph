@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID, uuid4
@@ -24,18 +26,26 @@ ALLOWED_EXTENSIONS = {
     ".xml",
 }
 CHUNK_SIZE = 1024 * 1024
+STAGING_MAX_AGE_SECONDS = 60 * 60
 
 
 def _storage_root() -> Path:
-    root = Path(settings.upload_dir).resolve()
+    root = Path(settings.upload_dir).absolute()
+    current = Path(root.anchor)
+    for part in root.parts[1:]:
+        current /= part
+        if current.exists() and current.is_symlink():
+            raise RuntimeError("Upload storage must not contain symlinked directories")
     root.mkdir(parents=True, exist_ok=True)
     return root
 
 
 def owner_root(owner_id: UUID) -> Path:
     root = _storage_root()
-    child = (root / str(UUID(str(owner_id)))).resolve()
+    child = root / str(UUID(str(owner_id)))
     child.relative_to(root)
+    if child.exists() and child.is_symlink():
+        raise RuntimeError("Owner upload directory must not be a symlink")
     child.mkdir(parents=True, exist_ok=True, mode=0o700)
     return child
 
@@ -57,7 +67,7 @@ def _validate_filename(filename: str | None) -> str:
 
 def _artifact_dir(owner_id: UUID, artifact_id: UUID) -> Path:
     root = owner_root(owner_id)
-    path = (root / str(UUID(str(artifact_id)))).resolve()
+    path = root / str(UUID(str(artifact_id)))
     path.relative_to(root)
     return path
 
@@ -65,10 +75,14 @@ def _artifact_dir(owner_id: UUID, artifact_id: UUID) -> Path:
 async def save_upload(owner_id: UUID, upload: UploadFile) -> dict:
     name = _validate_filename(upload.filename)
     artifact_id = uuid4()
+    owner = owner_root(owner_id)
+    staging = owner / f".staging-{artifact_id}"
     directory = _artifact_dir(owner_id, artifact_id)
-    directory.mkdir(mode=0o700)
-    file_path = directory / name
+    staging.mkdir(mode=0o700)
+    file_path = staging / name
     max_bytes = settings.max_upload_size_mb * 1024 * 1024
+    owner_limit = settings.max_upload_storage_mb * 1024 * 1024
+    existing_bytes = sum(item["size"] for item in list_uploads(owner_id))
     size = 0
     try:
         with file_path.open("xb") as target:
@@ -79,6 +93,11 @@ async def save_upload(owner_id: UUID, upload: UploadFile) -> dict:
                         status.HTTP_413_CONTENT_TOO_LARGE,
                         f"File exceeds the {settings.max_upload_size_mb} MB limit",
                     )
+                if existing_bytes + size > owner_limit:
+                    raise HTTPException(
+                        status.HTTP_413_CONTENT_TOO_LARGE,
+                        f"Owner storage exceeds the {settings.max_upload_storage_mb} MB quota",
+                    )
                 target.write(chunk)
         created_at = datetime.now(UTC).isoformat()
         metadata = {
@@ -88,10 +107,11 @@ async def save_upload(owner_id: UUID, upload: UploadFile) -> dict:
             "content_type": upload.content_type or "application/octet-stream",
             "created_at": created_at,
         }
-        (directory / "metadata.json").write_text(json.dumps(metadata), encoding="utf-8")
+        (staging / "metadata.json").write_text(json.dumps(metadata), encoding="utf-8")
+        os.replace(staging, directory)
         return metadata
     except Exception:
-        shutil.rmtree(directory, ignore_errors=True)
+        shutil.rmtree(staging, ignore_errors=True)
         raise
     finally:
         await upload.close()
@@ -112,8 +132,8 @@ def _read_artifact(owner_id: UUID, artifact_id: UUID) -> tuple[dict, Path] | Non
         if metadata.get("id") != str(artifact_id):
             return None
         name = _validate_filename(metadata.get("name"))
-        file_path = (directory / name).resolve()
-        file_path.relative_to(directory.resolve())
+        file_path = directory / name
+        file_path.relative_to(directory)
         if not file_path.is_file() or file_path.is_symlink():
             return None
         metadata["size"] = file_path.stat().st_size
@@ -124,7 +144,19 @@ def _read_artifact(owner_id: UUID, artifact_id: UUID) -> tuple[dict, Path] | Non
 
 def list_uploads(owner_id: UUID) -> list[dict]:
     result = []
-    for directory in owner_root(owner_id).iterdir():
+    owner = owner_root(owner_id)
+    for directory in owner.iterdir():
+        if directory.name.startswith(".staging-"):
+            try:
+                if (
+                    directory.is_dir()
+                    and not directory.is_symlink()
+                    and time.time() - directory.stat().st_mtime > STAGING_MAX_AGE_SECONDS
+                ):
+                    shutil.rmtree(directory)
+            except OSError:
+                pass
+            continue
         try:
             artifact_id = UUID(directory.name)
         except ValueError:
@@ -135,14 +167,11 @@ def list_uploads(owner_id: UUID) -> list[dict]:
     return sorted(result, key=lambda item: item["created_at"], reverse=True)
 
 
-def resolve_uploads(owner_id: UUID, artifact_ids: list[str] | None = None) -> list[Path]:
-    if artifact_ids:
-        try:
-            ids = [UUID(value) for value in artifact_ids]
-        except (TypeError, ValueError) as exc:
-            raise ValueError("Invalid upload reference") from exc
-    else:
-        ids = [UUID(item["id"]) for item in list_uploads(owner_id)]
+def resolve_uploads(owner_id: UUID, artifact_ids: list[str]) -> list[Path]:
+    try:
+        ids = [UUID(value) for value in artifact_ids]
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Invalid upload reference") from exc
     paths = []
     for artifact_id in ids:
         item = _read_artifact(owner_id, artifact_id)

@@ -132,7 +132,7 @@ async def retry_dlq_item(
     try:
         from app.engine.runner import run_node_with_retry
         from app.models.execution import Run
-        from app.models.graph import Graph
+        from app.models.graph import Graph, GraphVersion
         from sqlalchemy import select as _s
 
         # Retrieve parent run for proper retry context
@@ -144,13 +144,22 @@ async def retry_dlq_item(
                 detail="Parent run not found",
             )
 
-        # Execute through the full retry infrastructure
+        node_config = {}
+        if run.graph_version_id:
+            version_result = await db.execute(
+                _s(GraphVersion.node_configs).where(GraphVersion.id == run.graph_version_id)
+            )
+            configs = version_result.scalar_one_or_none() or {}
+            node_config = configs.get(item.node_id, {}) if item.node_id else {}
+
+        # Execute through the full retry infrastructure using the immutable
+        # graph-version config; source nodes must never fall back to broad defaults.
         run_node = await run_node_with_retry(
             db=db,
             run_id=run.id,
             node_id=item.node_id or "dlq-retry-node",
             node_type=item.node_type,
-            config={},
+            config=node_config,
             input_data=item.input_data,
             state={"owner_id": str((await db.execute(
                 _s(Graph.owner_id).where(Graph.id == run.graph_id)

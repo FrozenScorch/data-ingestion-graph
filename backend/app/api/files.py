@@ -2,6 +2,7 @@
 
 from uuid import UUID
 
+from app.config import settings
 from app.db.session import get_session
 from app.middleware.auth import get_current_user
 from app.models.graph import Graph, GraphVersion
@@ -34,9 +35,26 @@ async def upload_files(
 ):
     if not files:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Select at least one file")
+    if len(files) > settings.max_upload_files_per_request:
+        raise HTTPException(
+            status.HTTP_413_CONTENT_TOO_LARGE,
+            f"At most {settings.max_upload_files_per_request} files may be uploaded at once",
+        )
     saved = []
-    for upload in files:
-        saved.append(await upload_service.save_upload(current_user["user_id"], upload))
+    try:
+        for upload in files:
+            saved.append(await upload_service.save_upload(current_user["user_id"], upload))
+            if sum(item["size"] for item in saved) > settings.max_upload_request_mb * 1024 * 1024:
+                raise HTTPException(
+                    status.HTTP_413_CONTENT_TOO_LARGE,
+                    f"Upload request exceeds {settings.max_upload_request_mb} MB",
+                )
+    except Exception:
+        # Keep a multipart request atomic: a later invalid/oversized file must
+        # not leave earlier files behind while the client receives only an error.
+        for item in saved:
+            upload_service.delete_upload(current_user["user_id"], item["id"])
+        raise
     return saved
 
 
@@ -53,15 +71,11 @@ async def delete_file(
     current_user: dict = Depends(get_current_user),
 ):
     result = await db.execute(
-        select(GraphVersion.graph_id, GraphVersion.version_number, GraphVersion.node_configs)
+        select(GraphVersion.node_configs)
         .join(Graph, Graph.id == GraphVersion.graph_id)
         .where(Graph.owner_id == current_user["user_id"])
-        .order_by(GraphVersion.graph_id, GraphVersion.version_number.desc())
     )
-    latest_configs = {}
-    for graph_id, _, configs in result.all():
-        latest_configs.setdefault(graph_id, configs)
-    for configs in latest_configs.values():
+    for configs in result.scalars():
         if any(
             str(file_id) in (config.get("artifact_ids") or [])
             for config in (configs or {}).values()

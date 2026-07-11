@@ -1,8 +1,11 @@
+import os
+import time
 from io import BytesIO
+from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
 import pytest
-from app.api.files import router
+from app.api.files import delete_file, router
 from app.config import settings
 from app.middleware.auth import get_current_user
 from app.nodes.base import NodeContext
@@ -68,6 +71,22 @@ async def test_file_source_reads_only_selected_owner_uploads(upload_root):
 
 
 @pytest.mark.asyncio
+async def test_empty_selection_never_expands_to_current_or_future_uploads(upload_root):
+    owner = uuid4()
+    await upload_service.save_upload(owner, make_upload("first.txt", b"one"))
+    context = NodeContext(
+        run_id="run",
+        node_id="files",
+        config={"source_type": "upload", "artifact_ids": []},
+        state={"owner_id": str(owner)},
+        working_dir=str(upload_root),
+    )
+    assert (await FileSourceNode().execute(context)).output_data["file_list"] == []
+    await upload_service.save_upload(owner, make_upload("future.txt", b"future"))
+    assert (await FileSourceNode().execute(context)).output_data["file_list"] == []
+
+
+@pytest.mark.asyncio
 async def test_file_source_rejects_server_paths(tmp_path):
     file_path = tmp_path / "secret.txt"
     file_path.write_text("secret", encoding="utf-8")
@@ -79,7 +98,7 @@ async def test_file_source_rejects_server_paths(tmp_path):
     )
     result = await FileSourceNode().execute(context)
     assert result.success is False
-    assert "Absolute" in (result.error_message or "")
+    assert "managed uploads only" in (result.error_message or "")
 
 
 def test_multipart_api_upload_and_list(upload_root):
@@ -102,3 +121,154 @@ def test_multipart_api_upload_and_list(upload_root):
         listing = client.get("/api/files")
         assert listing.status_code == 200
         assert listing.json()["files"][0]["id"] == uploaded["id"]
+
+
+def test_multipart_api_rolls_back_earlier_files_on_error(upload_root):
+    owner = uuid4()
+    app = FastAPI()
+    app.include_router(router)
+    app.dependency_overrides[get_current_user] = lambda: {
+        "user_id": owner,
+        "username": "owner",
+        "role": "user",
+    }
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/files",
+            files=[
+                ("files", ("valid.txt", b"valid", "text/plain")),
+                ("files", ("blocked.exe", b"blocked", "application/octet-stream")),
+            ],
+        )
+        assert response.status_code == 415
+        assert client.get("/api/files").json()["files"] == []
+
+
+def test_multipart_api_enforces_request_file_count(upload_root, monkeypatch):
+    monkeypatch.setattr(settings, "max_upload_files_per_request", 1)
+    owner = uuid4()
+    app = FastAPI()
+    app.include_router(router)
+    app.dependency_overrides[get_current_user] = lambda: {
+        "user_id": owner,
+        "username": "owner",
+        "role": "user",
+    }
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/files",
+            files=[
+                ("files", ("one.txt", b"1", "text/plain")),
+                ("files", ("two.txt", b"2", "text/plain")),
+            ],
+        )
+        assert response.status_code == 413
+        assert client.get("/api/files").json()["files"] == []
+
+
+def test_multipart_api_enforces_aggregate_request_size(upload_root, monkeypatch):
+    monkeypatch.setattr(settings, "max_upload_request_mb", 1)
+    owner = uuid4()
+    app = FastAPI()
+    app.include_router(router)
+    app.dependency_overrides[get_current_user] = lambda: {
+        "user_id": owner,
+        "username": "owner",
+        "role": "user",
+    }
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/files",
+            files=[
+                ("files", ("one.txt", b"1" * 600_000, "text/plain")),
+                ("files", ("two.txt", b"2" * 600_000, "text/plain")),
+            ],
+        )
+        assert response.status_code == 413
+        assert client.get("/api/files").json()["files"] == []
+
+
+def test_symlinked_owner_root_is_rejected(upload_root):
+    owner = uuid4()
+    target = upload_root / "target"
+    target.mkdir()
+    link = upload_root / str(owner)
+    try:
+        link.symlink_to(target, target_is_directory=True)
+    except OSError:
+        pytest.skip("Symlink creation is unavailable on this platform")
+    with pytest.raises(RuntimeError, match="symlink"):
+        upload_service.owner_root(owner)
+
+
+@pytest.mark.asyncio
+async def test_owner_storage_quota_is_enforced(upload_root, monkeypatch):
+    monkeypatch.setattr(settings, "max_upload_storage_mb", 1)
+    owner = uuid4()
+    await upload_service.save_upload(owner, make_upload("full.txt", b"x" * (1024 * 1024)))
+    with pytest.raises(HTTPException) as exc:
+        await upload_service.save_upload(owner, make_upload("extra.txt", b"x"))
+    assert exc.value.status_code == 413
+    assert [item["name"] for item in upload_service.list_uploads(owner)] == ["full.txt"]
+
+
+@pytest.mark.asyncio
+async def test_delete_preserves_files_referenced_by_historical_version(upload_root):
+    owner = uuid4()
+    saved = await upload_service.save_upload(owner, make_upload("history.txt", b"history"))
+    result = MagicMock()
+    result.scalars.return_value = [
+        {"files": {"artifact_ids": [saved["id"]]}},
+        {"files": {"artifact_ids": []}},
+    ]
+    db = AsyncMock()
+    db.execute = AsyncMock(return_value=result)
+    with pytest.raises(HTTPException) as exc:
+        await delete_file(saved["id"], db=db, current_user={"user_id": owner})
+    assert exc.value.status_code == 409
+    assert upload_service.list_uploads(owner)[0]["id"] == saved["id"]
+
+
+def test_symlinked_artifact_directory_is_never_listed(upload_root):
+    owner = uuid4()
+    artifact_id = uuid4()
+    owner_dir = upload_service.owner_root(owner)
+    target = upload_root / "external-artifact"
+    target.mkdir()
+    link = owner_dir / str(artifact_id)
+    try:
+        link.symlink_to(target, target_is_directory=True)
+    except OSError:
+        pytest.skip("Symlink creation is unavailable on this platform")
+    assert upload_service.list_uploads(owner) == []
+    assert upload_service.delete_upload(owner, artifact_id) is False
+
+
+@pytest.mark.asyncio
+async def test_symlinked_payload_is_never_listed_or_deleted(upload_root):
+    owner = uuid4()
+    saved = await upload_service.save_upload(owner, make_upload("payload.txt", b"safe"))
+    directory = upload_service.owner_root(owner) / saved["id"]
+    payload = directory / "payload.txt"
+    outside = upload_root / "outside.txt"
+    outside.write_text("outside", encoding="utf-8")
+    payload.unlink()
+    try:
+        payload.symlink_to(outside)
+    except OSError:
+        pytest.skip("Symlink creation is unavailable on this platform")
+    assert upload_service.list_uploads(owner) == []
+    assert upload_service.delete_upload(owner, saved["id"]) is False
+    assert outside.read_text(encoding="utf-8") == "outside"
+
+
+def test_stale_staging_directories_are_cleaned(upload_root):
+    owner = uuid4()
+    staging = upload_service.owner_root(owner) / f".staging-{uuid4()}"
+    staging.mkdir()
+    (staging / "partial.txt").write_text("partial", encoding="utf-8")
+    old = time.time() - upload_service.STAGING_MAX_AGE_SECONDS - 10
+    os.utime(staging, (old, old))
+    assert upload_service.list_uploads(owner) == []
+    assert not staging.exists()
