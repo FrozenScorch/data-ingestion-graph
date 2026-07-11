@@ -63,7 +63,9 @@ async def test_invalid_and_oversized_uploads_leave_no_files(upload_root, monkeyp
     with pytest.raises(HTTPException) as oversized:
         await upload_service.save_upload(owner, make_upload("large.txt", b"x"))
     assert oversized.value.status_code == 413
-    assert list(upload_service.owner_root(owner).iterdir()) == []
+    assert upload_service.list_uploads(owner) == []
+    remaining = list(upload_service.owner_root(owner).iterdir())
+    assert [path.name for path in remaining] == [".quota.lock"]
 
 
 @pytest.mark.asyncio
