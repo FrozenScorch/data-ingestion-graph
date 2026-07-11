@@ -1,4 +1,5 @@
 import re as _re_dw
+
 """
 DatabaseWriter node: write data to PostgreSQL.
 
@@ -10,12 +11,10 @@ Output: {rows_affected: N, table: "..."}
 import logging
 from typing import Any
 
-from sqlalchemy import Column, Integer, MetaData, Table, Text, text
-from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy import URL, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.nodes.base import BaseNode, NodeContext, NodeResult, PortDef, PortDataType
-from app.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +51,10 @@ class DatabaseWriterNode(BaseNode):
         return {
             "type": "object",
             "properties": {
+                "connection_id": {
+                    "type": "string",
+                    "description": "Saved PostgreSQL connection ID",
+                },
                 "table_name": {
                     "type": "string",
                     "default": "output_data",
@@ -74,8 +77,28 @@ class DatabaseWriterNode(BaseNode):
                     "description": "Comma-separated column names for upsert conflict resolution",
                 },
             },
-            "required": ["table_name"],
+            "required": ["connection_id", "table_name"],
         }
+
+    @staticmethod
+    def _build_connection_url(context: NodeContext) -> str:
+        config = context.config
+        connection_id = config.get("connection_id")
+        connection = (
+            context.state.get("connections", {}).get(connection_id) if connection_id else None
+        )
+        if connection and connection.get("host") and connection.get("database"):
+            return URL.create(
+                "postgresql+asyncpg",
+                username=connection.get("username") or connection.get("user"),
+                password=connection.get("password"),
+                host=connection["host"],
+                port=int(connection.get("port", 5432)),
+                database=connection["database"],
+            ).render_as_string(hide_password=False)
+        if not connection_id:
+            raise ValueError("Database writer requires connection_id")
+        raise ValueError(f"Saved connection not available: {connection_id}")
 
     async def execute(self, context: NodeContext) -> NodeResult:
         """
@@ -109,8 +132,25 @@ class DatabaseWriterNode(BaseNode):
                 items_processed=0,
             )
 
+        columns = list(rows[0].keys())
+        if not columns:
+            return NodeResult(
+                success=True,
+                output_data={"rows_affected": 0, "table": table_name},
+                items_processed=0,
+            )
+
+        invalid_columns = [
+            str(column) for column in columns if not _SQL_IDENTIFIER_RE.match(str(column))
+        ]
+        if invalid_columns:
+            return NodeResult(
+                success=False,
+                error_message=f"Invalid input column names: {', '.join(invalid_columns)}",
+            )
+
         try:
-            connection_url = settings.database_url
+            connection_url = self._build_connection_url(context)
         except Exception as e:
             return NodeResult(
                 success=False,
@@ -121,6 +161,22 @@ class DatabaseWriterNode(BaseNode):
         upsert_keys = []
         if upsert_key_str:
             upsert_keys = [k.strip() for k in upsert_key_str.split(",") if k.strip()]
+        invalid_upsert_keys = [
+            key for key in upsert_keys if not _SQL_IDENTIFIER_RE.match(key) or key not in columns
+        ]
+        if invalid_upsert_keys:
+            return NodeResult(
+                success=False,
+                error_message=f"Invalid upsert keys: {', '.join(invalid_upsert_keys)}",
+            )
+        if mode == "upsert" and not upsert_keys:
+            return NodeResult(
+                success=False,
+                error_message="upsert mode requires at least one upsert_key",
+            )
+
+        quoted_cols = ", ".join(f'"{column}"' for column in columns)
+        param_placeholders = ", ".join(f":{column}__param" for column in columns)
 
         engine = None
         try:
@@ -137,39 +193,31 @@ class DatabaseWriterNode(BaseNode):
                     await session.execute(text(f'TRUNCATE TABLE "{table_name}" CASCADE'))
                     await session.commit()
 
-                # Get column names from the first row
-                columns = list(rows[0].keys()) if rows else []
-
-                if not columns:
-                    return NodeResult(
-                        success=True,
-                        output_data={"rows_affected": 0, "table": table_name},
-                        items_processed=0,
-                    )
-
                 # Build insert statements in batches
                 total_affected = 0
-
-                # Pre-compute SQL fragments to avoid nested f-string issues
-                quoted_cols = ", ".join(f'"{c}"' for c in columns)
-                param_placeholders = ", ".join(f":{c}__param" for c in columns)
 
                 for batch_start in range(0, len(rows), batch_size):
                     batch = rows[batch_start : batch_start + batch_size]
 
                     if mode == "upsert" and upsert_keys:
-                        # Use PostgreSQL ON CONFLICT ... DO UPDATE
-                        stmt = pg_insert(text(f'"{table_name}"')).values(batch)
-                        update_dict = {
-                            col: stmt.excluded[col]
-                            for col in columns
-                            if col not in upsert_keys
-                        }
-                        stmt = stmt.on_conflict_do_update(
-                            index_elements=upsert_keys,
-                            set_=update_dict,
+                        conflict_columns = ", ".join(f'"{key}"' for key in upsert_keys)
+                        update_columns = [column for column in columns if column not in upsert_keys]
+                        action = "DO NOTHING"
+                        if update_columns:
+                            assignments = ", ".join(
+                                f'"{column}" = EXCLUDED."{column}"' for column in update_columns
+                            )
+                            action = f"DO UPDATE SET {assignments}"
+                        statement = text(
+                            f'INSERT INTO "{table_name}" ({quoted_cols}) '
+                            f"VALUES ({param_placeholders}) "
+                            f"ON CONFLICT ({conflict_columns}) {action}"
                         )
-                        result = await session.execute(stmt)
+                        for row in batch:
+                            await session.execute(
+                                statement,
+                                {f"{column}__param": row[column] for column in columns},
+                            )
                     else:
                         # Simple insert - use per-row execution for simplicity
                         for row in batch:
@@ -212,4 +260,5 @@ class DatabaseWriterNode(BaseNode):
 
 def register():
     from app.nodes.registry import register_node
+
     register_node(DatabaseWriterNode())

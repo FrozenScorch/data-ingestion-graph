@@ -2,6 +2,7 @@
 Node runner: executes a single node and records results.
 Includes retry integration via the retry handler.
 """
+
 import time
 import logging
 from typing import Any
@@ -9,6 +10,7 @@ from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import settings
 from app.models.execution import RunNode, NodeStatus, ExecutionLog, LogLevel
 from app.nodes.base import BaseNode, NodeContext, NodeResult
 from app.nodes.registry import get_node as registry_get_node
@@ -26,7 +28,7 @@ async def run_node_with_retry(
     config: dict[str, Any],
     input_data: dict[str, Any],
     state: dict[str, Any],
-    working_dir: str = "./data/temp",
+    working_dir: str | None = None,
     max_retries: int = 3,
     retry_config: RetryConfig | None = None,
 ) -> RunNode:
@@ -69,7 +71,7 @@ async def run_node_with_retry(
         config=config,
         input_data=input_data,
         state=state,
-        working_dir=working_dir,
+        working_dir=working_dir or settings.temp_dir,
     )
 
     # Build retry config from parameters
@@ -106,7 +108,9 @@ async def run_node_with_retry(
         run_node.items_processed = result.items_processed
         run_node.duration_ms = elapsed_ms
         run_node.error_message = result.error_message
-        run_node.attempt_count = retry_config.max_retries  # we don't track per-attempt, but set to max
+        run_node.attempt_count = (
+            retry_config.max_retries
+        )  # we don't track per-attempt, but set to max
 
         # Log execution
         log = ExecutionLog(

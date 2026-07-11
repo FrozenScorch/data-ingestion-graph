@@ -6,6 +6,7 @@ Uses raw SQL via asyncpg for vector operations (pgvector works best with raw SQL
 Input: embeddings list from EmbedderNode
 Output: {stored_count: N, table: "...", index_created: bool}
 """
+
 import json
 import logging
 import re
@@ -13,7 +14,6 @@ from typing import Any
 
 _SQL_IDENTIFIER_RE = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
 
-from app.config import settings
 from app.nodes.base import BaseNode, NodeContext, NodeResult, PortDef, PortDataType
 
 logger = logging.getLogger(__name__)
@@ -49,6 +49,10 @@ class VectorStoreNode(BaseNode):
         return {
             "type": "object",
             "properties": {
+                "connection_id": {
+                    "type": "string",
+                    "description": "Saved PostgreSQL connection ID",
+                },
                 "table_name": {
                     "type": "string",
                     "default": "documents",
@@ -57,6 +61,8 @@ class VectorStoreNode(BaseNode):
                 "embedding_dim": {
                     "type": "integer",
                     "default": 1536,
+                    "minimum": 1,
+                    "maximum": 16000,
                     "description": "Embedding dimensions (1536 for text-embedding-3-small)",
                 },
                 "create_index": {
@@ -85,7 +91,7 @@ class VectorStoreNode(BaseNode):
                     "description": "Column name for pgvector column",
                 },
             },
-            "required": [],
+            "required": ["connection_id"],
         }
 
     async def _get_asyncpg_connection(self, context: NodeContext):
@@ -96,31 +102,21 @@ class VectorStoreNode(BaseNode):
         """
         import asyncpg
 
-        url = settings.database_url
-        # Parse postgresql+asyncpg://user:pass@host:port/database
-        stripped = url.replace("postgresql+asyncpg://", "")
-        # Split user:pass from host:port/database
-        credentials, host_part = stripped.split("@", 1)
-        username, password = credentials.split(":", 1)
-        host_db = host_part.rsplit("/", 1)
-        host_port = host_db[0]
-        database = host_db[1] if len(host_db) > 1 else "postgres"
-
-        if ":" in host_port:
-            host, port_str = host_port.rsplit(":", 1)
-            port = int(port_str)
-        else:
-            host = host_port
-            port = 5432
-
-        conn = await asyncpg.connect(
-            host=host,
-            port=port,
-            database=database,
-            user=username,
-            password=password,
+        connection_id = context.config.get("connection_id")
+        connection = (
+            context.state.get("connections", {}).get(connection_id) if connection_id else None
         )
-        return conn
+        if connection and connection.get("host") and connection.get("database"):
+            return await asyncpg.connect(
+                host=connection["host"],
+                port=int(connection.get("port", 5432)),
+                database=connection["database"],
+                user=connection.get("username") or connection.get("user"),
+                password=connection.get("password"),
+            )
+        if not connection_id:
+            raise ValueError("Vector store requires connection_id")
+        raise ValueError(f"Saved connection not available: {connection_id}")
 
     async def execute(self, context: NodeContext) -> NodeResult:
         """
@@ -131,7 +127,18 @@ class VectorStoreNode(BaseNode):
         """
         config = context.config
         table_name = config.get("table_name", "documents")
-        embedding_dim = config.get("embedding_dim", 1536)
+        raw_embedding_dim = config.get("embedding_dim", 1536)
+        if isinstance(raw_embedding_dim, bool):
+            return NodeResult(success=False, error_message="embedding_dim must be an integer")
+        try:
+            embedding_dim = int(raw_embedding_dim)
+        except (TypeError, ValueError):
+            return NodeResult(success=False, error_message="embedding_dim must be an integer")
+        if not 1 <= embedding_dim <= 16000:
+            return NodeResult(
+                success=False,
+                error_message="embedding_dim must be between 1 and 16000",
+            )
         create_index = config.get("create_index", True)
         id_column = config.get("id_column", "id")
         content_column = config.get("content_column", "content")
@@ -264,4 +271,5 @@ class VectorStoreNode(BaseNode):
 
 def register():
     from app.nodes.registry import register_node
+
     register_node(VectorStoreNode())

@@ -2,36 +2,29 @@
  * Graph types matching Svelte Flow and backend API.
  */
 
+import type { Edge, Node } from '@xyflow/svelte';
+
 // --- Svelte Flow compatible Node/Edge ---
 
-export interface GraphNode {
-  id: string;
-  type: string;
-  position: { x: number; y: number };
-  data: {
-    label: string;
-    config: Record<string, unknown>;
-    [key: string]: unknown;
-  };
-  width?: number;
-  height?: number;
+export interface GraphNodeData extends Record<string, unknown> {
+  label: string;
+  config: Record<string, unknown>;
+  implementation?: 'studio' | 'sdk-adapter';
+  sdk_component?: string | null;
 }
 
-export interface GraphEdge {
-  id: string;
-  source: string;
-  target: string;
-  sourceHandle?: string;
-  targetHandle?: string;
-  type?: string;
-  animated?: boolean;
-  style?: Record<string, unknown>;
-  data?: {
-    sourcePort?: string;
-    targetPort?: string;
-    dataType?: string;
-  };
+export type GraphNode = Node<GraphNodeData, string> & { type: string };
+
+export interface GraphEdgeData extends Record<string, unknown> {
+  sourcePort?: string;
+  targetPort?: string;
+  dataType?: string;
 }
+
+export type GraphEdge = Edge<GraphEdgeData> & {
+  source_port?: string;
+  target_port?: string;
+};
 
 // --- Backend API types ---
 
@@ -65,6 +58,7 @@ export interface GraphCreate {
   name: string;
   description?: string;
   tags?: string[];
+  template_id?: string;
 }
 
 export interface GraphUpdate {

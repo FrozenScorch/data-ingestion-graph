@@ -57,6 +57,21 @@ def _unpack_version_data(nodes_data: dict | None, edges_data: dict | list | None
     if isinstance(edges_data, dict) and "edges" in edges_data:
         edges_data = edges_data["edges"]
 
+    if isinstance(edges_data, list):
+        edges_data = [
+            {
+                **edge,
+                "source_port": edge.get("source_port")
+                or edge.get("sourceHandle")
+                or "output",
+                "target_port": edge.get("target_port")
+                or edge.get("targetHandle")
+                or "input",
+            }
+            for edge in edges_data
+            if isinstance(edge, dict)
+        ]
+
     return nodes_data or {}, edges_data or []
 
 

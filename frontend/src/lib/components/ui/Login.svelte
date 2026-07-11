@@ -30,7 +30,8 @@
           <line x1="17" y1="8" x2="14" y2="16"/>
         </svg>
       </div>
-      <h1 class="text-2xl font-bold text-gray-100">Ingestion Graph</h1>
+      <h1 class="text-2xl font-bold text-gray-100">Enterprise Data Ingestion Graph</h1>
+      <p class="mt-1 text-xs text-gray-500">Studio powered by the reusable ingestion_graph SDK</p>
       <p class="text-sm text-gray-500 mt-1">Visual data pipeline builder</p>
     </div>
 

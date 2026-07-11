@@ -58,7 +58,8 @@ class GraphState {
         for (const n of rawNodes) {
           if (!seen.has(n.id)) {
             seen.add(n.id);
-            deduped.push(n);
+            const config = (v.node_configs?.[n.id] as Record<string, unknown>) ?? {};
+            deduped.push({ ...n, data: { ...n.data, config } });
           }
         }
         this.nodes = deduped;
@@ -75,9 +76,13 @@ class GraphState {
     }
   }
 
-  async createGraph(name: string, description?: string): Promise<Graph | null> {
+  async createGraph(name: string, description?: string, templateId?: string): Promise<Graph | null> {
     try {
-      const graph = await graphService.createGraph({ name, description });
+      const graph = await graphService.createGraph({
+        name,
+        description,
+        template_id: templateId
+      });
       this.graphs.unshift(graph);
       this.totalGraphs += 1;
       return graph;
@@ -142,8 +147,12 @@ class GraphState {
         nodeConfigs[node.id] = node.data.config || {};
       }
 
+      const nodesWithoutConfigs = this.nodes.map(node => ({
+        ...node,
+        data: { ...node.data, config: {} }
+      }));
       await graphService.saveVersion(graphId, {
-        nodes_data: { nodes: this.nodes },
+        nodes_data: { nodes: nodesWithoutConfigs },
         edges_data: { edges: this.edges },
         node_configs: nodeConfigs
       });

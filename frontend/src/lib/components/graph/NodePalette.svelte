@@ -98,6 +98,9 @@
               >
                 <div class="w-1.5 h-1.5 rounded-full {getDotColor(group.color)} shrink-0"></div>
                 <span class="truncate">{node.display_name}</span>
+                {#if node.implementation === 'sdk-adapter'}
+                  <span class="ml-auto rounded bg-cyan-500/15 px-1 py-0.5 text-[9px] font-semibold text-cyan-300" title={node.sdk_component ?? 'SDK adapter'}>SDK</span>
+                {/if}
               </div>
             {/each}
           </div>

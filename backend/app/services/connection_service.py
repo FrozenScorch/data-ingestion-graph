@@ -4,6 +4,7 @@ Connection service: CRUD operations for database connections.
 Manages saved connections that nodes can reference by connection_id.
 Supports testing connections before saving.
 """
+
 import logging
 import uuid
 from typing import Optional
@@ -12,11 +13,29 @@ from sqlalchemy import select, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.graph import Connection
+from app.services.connection_crypto import (
+    decrypt_connection_config,
+    encrypt_connection_config,
+    is_encrypted_connection_config,
+)
 
 logger = logging.getLogger(__name__)
 
 # Supported connection types
-SUPPORTED_CONNECTION_TYPES = ["postgres"]
+SUPPORTED_CONNECTION_TYPES = ["postgres", "discord"]
+
+
+async def migrate_plaintext_connection_configs(db: AsyncSession) -> int:
+    """Encrypt legacy plaintext connection rows after the schema is available."""
+    result = await db.execute(select(Connection))
+    migrated = 0
+    for connection in result.scalars().all():
+        if not is_encrypted_connection_config(connection.config):
+            connection.config = encrypt_connection_config(connection.config)
+            migrated += 1
+    if migrated:
+        await db.commit()
+    return migrated
 
 
 async def create_connection(
@@ -40,13 +59,15 @@ async def create_connection(
         Created Connection model instance
     """
     if type not in SUPPORTED_CONNECTION_TYPES:
-        raise ValueError(f"Unsupported connection type: {type}. Supported: {SUPPORTED_CONNECTION_TYPES}")
+        raise ValueError(
+            f"Unsupported connection type: {type}. Supported: {SUPPORTED_CONNECTION_TYPES}"
+        )
 
     connection = Connection(
         user_id=user_id,
         name=name,
         type=type,
-        config=config or {},
+        config=encrypt_connection_config(config),
         is_valid=False,  # Will be set True after successful test
     )
     db.add(connection)
@@ -69,9 +90,7 @@ async def get_connection(
     Returns:
         Connection model instance or None
     """
-    result = await db.execute(
-        select(Connection).where(Connection.id == connection_id)
-    )
+    result = await db.execute(select(Connection).where(Connection.id == connection_id))
     return result.scalar_one_or_none()
 
 
@@ -128,7 +147,7 @@ async def update_connection(
     if name is not None:
         connection.name = name
     if config is not None:
-        connection.config = config
+        connection.config = encrypt_connection_config(config)
         # Reset is_valid since config changed; user should re-test
         connection.is_valid = False
 
@@ -182,10 +201,14 @@ async def test_connection(
         ValueError: For unsupported connection types
     """
     if type not in SUPPORTED_CONNECTION_TYPES:
-        raise ValueError(f"Unsupported connection type: {type}. Supported: {SUPPORTED_CONNECTION_TYPES}")
+        raise ValueError(
+            f"Unsupported connection type: {type}. Supported: {SUPPORTED_CONNECTION_TYPES}"
+        )
 
     if type == "postgres":
         return await _test_postgres_connection(config)
+    if type == "discord":
+        return await _test_discord_connection(config)
 
     return {"success": False, "message": f"No test implemented for type: {type}"}
 
@@ -231,3 +254,28 @@ async def _test_postgres_connection(config: dict) -> dict:
     finally:
         if conn is not None:
             await conn.close()
+
+
+async def _test_discord_connection(config: dict) -> dict:
+    """Validate an encrypted Discord bot-token connection."""
+    import httpx
+
+    token = config.get("bot_token") or config.get("token")
+    if not token:
+        return {"success": False, "message": "Discord bot token is required"}
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get(
+                "https://discord.com/api/v10/users/@me",
+                headers={"Authorization": f"Bot {token}"},
+            )
+        if response.status_code == 200:
+            return {"success": True, "message": "Discord connection successful"}
+        if response.status_code in {401, 403}:
+            return {"success": False, "message": "Discord credentials are invalid"}
+        return {"success": False, "message": f"Discord returned HTTP {response.status_code}"}
+    except httpx.HTTPError as exc:
+        return {
+            "success": False,
+            "message": f"Discord connection failed: {type(exc).__name__}",
+        }

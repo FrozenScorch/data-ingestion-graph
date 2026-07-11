@@ -2,6 +2,7 @@
 FastAPI application with lifespan context manager.
 Initializes database, Redis, and node registry on startup.
 """
+
 import logging
 import sys
 from contextlib import asynccontextmanager
@@ -40,7 +41,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """
     global _component_health
     _component_health = {}
-    logger.info("Starting ingestion-graph application...")
+    logger.info("Starting Enterprise Data Ingestion Graph Studio...")
 
     # Validate security-critical settings (skip in development for convenience)
     if settings.app_env != "development":
@@ -61,6 +62,19 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         logger.critical("Application cannot start without a database connection. Exiting.")
         sys.exit(1)
 
+    # Encrypt any legacy plaintext connector credentials before serving traffic.
+    try:
+        from app.db.session import AsyncSessionLocal
+        from app.services.connection_service import migrate_plaintext_connection_configs
+
+        async with AsyncSessionLocal() as session:
+            migrated = await migrate_plaintext_connection_configs(session)
+        if migrated:
+            logger.info("Encrypted %d legacy connection configurations", migrated)
+    except Exception as e:
+        logger.critical("Failed to encrypt saved connection credentials: %s", e)
+        raise
+
     # Initialize Redis connection (optional - cache only, warn but continue)
     try:
         await init_redis()
@@ -68,13 +82,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         logger.info("Redis connected successfully")
     except Exception as e:
         _component_health["redis"] = f"error: {e}"
-        logger.warning(
-            f"Failed to connect to Redis (non-fatal, caching disabled): {e}"
-        )
+        logger.warning(f"Failed to connect to Redis (non-fatal, caching disabled): {e}")
 
     # Seed admin user
     try:
         from app.db.session import AsyncSessionLocal
+
         async with AsyncSessionLocal() as session:
             await seed_admin_user(session)
         logger.info("Admin user seeded (or already exists)")
@@ -84,28 +97,36 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # Discover and register all node types
     try:
         from app.nodes.registry import discover_nodes
+
         discover_nodes()
         from app.nodes.registry import get_all_nodes
+        from app.graph_templates import validate_templates
+
         node_count = len(get_all_nodes())
+        validate_templates()
         logger.info(f"Node registry loaded: {node_count} node types registered")
     except Exception as e:
-        logger.error(f"Failed to load node registry: {e}")
+        logger.exception("Failed to load node registry or graph templates")
+        raise RuntimeError("Studio node registry failed validation") from e
 
-    logger.info(f"ingestion-graph ready on port {settings.app_port}")
+    logger.info(f"Enterprise Data Ingestion Graph Studio ready on port {settings.app_port}")
 
     yield  # Application is running
 
     # Shutdown
-    logger.info("Shutting down ingestion-graph...")
+    logger.info("Shutting down Enterprise Data Ingestion Graph Studio...")
     await close_redis()
     logger.info("Shutdown complete")
 
 
 # Create FastAPI application
 app = FastAPI(
-    title="Ingestion Graph",
-    description="Visual, node-based data ingestion pipeline builder with DAG execution engine",
-    version="0.1.0",
+    title="Enterprise Data Ingestion Graph Studio",
+    description=(
+        "Visual control plane for building and testing pipelines powered by the "
+        "independently installable ingestion_graph SDK"
+    ),
+    version="0.2.0",
     lifespan=lifespan,
 )
 
@@ -135,4 +156,12 @@ async def execution_websocket(websocket: WebSocket, run_id: str):
 @app.get("/")
 async def root():
     """Root endpoint - redirect to docs."""
-    return {"name": "ingestion-graph", "version": "0.1.0", "docs": "/docs"}
+    from ingestion_graph import __version__ as sdk_version
+
+    return {
+        "name": settings.app_name,
+        "product": "Enterprise Data Ingestion Graph Studio",
+        "studio_version": "0.2.0",
+        "sdk": {"package": "ingestion-graph", "version": sdk_version},
+        "docs": "/docs",
+    }

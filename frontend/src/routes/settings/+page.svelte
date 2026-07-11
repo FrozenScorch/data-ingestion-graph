@@ -56,7 +56,8 @@
     <div class="bg-gray-900 border border-gray-800 rounded-xl p-5 md:col-span-2">
       <h2 class="text-sm font-medium text-gray-300 mb-4">About</h2>
       <p class="text-sm text-gray-500">
-        Ingestion Graph is a visual, node-based data ingestion pipeline builder.
+        Enterprise Data Ingestion Graph Studio is the visual control plane. Its SDK-backed
+        nodes import the independently reusable ingestion_graph package.
         Construct DAGs on a canvas, configure AI-powered processing nodes,
         and execute pipelines with checkpointing, parallel fan-out/fan-in, retry logic,
         data lineage, and run replay.

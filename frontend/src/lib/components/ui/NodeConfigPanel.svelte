@@ -11,10 +11,9 @@
   let config = $derived(node?.data.config ?? {});
 
   // Latest run output for the selected node
-  let nodeRunOutput = $derived(() => {
-    if (!graph.selectedNodeId) return null;
-    return execution.nodeStatuses.get(graph.selectedNodeId) ?? null;
-  });
+  let nodeRunOutput = $derived(
+    graph.selectedNodeId ? execution.nodeStatuses.get(graph.selectedNodeId) ?? null : null
+  );
 
   let showRunOutput = $state(false);
 
@@ -240,8 +239,8 @@
       {/each}
 
       <!-- Latest Run Output -->
-      {#if nodeRunOutput() && nodeRunOutput().output_data}
-        {@const runOut = nodeRunOutput()}
+      {#if nodeRunOutput?.output_data}
+        {@const runOut = nodeRunOutput}
         <div class="border-t border-gray-800 pt-4">
           <button
             onclick={() => showRunOutput = !showRunOutput}

@@ -39,6 +39,8 @@ export interface NodeTypeDef {
   display_name: string;
   category: NodeCategory;
   description: string;
+  implementation: 'studio' | 'sdk-adapter';
+  sdk_component: string | null;
   inputs: PortDef[];
   outputs: PortDef[];
   config_schema: {

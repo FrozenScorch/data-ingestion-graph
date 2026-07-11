@@ -9,12 +9,10 @@
   import RunPanel from '$lib/components/ui/RunPanel.svelte';
 
   let showConfigPanel = $state(false);
-  let showRunHistory = $state(false);
+  let graphId = $derived($page.params.id ?? '');
 
-  let graphId = $derived($page.params.id);
-
-  onMount(async () => {
-    await Promise.all([
+  onMount(() => {
+    void Promise.all([
       nodeRegistry.loadNodeTypes(),
       graph.loadGraph(graphId)
     ]);

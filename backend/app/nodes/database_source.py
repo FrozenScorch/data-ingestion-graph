@@ -6,14 +6,14 @@ Uses SQLAlchemy async with asyncpg for database access.
 Input: none (source node)
 Output: {rows: [...], row_count: N, columns: [...]}
 """
+
 import logging
 import re
 from typing import Any
 
-from sqlalchemy import text
+from sqlalchemy import URL, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from app.config import settings
 from app.nodes.base import BaseNode, NodeContext, NodeResult, PortDef, PortDataType
 
 logger = logging.getLogger(__name__)
@@ -52,6 +52,10 @@ class DatabaseSourceNode(BaseNode):
         return {
             "type": "object",
             "properties": {
+                "connection_id": {
+                    "type": "string",
+                    "description": "Saved PostgreSQL connection ID",
+                },
                 "query": {
                     "type": "string",
                     "format": "textarea",
@@ -65,7 +69,7 @@ class DatabaseSourceNode(BaseNode):
                     "description": "Number of rows per batch",
                 },
             },
-            "required": ["query"],
+            "required": ["connection_id", "query"],
         }
 
     @staticmethod
@@ -73,16 +77,36 @@ class DatabaseSourceNode(BaseNode):
         """Validate that the query is SELECT-only to prevent data modification."""
         stripped = query.strip().rstrip(";").strip()
         upper = stripped.upper()
-        # Must start with SELECT or WITH (CTE)
-        if not (upper.startswith("SELECT") or upper.startswith("WITH")):
+        # CTEs are intentionally rejected: PostgreSQL permits data-modifying
+        # INSERT/UPDATE/DELETE statements inside WITH clauses.
+        if not upper.startswith("SELECT"):
             raise ValueError(
                 "Only SELECT queries are allowed in database_source node. "
                 f"Query starts with: {stripped[:20]}"
             )
+        if ";" in stripped:
+            raise ValueError("Multiple SQL statements are not allowed")
 
-    def _build_connection_url(self) -> str:
-        """Return the app's own database connection URL."""
-        return settings.database_url
+    def _build_connection_url(self, context: NodeContext) -> str:
+        """Build a URL from the saved connection authorized for this node."""
+        config = context.config
+        connection_id = config.get("connection_id")
+        saved_connections = context.state.get("connections", {})
+        connection = saved_connections.get(connection_id) if connection_id else None
+
+        if connection and connection.get("host") and connection.get("database"):
+            return URL.create(
+                "postgresql+asyncpg",
+                username=connection.get("username") or connection.get("user"),
+                password=connection.get("password"),
+                host=connection["host"],
+                port=int(connection.get("port", 5432)),
+                database=connection["database"],
+            ).render_as_string(hide_password=False)
+
+        if not connection_id:
+            raise ValueError("Database source requires connection_id")
+        raise ValueError(f"Saved connection not available: {connection_id}")
 
     async def execute(self, context: NodeContext) -> NodeResult:
         """
@@ -105,7 +129,7 @@ class DatabaseSourceNode(BaseNode):
             )
 
         try:
-            connection_url = self._build_connection_url()
+            connection_url = self._build_connection_url(context)
         except Exception as e:
             return NodeResult(
                 success=False,
@@ -115,7 +139,11 @@ class DatabaseSourceNode(BaseNode):
         engine = None
         try:
             # Create a temporary engine for this read operation
-            engine = create_async_engine(connection_url, pool_pre_ping=True)
+            engine = create_async_engine(
+                connection_url,
+                pool_pre_ping=True,
+                connect_args={"server_settings": {"default_transaction_read_only": "on"}},
+            )
             session_factory = async_sessionmaker(
                 bind=engine,
                 class_=AsyncSession,
@@ -177,4 +205,5 @@ class DatabaseSourceNode(BaseNode):
 
 def register():
     from app.nodes.registry import register_node
+
     register_node(DatabaseSourceNode())

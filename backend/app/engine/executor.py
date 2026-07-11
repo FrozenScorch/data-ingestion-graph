@@ -2,12 +2,14 @@
 DAG Executor: main orchestrator for graph execution.
 Coordinates topological sort, parallel node execution, checkpointing, and error handling.
 """
+
 import asyncio
 import logging
 import sys
 from typing import Any
 from uuid import UUID
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import AsyncSessionLocal
@@ -17,6 +19,8 @@ from app.engine.runner import run_node_with_retry
 from app.engine.checkpoint import save_checkpoint
 from app.engine.retry import RetryConfig
 from app.models.execution import Run, RunStatus, CheckpointType
+from app.models.graph import Connection, Graph
+from app.services.connection_crypto import decrypt_connection_config
 
 logger = logging.getLogger(__name__)
 
@@ -85,8 +89,20 @@ class DAGExecutor:
             await self._emit_event(run.id, "run_failed", {"error": str(e)})
             return run
 
-        # Shared execution state
-        exec_state: dict[str, Any] = {"outputs": {}}
+        # Resolve only graph-owner connections referenced by this immutable graph
+        # version. Credentials remain server-side and are never copied into node configs.
+        try:
+            connections = await self._resolve_connections(run.graph_id, node_configs or {})
+        except ValueError:
+            run.status = RunStatus.FAILED.value
+            run.error_message = "Invalid or unauthorized saved connection reference"
+            await self.db.commit()
+            await self._emit_event(run.id, "run_failed", {"error": run.error_message})
+            return run
+
+        # Shared orchestration state. Credentials are scoped into a per-node copy
+        # immediately before execution and are never exposed to unrelated nodes.
+        exec_state: dict[str, Any] = {"outputs": {}, "connections": connections}
 
         # Execute each level
         for level_idx, level_nodes in enumerate(levels):
@@ -100,8 +116,13 @@ class DAGExecutor:
             if len(level_nodes) >= PARALLEL_THRESHOLD:
                 # Parallel execution using asyncio.gather
                 results = await self._execute_level_parallel(
-                    run, level_idx, level_nodes, nodes_data, edges_data,
-                    node_configs, exec_state,
+                    run,
+                    level_idx,
+                    level_nodes,
+                    nodes_data,
+                    edges_data,
+                    node_configs,
+                    exec_state,
                 )
                 # Check for failures in parallel results
                 for node_id, run_node in results.items():
@@ -113,16 +134,25 @@ class DAGExecutor:
                                 f"Node {node_id} ({node_type}) failed: {run_node.error_message}"
                             )
                             await self.db.commit()
-                        await self._emit_event(run.id, "run_failed", {
-                            "node_id": node_id,
-                            "error": run_node.error_message,
-                        })
+                        await self._emit_event(
+                            run.id,
+                            "run_failed",
+                            {
+                                "node_id": node_id,
+                                "error": run_node.error_message,
+                            },
+                        )
                         return run
             else:
                 # Sequential fallback for small groups
                 result = await self._execute_level_sequential(
-                    run, level_idx, level_nodes, nodes_data, edges_data,
-                    node_configs, exec_state,
+                    run,
+                    level_idx,
+                    level_nodes,
+                    nodes_data,
+                    edges_data,
+                    node_configs,
+                    exec_state,
                 )
                 if result is not None:
                     return result  # A failure occurred
@@ -135,6 +165,56 @@ class DAGExecutor:
             await self._emit_event(run.id, "run_completed", {})
 
         return run
+
+    async def _resolve_connections(
+        self, graph_id: UUID, node_configs: dict[str, dict]
+    ) -> dict[str, dict[str, Any]]:
+        raw_ids = {
+            str(config["connection_id"])
+            for config in node_configs.values()
+            if isinstance(config, dict) and config.get("connection_id")
+        }
+        if not raw_ids:
+            return {}
+        try:
+            connection_ids = {UUID(value) for value in raw_ids}
+        except ValueError as exc:
+            raise ValueError("Invalid connection reference") from exc
+
+        owner_result = await self.db.execute(select(Graph.owner_id).where(Graph.id == graph_id))
+        owner_id = owner_result.scalar_one_or_none()
+        if owner_id is None:
+            raise ValueError("Graph owner not found")
+
+        result = await self.db.execute(
+            select(Connection).where(
+                Connection.id.in_(connection_ids),
+                Connection.user_id == owner_id,
+            )
+        )
+        connections = list(result.scalars().all())
+        if {connection.id for connection in connections} != connection_ids:
+            raise ValueError("Connection does not belong to graph owner")
+        return {
+            str(connection.id): decrypt_connection_config(connection.config)
+            for connection in connections
+        }
+
+    @staticmethod
+    def _state_for_node(
+        node_id: str,
+        node_configs: dict[str, dict] | None,
+        exec_state: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Return execution state containing only this node's saved credential."""
+        node_config = (node_configs or {}).get(node_id, {})
+        raw_connection_id = node_config.get("connection_id")
+        connection_id = str(raw_connection_id) if raw_connection_id else None
+        connections = exec_state.get("connections", {})
+        scoped_connections = {}
+        if connection_id and connection_id in connections:
+            scoped_connections[str(connection_id)] = connections[connection_id]
+        return {"connections": scoped_connections}
 
     async def _execute_level_parallel(
         self,
@@ -154,15 +234,18 @@ class DAGExecutor:
         Returns a dict of node_id -> RunNode. Failed nodes will have
         status='failed'.
         """
+
         async def _run_single(node_id: str) -> tuple[str, Any]:
             """Execute a single node with its own session and return (node_id, RunNode)."""
             async with AsyncSessionLocal() as node_db:
                 try:
                     # Reload run in this session to avoid detached instance error
                     from app.models.execution import Run
+
                     node_run = await node_db.get(Run, run.id)
                     if node_run and node_run.status == RunStatus.CANCELLED.value:
                         from app.models.execution import RunNode as RN, NodeStatus
+
                         return node_id, RN(
                             run_id=run.id,
                             node_id=node_id,
@@ -174,12 +257,18 @@ class DAGExecutor:
                     node_config = (node_configs or {}).get(node_id, {})
 
                     # Collect input data from predecessor outputs
-                    input_data, lineage_edges = self._collect_inputs(node_id, edges_data, exec_state)
+                    input_data, lineage_edges = self._collect_inputs(
+                        node_id, edges_data, exec_state
+                    )
 
-                    await self._emit_event(run.id, "node_started", {
-                        "node_id": node_id,
-                        "node_type": node_type,
-                    })
+                    await self._emit_event(
+                        run.id,
+                        "node_started",
+                        {
+                            "node_id": node_id,
+                            "node_type": node_type,
+                        },
+                    )
 
                     # Run the node with retry support (uses its own session)
                     run_node = await run_node_with_retry(
@@ -189,7 +278,7 @@ class DAGExecutor:
                         node_type=node_type,
                         config=node_config,
                         input_data=input_data,
-                        state=exec_state,
+                        state=self._state_for_node(node_id, node_configs, exec_state),
                     )
 
                     # Store output in execution state (only on success)
@@ -220,13 +309,17 @@ class DAGExecutor:
 
                     # Emit completion event
                     if run_node.status == "completed":
-                        await self._emit_event(run.id, "node_completed", {
-                            "node_id": node_id,
-                            "node_type": node_type,
-                            "items_processed": run_node.items_processed,
-                            "duration_ms": run_node.duration_ms,
-                            "output_data": run_node.output_data,
-                        })
+                        await self._emit_event(
+                            run.id,
+                            "node_completed",
+                            {
+                                "node_id": node_id,
+                                "node_type": node_type,
+                                "items_processed": run_node.items_processed,
+                                "duration_ms": run_node.duration_ms,
+                                "output_data": run_node.output_data,
+                            },
+                        )
                     else:
                         # Record in DLQ
                         error_type = "ExecutionError"
@@ -240,16 +333,21 @@ class DAGExecutor:
                             input_data=input_data,
                             retry_count=run_node.attempt_count,
                         )
-                        await self._emit_event(run.id, "node_failed", {
-                            "node_id": node_id,
-                            "node_type": node_type,
-                            "error": run_node.error_message,
-                        })
+                        await self._emit_event(
+                            run.id,
+                            "node_failed",
+                            {
+                                "node_id": node_id,
+                                "node_type": node_type,
+                                "error": run_node.error_message,
+                            },
+                        )
 
                     return node_id, run_node
                 except Exception:
                     logger.exception(f"Unexpected error in parallel node {node_id}")
                     from app.models.execution import RunNode as RN, NodeStatus
+
                     return node_id, RN(
                         run_id=run.id,
                         node_id=node_id,
@@ -293,10 +391,14 @@ class DAGExecutor:
             # Collect input data from predecessor outputs
             input_data, lineage_edges = self._collect_inputs(node_id, edges_data, exec_state)
 
-            await self._emit_event(run.id, "node_started", {
-                "node_id": node_id,
-                "node_type": node_type,
-            })
+            await self._emit_event(
+                run.id,
+                "node_started",
+                {
+                    "node_id": node_id,
+                    "node_type": node_type,
+                },
+            )
 
             # Run the node with retry support (uses shared session for sequential)
             run_node = await run_node_with_retry(
@@ -306,7 +408,7 @@ class DAGExecutor:
                 node_type=node_type,
                 config=node_config,
                 input_data=input_data,
-                state=exec_state,
+                state=self._state_for_node(node_id, node_configs, exec_state),
             )
 
             # Store output in execution state
@@ -337,12 +439,16 @@ class DAGExecutor:
 
             # Emit completion event
             if run_node.status == "completed":
-                await self._emit_event(run.id, "node_completed", {
-                    "node_id": node_id,
-                    "node_type": node_type,
-                    "items_processed": run_node.items_processed,
-                    "duration_ms": run_node.duration_ms,
-                })
+                await self._emit_event(
+                    run.id,
+                    "node_completed",
+                    {
+                        "node_id": node_id,
+                        "node_type": node_type,
+                        "items_processed": run_node.items_processed,
+                        "duration_ms": run_node.duration_ms,
+                    },
+                )
             else:
                 # Record in DLQ
                 error_type = "ExecutionError"
@@ -355,11 +461,15 @@ class DAGExecutor:
                     input_data=input_data,
                     retry_count=run_node.attempt_count,
                 )
-                await self._emit_event(run.id, "node_failed", {
-                    "node_id": node_id,
-                    "node_type": node_type,
-                    "error": run_node.error_message,
-                })
+                await self._emit_event(
+                    run.id,
+                    "node_failed",
+                    {
+                        "node_id": node_id,
+                        "node_type": node_type,
+                        "error": run_node.error_message,
+                    },
+                )
                 # Fail the entire run on node failure (with state machine validation)
                 if can_transition(run.status, RunStatus.FAILED.value):
                     run.status = RunStatus.FAILED.value
@@ -367,10 +477,14 @@ class DAGExecutor:
                         f"Node {node_id} ({node_type}) failed: {run_node.error_message}"
                     )
                     await self.db.commit()
-                await self._emit_event(run.id, "run_failed", {
-                    "node_id": node_id,
-                    "error": run_node.error_message,
-                })
+                await self._emit_event(
+                    run.id,
+                    "run_failed",
+                    {
+                        "node_id": node_id,
+                        "error": run_node.error_message,
+                    },
+                )
                 return run
 
         return None
@@ -404,13 +518,15 @@ class DAGExecutor:
                 else:
                     data = source_output
                 inputs[target_port] = data
-                lineage_edges.append({
-                    "source_node_id": source,
-                    "target_node_id": node_id,
-                    "source_port": source_port,
-                    "target_port": target_port,
-                    "data": data,
-                })
+                lineage_edges.append(
+                    {
+                        "source_node_id": source,
+                        "target_node_id": node_id,
+                        "source_port": source_port,
+                        "target_port": target_port,
+                        "data": data,
+                    }
+                )
         return inputs, lineage_edges
 
     async def _record_lineage(

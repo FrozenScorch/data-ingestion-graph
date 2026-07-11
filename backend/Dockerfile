@@ -10,8 +10,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libpq-dev \
     && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt .
-RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
+COPY backend/requirements.txt ./backend-requirements.txt
+COPY sdk ./sdk
+RUN pip install --no-cache-dir --prefix=/install -r backend-requirements.txt
 
 # Stage 2: Runtime
 FROM python:3.11-slim AS runtime
@@ -30,8 +31,8 @@ RUN groupadd -r appuser && useradd -r -g appuser -d /app -s /sbin/nologin appuse
 # Copy installed packages from deps stage
 COPY --from=deps /install /usr/local
 
-# Copy application code
-COPY . .
+# Copy the Studio/control-plane application after installing the reusable SDK.
+COPY backend .
 
 # Create data directories with correct ownership
 RUN mkdir -p /app/data/uploads /app/data/temp && chown -R appuser:appuser /app/data

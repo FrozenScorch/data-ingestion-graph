@@ -19,6 +19,8 @@ class NodeTypeDefSchema(BaseModel):
     display_name: str
     category: str
     description: str
+    implementation: str = "studio"
+    sdk_component: str | None = None
     inputs: list[PortDefSchema]
     outputs: list[PortDefSchema]
     config_schema: dict[str, Any]

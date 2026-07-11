@@ -36,7 +36,7 @@
             <line x1="7" y1="8" x2="10" y2="16"/>
             <line x1="17" y1="8" x2="14" y2="16"/>
           </svg>
-          <span class="font-semibold text-sm tracking-wide">Ingestion Graph</span>
+          <span class="font-semibold text-sm tracking-wide">Enterprise Ingestion Studio</span>
         </a>
       </div>
 

@@ -2,6 +2,7 @@
 Application configuration using Pydantic Settings.
 Loads from .env file with environment variable overrides.
 """
+
 import logging
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -10,6 +11,7 @@ logger = logging.getLogger(__name__)
 
 # Default secret that must never be used in production
 _INSECURE_JWT_SECRET = "change-this-secret-in-production"
+_INSECURE_CONNECTION_KEY = "change-this-connection-encryption-key"
 
 
 class Settings(BaseSettings):
@@ -23,13 +25,15 @@ class Settings(BaseSettings):
     )
 
     # Application
-    app_name: str = "ingestion-graph"
+    app_name: str = "enterprise-data-ingestion-graph-studio"
     app_env: str = "development"
     app_debug: bool = True
     app_port: int = 8040
 
     # Database
-    database_url: str = "postgresql+asyncpg://ingestion:ingestion_password@localhost:5432/ingestion_db"
+    database_url: str = (
+        "postgresql+asyncpg://ingestion:ingestion_password@localhost:5432/ingestion_db"
+    )
     database_pool_size: int = 10
     database_max_overflow: int = 20
     database_pool_timeout: int = 30
@@ -45,6 +49,7 @@ class Settings(BaseSettings):
     jwt_algorithm: str = "HS256"
     jwt_access_token_expire_minutes: int = 60
     jwt_refresh_token_expire_days: int = 7
+    connection_encryption_key: str = ""
 
     # Admin seed user
     admin_username: str = "admin"
@@ -100,8 +105,15 @@ class Settings(BaseSettings):
                 "It must be at least 32 characters for sufficient entropy. "
                 "Set a stronger secret via the JWT_SECRET_KEY environment variable."
             )
+        if (
+            self.connection_encryption_key == _INSECURE_CONNECTION_KEY
+            or len(self.connection_encryption_key) < 32
+        ):
+            raise RuntimeError(
+                "SECURITY: CONNECTION_ENCRYPTION_KEY must be at least 32 characters "
+                "outside development."
+            )
 
 
 # Global settings instance
 settings = Settings()
-

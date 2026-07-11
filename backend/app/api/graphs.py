@@ -1,6 +1,7 @@
 """
 Graph API routes: CRUD and version management.
 """
+
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -59,13 +60,31 @@ async def create_graph_endpoint(
     current_user: dict = Depends(get_current_user),
 ):
     """Create a new graph."""
-    graph = await create_graph(
-        db,
-        name=request.name,
-        owner_id=current_user["user_id"],
-        description=request.description,
-        tags=request.tags,
-    )
+    if request.template_id:
+        from app.graph_templates import create_graph_from_template
+
+        try:
+            graph = await create_graph_from_template(
+                db,
+                template_id=request.template_id,
+                name=request.name,
+                owner_id=current_user["user_id"],
+                description=request.description,
+                tags=request.tags,
+            )
+        except KeyError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Graph template not found",
+            ) from exc
+    else:
+        graph = await create_graph(
+            db,
+            name=request.name,
+            owner_id=current_user["user_id"],
+            description=request.description,
+            tags=request.tags,
+        )
     return graph
 
 
@@ -139,13 +158,19 @@ async def save_graph_version_endpoint(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Graph not found")
     _check_graph_owner(existing_graph, current_user)
 
-    version = await save_graph_version(
-        db,
-        graph_id,
-        nodes_data=request.nodes_data,
-        edges_data=request.edges_data,
-        node_configs=request.node_configs,
-    )
+    try:
+        version = await save_graph_version(
+            db,
+            graph_id,
+            nodes_data=request.nodes_data,
+            edges_data=request.edges_data,
+            node_configs=request.node_configs,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
     if not version:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Graph not found")
     return version
@@ -168,7 +193,9 @@ async def get_graph_versions_endpoint(
     return versions
 
 
-
 def _check_graph_owner(graph, current_user: dict) -> None:
     if current_user["role"] != "admin" and str(graph.owner_id) != str(current_user["user_id"]):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You do not have permission to access this graph")
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You do not have permission to access this graph",
+        )

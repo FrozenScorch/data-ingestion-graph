@@ -1,6 +1,7 @@
 """
 Graph CRUD service and version management.
 """
+
 import hashlib
 import json
 from typing import Optional
@@ -11,6 +12,22 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.models.graph import Graph, GraphVersion, GraphStatus
+from app.schemas.graph import _is_secret_key
+
+
+def _assert_no_inline_secrets(value: object, path: str = "node_configs") -> None:
+    """Reject credentials in graph JSON; secrets belong in encrypted Connections."""
+    if isinstance(value, dict):
+        for key, item in value.items():
+            key_text = str(key)
+            if _is_secret_key(key_text):
+                raise ValueError(
+                    f"Inline secret at {path}.{key_text} is not allowed; use connection_id"
+                )
+            _assert_no_inline_secrets(item, f"{path}.{key_text}")
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            _assert_no_inline_secrets(item, f"{path}[{index}]")
 
 
 async def list_graphs(
@@ -44,9 +61,7 @@ async def list_graphs(
 async def get_graph(db: AsyncSession, graph_id: UUID) -> Optional[Graph]:
     """Get a single graph by ID, with its latest version eagerly loaded."""
     result = await db.execute(
-        select(Graph)
-        .where(Graph.id == graph_id)
-        .options(selectinload(Graph.versions))
+        select(Graph).where(Graph.id == graph_id).options(selectinload(Graph.versions))
     )
     graph = result.scalar_one_or_none()
     if graph is not None:
@@ -129,20 +144,23 @@ async def save_graph_version(
     """
     from sqlalchemy import select as sa_select
 
+    from app.graph_validation import validate_graph_edges
+
+    _assert_no_inline_secrets(node_configs)
+    _assert_no_inline_secrets(nodes_data, "nodes_data")
+    validate_graph_edges(nodes_data, edges_data)
+
     # Lock the graph row with FOR UPDATE to serialize concurrent version saves
-    lock_result = await db.execute(
-        sa_select(Graph)
-        .where(Graph.id == graph_id)
-        .with_for_update()
-    )
+    lock_result = await db.execute(sa_select(Graph).where(Graph.id == graph_id).with_for_update())
     graph = lock_result.scalar_one_or_none()
     if not graph:
         return None
 
     # Get the next version number (safe within the locked transaction)
     version_result = await db.execute(
-        select(func.coalesce(func.max(GraphVersion.version_number), 0))
-        .where(GraphVersion.graph_id == graph_id)
+        select(func.coalesce(func.max(GraphVersion.version_number), 0)).where(
+            GraphVersion.graph_id == graph_id
+        )
     )
     next_version = (version_result.scalar() or 0) + 1
 

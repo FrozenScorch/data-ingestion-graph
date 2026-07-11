@@ -34,6 +34,7 @@ desktop.ini
 # Data
 data/uploads/*
 data/temp/*
+.ingestion/
 !data/uploads/.gitkeep
 !data/temp/.gitkeep
 
@@ -54,6 +55,8 @@ alembic/versions/__pycache__/
 
 # Testing
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
 .coverage
 htmlcov/
 .coverage.*
