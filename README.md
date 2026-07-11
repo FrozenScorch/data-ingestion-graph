@@ -40,8 +40,10 @@ the stack. Docker is built from the repository root because the backend installs
 docker compose up --build
 ```
 
-Open Studio, create a graph from a predefined pipeline or the blank canvas,
-configure saved connections, run it, and inspect/query its outputs.
+Open Studio, upload private document inputs from **Files**, create a graph from a
+predefined pipeline or the blank canvas, configure saved connections, run it,
+and inspect/query its outputs. File Source nodes store opaque file IDs only;
+server paths stay owner-scoped and server-controlled.
 
 Outside development, configure independent, random values for
 `JWT_SECRET_KEY` and `CONNECTION_ENCRYPTION_KEY`. Saved connector credentials

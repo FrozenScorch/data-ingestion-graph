@@ -132,6 +132,7 @@ async def retry_dlq_item(
     try:
         from app.engine.runner import run_node_with_retry
         from app.models.execution import Run
+        from app.models.graph import Graph
         from sqlalchemy import select as _s
 
         # Retrieve parent run for proper retry context
@@ -151,7 +152,9 @@ async def retry_dlq_item(
             node_type=item.node_type,
             config={},
             input_data=item.input_data,
-            state={},
+            state={"owner_id": str((await db.execute(
+                _s(Graph.owner_id).where(Graph.id == run.graph_id)
+            )).scalar_one())},
             max_retries=1,
         )
 

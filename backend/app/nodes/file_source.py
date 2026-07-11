@@ -6,13 +6,14 @@ Supports three source types:
 - "glob": match files using a glob pattern
 - "path": read a single file by path
 """
+
 import logging
 import mimetypes
 import os
 from pathlib import Path
 from typing import Any
 
-from app.nodes.base import BaseNode, NodeContext, NodeResult, PortDef, PortDataType
+from app.nodes.base import BaseNode, NodeContext, NodeResult, PortDataType, PortDef
 
 logger = logging.getLogger(__name__)
 
@@ -81,9 +82,14 @@ class FileSourceNode(BaseNode):
                     "default": True,
                     "description": "Search subdirectories recursively",
                 },
-                "base_dir": {
-                    "type": "string",
-                    "description": "Base directory for file resolution (defaults to working_dir/uploads)",
+                "artifact_ids": {
+                    "type": "array",
+                    "items": {"type": "string", "format": "uuid"},
+                    "format": "artifact-refs",
+                    "default": [],
+                    "description": (
+                        "Studio-managed files to ingest. Empty selects all of your uploaded files."
+                    ),
                 },
             },
             "required": ["source_type"],
@@ -95,14 +101,9 @@ class FileSourceNode(BaseNode):
         file_pattern = context.config.get("file_pattern", "**/*")
         recursive = context.config.get("recursive", True)
 
-        # Determine base directory
-        base_dir = context.config.get("base_dir")
-        if not base_dir:
-            # Default to working_dir itself; uploads is a common subdirectory
-            # that will be covered by recursive glob
-            base_dir = context.working_dir
-
-        base_path = Path(base_dir)
+        # The runner owns this root. Graph configuration can never select an
+        # arbitrary server directory.
+        base_path = Path(context.working_dir)
 
         # SECURITY: Resolve base_path to its real path to prevent symlink-based traversal
         try:
@@ -119,29 +120,36 @@ class FileSourceNode(BaseNode):
 
         try:
             if source_type == "upload":
-                # List all files in the upload directory matching the pattern
-                if not base_path.exists():
-                    logger.warning(f"Upload directory does not exist: {base_path}")
+                from uuid import UUID
+
+                from app.services.upload_service import resolve_uploads
+
+                owner_id = context.state.get("owner_id")
+                if not owner_id:
                     return NodeResult(
-                        success=True,
+                        success=False,
                         output_data={"file_list": []},
-                        items_processed=0,
-                        metadata={"source_type": "upload", "warning": "Upload directory does not exist"},
+                        error_message="Upload execution is missing graph-owner context",
                     )
-
-                if recursive:
-                    matched = sorted(base_path.glob(file_pattern))
-                else:
-                    # Non-recursive: only files in the immediate directory
-                    matched = sorted(p for p in base_path.iterdir() if p.is_file())
-
-                # Filter to files only (not directories), and validate containment
-                for p in matched:
-                    resolved = _validate_path_within_allowed(p, base_path)
-                    if resolved and resolved.is_file():
-                        file_list.append(self._file_metadata(resolved))
+                try:
+                    paths = resolve_uploads(
+                        UUID(str(owner_id)), context.config.get("artifact_ids") or None
+                    )
+                except ValueError as exc:
+                    return NodeResult(
+                        success=False,
+                        output_data={"file_list": []},
+                        error_message=str(exc),
+                    )
+                file_list.extend(self._file_metadata(path) for path in paths)
 
             elif source_type == "glob":
+                if Path(file_pattern).is_absolute() or ".." in Path(file_pattern).parts:
+                    return NodeResult(
+                        success=False,
+                        output_data={"file_list": []},
+                        error_message="Glob pattern must stay within the execution directory",
+                    )
                 # Use the pattern against the base directory
                 if not base_path.exists():
                     logger.warning(f"Base directory does not exist: {base_path}")
@@ -149,7 +157,10 @@ class FileSourceNode(BaseNode):
                         success=True,
                         output_data={"file_list": []},
                         items_processed=0,
-                        metadata={"source_type": "glob", "warning": "Base directory does not exist"},
+                        metadata={
+                            "source_type": "glob",
+                            "warning": "Base directory does not exist",
+                        },
                     )
 
                 if recursive:
@@ -165,7 +176,9 @@ class FileSourceNode(BaseNode):
 
             elif source_type == "path":
                 # Single file path (absolute or relative to base_dir)
-                file_path_str = context.config.get("file_path", context.config.get("file_pattern", ""))
+                file_path_str = context.config.get(
+                    "file_path", context.config.get("file_pattern", "")
+                )
                 if not file_path_str:
                     return NodeResult(
                         success=False,
@@ -184,8 +197,14 @@ class FileSourceNode(BaseNode):
                     )
 
                 file_path = Path(file_path_str)
-                if not file_path.is_absolute():
-                    file_path = base_path / file_path
+                if file_path.is_absolute():
+                    return NodeResult(
+                        success=False,
+                        output_data={"file_list": []},
+                        items_processed=0,
+                        error_message="Absolute file paths are not allowed",
+                    )
+                file_path = base_path / file_path
 
                 # SECURITY: Validate the resolved path stays within allowed directories
                 resolved = _validate_path_within_allowed(file_path, base_path)
@@ -249,4 +268,5 @@ class FileSourceNode(BaseNode):
 
 def register():
     from app.nodes.registry import register_node
+
     register_node(FileSourceNode())

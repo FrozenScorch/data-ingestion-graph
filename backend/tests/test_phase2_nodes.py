@@ -86,8 +86,7 @@ class TestFileSourceNode:
             ctx = _make_context(
                 config={
                     "source_type": "path",
-                    "file_path": str(filepath),
-                    "base_dir": tmpdir,
+                    "file_path": filepath.name,
                 },
                 working_dir=tmpdir,
             )
@@ -171,8 +170,7 @@ class TestFileSourceNode:
             ctx = _make_context(
                 config={
                     "source_type": "path",
-                    "file_path": str(filepath),
-                    "base_dir": tmpdir,
+                    "file_path": filepath.name,
                 },
                 working_dir=tmpdir,
             )

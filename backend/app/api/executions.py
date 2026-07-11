@@ -326,7 +326,17 @@ async def retry_failed_run(
                 levels = topological_sort(nodes_data, edges_data)
 
                 # Build exec_state from restored checkpoints
-                exec_state: dict = {"outputs": dict(restored_outputs)}
+                from app.models.graph import Graph
+                owner_result = await bg_db.execute(
+                    select(Graph.owner_id).where(Graph.id == bg_run.graph_id)
+                )
+                owner_id = owner_result.scalar_one_or_none()
+                if owner_id is None:
+                    raise RuntimeError("Graph owner not found")
+                exec_state: dict = {
+                    "outputs": dict(restored_outputs),
+                    "owner_id": str(owner_id),
+                }
 
                 # Re-execute only failed nodes (and any downstream nodes that
                 # depend on them)
