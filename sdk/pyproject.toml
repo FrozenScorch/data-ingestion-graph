@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ingestion-graph"
-version = "0.3.0"
+dynamic = ["version"]
 description = "Local-first, resumable data ingestion and query SDK"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -18,6 +18,10 @@ classifiers = [
   "Programming Language :: Python :: 3.12",
   "Programming Language :: Python :: 3.13",
 ]
+
+[project.urls]
+Repository = "https://github.com/FrozenScorch/data-ingestion-graph"
+Documentation = "https://github.com/FrozenScorch/data-ingestion-graph/tree/main/sdk"
 
 [project.optional-dependencies]
 discord = ["httpx>=0.28"]
@@ -49,6 +53,9 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 ingestion_graph = ["py.typed"]
+
+[tool.setuptools.dynamic]
+version = { attr = "ingestion_graph.__version__" }
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
