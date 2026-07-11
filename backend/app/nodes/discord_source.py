@@ -65,6 +65,8 @@ class DiscordSourceNode(BaseNode):
             "properties": {
                 "connection_id": {
                     "type": "string",
+                    "format": "connection-ref",
+                    "connection_type": "discord",
                     "description": "Encrypted saved Discord connection ID",
                 },
                 "channel_id": {
@@ -92,7 +94,18 @@ class DiscordSourceNode(BaseNode):
         except (TypeError, ValueError):
             return NodeResult(success=False, error_message="message_limit must be an integer")
         if not connection:
-            return NodeResult(success=False, error_message="Saved Discord connection not available")
+            if context.config.get("bot_token"):
+                return NodeResult(
+                    success=False,
+                    error_message=(
+                        "Legacy Discord bot_token configs are no longer supported. "
+                        "Create a saved Discord connection and select its connection_id."
+                    ),
+                )
+            return NodeResult(
+                success=False,
+                error_message="Saved Discord connection not available; select a connection_id",
+            )
         token = connection.get("bot_token") or connection.get("token")
         if not isinstance(token, str) or not token:
             return NodeResult(

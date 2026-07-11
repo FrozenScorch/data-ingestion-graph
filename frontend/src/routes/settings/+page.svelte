@@ -1,11 +1,13 @@
 <script lang="ts">
   import { auth } from '$lib/stores';
+  import ConnectionCenter from '$lib/components/ui/ConnectionCenter.svelte';
 </script>
 
 <div class="p-6 space-y-6">
   <h1 class="text-xl font-bold text-gray-100">Settings</h1>
 
   <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+    <ConnectionCenter />
     <!-- User Info -->
     <div class="bg-gray-900 border border-gray-800 rounded-xl p-5">
       <h2 class="text-sm font-medium text-gray-300 mb-4">User Information</h2>

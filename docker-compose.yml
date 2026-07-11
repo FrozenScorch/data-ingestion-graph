@@ -75,6 +75,7 @@ services:
       APP_ENV: ${APP_ENV:-development}
       APP_DEBUG: ${APP_DEBUG:-true}
       APP_PORT: 8040
+      QUERY_ARTIFACT_TTL_HOURS: ${QUERY_ARTIFACT_TTL_HOURS:-168}
 
       # CORS
       CORS_ORIGINS: http://localhost:3000,http://localhost:8040

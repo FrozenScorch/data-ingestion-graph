@@ -1,5 +1,7 @@
 """Proof that Studio consumes the reusable SDK for ingest-and-query testing."""
 
+import os
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
@@ -117,6 +119,47 @@ async def test_run_query_rejects_punctuation_only_search(tmp_path):
         )
 
     assert exc_info.value.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_run_query_deletes_and_rejects_expired_artifact(tmp_path):
+    run_id = uuid4()
+    owner_id = uuid4()
+    context = NodeContext(
+        run_id=str(run_id),
+        node_id="query-store",
+        input_data={"items": [{"id": "one", "text": "expired"}]},
+        working_dir=str(tmp_path),
+    )
+    assert (await SDKQueryStoreNode().execute(context)).success
+    store_path = tmp_path / "query" / f"{run_id}.db"
+    expired = (datetime.now(UTC) - timedelta(hours=2)).timestamp()
+    os.utime(store_path, (expired, expired))
+    owner_result = MagicMock()
+    owner_result.scalar_one_or_none.return_value = owner_id
+    db = AsyncMock()
+    db.execute.return_value = owner_result
+    run = SimpleNamespace(id=run_id, graph_id=uuid4())
+
+    with (
+        patch("app.api.query.get_run", new_callable=AsyncMock, return_value=run),
+        patch("app.api.query.settings.temp_dir", str(tmp_path)),
+        patch("app.api.query.settings.query_artifact_ttl_hours", 1),
+        pytest.raises(HTTPException) as exc_info,
+    ):
+        await query_run_output(
+            run_id=run_id,
+            q=None,
+            source=None,
+            stream=None,
+            limit=20,
+            offset=0,
+            db=db,
+            current_user={"role": "user", "user_id": owner_id},
+        )
+
+    assert exc_info.value.status_code == 410
+    assert not store_path.exists()
 
 
 @pytest.mark.asyncio

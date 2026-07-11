@@ -16,6 +16,13 @@ Studio nodes declare whether they are `studio` implementations or thin
 SDK components. Remaining native parsing and database nodes can migrate without
 changing the Studio graph format.
 
+The Connection Center is the sole UI for connector credentials. The backend
+publishes typed connection forms, encrypts secrets at rest, and node schemas bind
+to saved connections through `connection-ref` fields. Legacy graphs are migrated
+by selecting a saved connection in the node editor; the next version drops config
+fields that are no longer part of the registered node contract. Runtime access to
+the Studio control-plane database is never used as an implicit fallback.
+
 Predefined pipelines are immutable Studio catalog entries. They reference live
 node contracts and are validated at startup for missing nodes, ports, required
 inputs, and incompatible data types. They never duplicate connector code.
@@ -53,3 +60,8 @@ The first control-plane adapter is now `sdk_query_store`: it converts bounded
 legacy node output into canonical SDK envelopes and materializes a per-run query
 collection. See [Ingest and query architecture](ingest-and-query.md) for the query
 contract and the boundary with LLM orchestration frameworks.
+
+Per-run query collections have a configurable retention window
+(`QUERY_ARTIFACT_TTL_HOURS`, seven days by default). Studio prunes expired SQLite
+databases and sidecars at startup, and
+the query API deletes and rejects an expired artifact with HTTP 410.

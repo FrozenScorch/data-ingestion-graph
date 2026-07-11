@@ -5,6 +5,7 @@ Loads from .env file with environment variable overrides.
 
 import logging
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 logger = logging.getLogger(__name__)
@@ -67,6 +68,7 @@ class Settings(BaseSettings):
     upload_dir: str = "./data/uploads"
     temp_dir: str = "./data/temp"
     max_upload_size_mb: int = 100
+    query_artifact_ttl_hours: int = Field(default=168, ge=1)
 
     # Logging
     log_level: str = "INFO"

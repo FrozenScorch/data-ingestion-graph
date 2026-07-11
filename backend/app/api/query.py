@@ -1,6 +1,5 @@
 """Authenticated query surface for SDK-backed pipeline test output."""
 
-from pathlib import Path
 from uuid import UUID
 
 from app.config import settings
@@ -8,6 +7,12 @@ from app.db.session import get_session
 from app.middleware.auth import get_current_user
 from app.models.graph import Graph
 from app.services.execution_service import get_run
+from app.services.query_artifact_service import (
+    artifact_expires_at,
+    delete_query_artifact,
+    is_query_artifact_expired,
+    query_artifact_path,
+)
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from ingestion_graph.destinations import SQLiteCollection
 from ingestion_graph.query import QueryRequest
@@ -39,12 +44,24 @@ async def query_run_output(
     if current_user["role"] != "admin" and str(owner_id) != str(current_user["user_id"]):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No permission")
 
-    store_path = Path(settings.temp_dir) / "query" / f"{run_id}.db"
+    store_path = query_artifact_path(str(run_id))
     if not store_path.is_file():
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="This run has no queryable output; add a Queryable Test Store node",
         )
+    if is_query_artifact_expired(store_path):
+        try:
+            delete_query_artifact(store_path)
+        except OSError:
+            pass
+        raise HTTPException(
+            status_code=status.HTTP_410_GONE,
+            detail="Queryable output expired under the configured retention policy",
+        )
+
+    expires_at = artifact_expires_at(store_path)
+    size_bytes = store_path.stat().st_size
 
     store = SQLiteCollection(store_path)
     try:
@@ -62,5 +79,10 @@ async def query_run_output(
         "run_id": str(run_id),
         "query": q,
         "count": len(hits),
+        "artifact": {
+            "size_bytes": size_bytes,
+            "expires_at": expires_at.isoformat(),
+            "ttl_hours": settings.query_artifact_ttl_hours,
+        },
         "hits": [{"score": hit.score, "envelope": hit.envelope.to_dict()} for hit in hits],
     }

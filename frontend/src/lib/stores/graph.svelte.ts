@@ -5,6 +5,7 @@
 
 import type { GraphNode, GraphEdge, GraphDetail, Graph } from '$lib/types';
 import { graphService } from '$lib/services/graphService.js';
+import { nodeRegistry } from './nodeRegistry.svelte.js';
 
 class GraphState {
   // Current graph metadata
@@ -144,7 +145,11 @@ class GraphState {
       // Build node configs from node data
       const nodeConfigs: Record<string, Record<string, unknown>> = {};
       for (const node of this.nodes) {
-        nodeConfigs[node.id] = node.data.config || {};
+        const definition = nodeRegistry.getNodeByType(node.type);
+        const allowed = new Set(Object.keys(definition?.config_schema.properties ?? {}));
+        nodeConfigs[node.id] = Object.fromEntries(
+          Object.entries(node.data.config || {}).filter(([key]) => allowed.has(key))
+        );
       }
 
       const nodesWithoutConfigs = this.nodes.map(node => ({

@@ -144,8 +144,14 @@ async def save_graph_version(
     """
     from sqlalchemy import select as sa_select
 
-    from app.graph_validation import validate_graph_edges
+    from app.graph_validation import (
+        sanitize_node_configs,
+        strip_embedded_node_configs,
+        validate_graph_edges,
+    )
 
+    node_configs = sanitize_node_configs(nodes_data, node_configs)
+    nodes_data = strip_embedded_node_configs(nodes_data)
     _assert_no_inline_secrets(node_configs)
     _assert_no_inline_secrets(nodes_data, "nodes_data")
     validate_graph_edges(nodes_data, edges_data)

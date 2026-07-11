@@ -51,6 +51,8 @@ class VectorStoreNode(BaseNode):
             "properties": {
                 "connection_id": {
                     "type": "string",
+                    "format": "connection-ref",
+                    "connection_type": "postgres",
                     "description": "Saved PostgreSQL connection ID",
                 },
                 "table_name": {
@@ -115,7 +117,9 @@ class VectorStoreNode(BaseNode):
                 password=connection.get("password"),
             )
         if not connection_id:
-            raise ValueError("Vector store requires connection_id")
+            raise ValueError(
+                "Vector store requires connection_id; select an encrypted saved connection"
+            )
         raise ValueError(f"Saved connection not available: {connection_id}")
 
     async def execute(self, context: NodeContext) -> NodeResult:

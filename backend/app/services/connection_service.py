@@ -12,6 +12,7 @@ from typing import Optional
 from sqlalchemy import select, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.connection_catalog import SUPPORTED_CONNECTION_TYPES, validate_connection_config
 from app.models.graph import Connection
 from app.services.connection_crypto import (
     decrypt_connection_config,
@@ -20,10 +21,6 @@ from app.services.connection_crypto import (
 )
 
 logger = logging.getLogger(__name__)
-
-# Supported connection types
-SUPPORTED_CONNECTION_TYPES = ["postgres", "discord"]
-
 
 async def migrate_plaintext_connection_configs(db: AsyncSession) -> int:
     """Encrypt legacy plaintext connection rows after the schema is available."""
@@ -58,10 +55,7 @@ async def create_connection(
     Returns:
         Created Connection model instance
     """
-    if type not in SUPPORTED_CONNECTION_TYPES:
-        raise ValueError(
-            f"Unsupported connection type: {type}. Supported: {SUPPORTED_CONNECTION_TYPES}"
-        )
+    validate_connection_config(type, config)
 
     connection = Connection(
         user_id=user_id,
@@ -147,6 +141,7 @@ async def update_connection(
     if name is not None:
         connection.name = name
     if config is not None:
+        validate_connection_config(connection.type, config)
         connection.config = encrypt_connection_config(config)
         # Reset is_valid since config changed; user should re-test
         connection.is_valid = False
@@ -200,10 +195,7 @@ async def test_connection(
     Raises:
         ValueError: For unsupported connection types
     """
-    if type not in SUPPORTED_CONNECTION_TYPES:
-        raise ValueError(
-            f"Unsupported connection type: {type}. Supported: {SUPPORTED_CONNECTION_TYPES}"
-        )
+    validate_connection_config(type, config)
 
     if type == "postgres":
         return await _test_postgres_connection(config)

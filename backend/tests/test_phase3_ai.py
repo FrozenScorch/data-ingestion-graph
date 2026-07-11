@@ -85,6 +85,13 @@ def make_context():
 
 
 class TestOpenRouterService:
+    def test_keyless_construction_defers_configuration_error(self):
+        service = OpenRouterService()
+        assert service._client is None
+        with patch("app.services.openrouter_service.settings.openrouter_api_key", ""):
+            with pytest.raises(RuntimeError, match="OPENROUTER_API_KEY"):
+                _ = service.client
+
     def test_free_model_validation_passes(self, mock_openrouter_service):
         """Free model validation should pass for allowed free models."""
         service = mock_openrouter_service

@@ -1,7 +1,10 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
   import { graph, execution } from '$lib/stores';
   import { nodeRegistry } from '$lib/stores';
+  import { connectionService } from '$lib/services/connectionService.js';
   import type { ConfigField } from '$lib/types';
+  import type { SavedConnection } from '$lib/types/connection.js';
   import ModelSelector from './ModelSelector.svelte';
 
   let { onClose, onDelete }: { onClose: () => void; onDelete: () => void } = $props();
@@ -16,6 +19,16 @@
   );
 
   let showRunOutput = $state(false);
+  let savedConnections = $state<SavedConnection[]>([]);
+  let connectionLoadError = $state('');
+
+  onMount(async () => {
+    try {
+      savedConnections = (await connectionService.list()).connections;
+    } catch (error) {
+      connectionLoadError = error instanceof Error ? error.message : 'Failed to load connections';
+    }
+  });
 
   function formatOutputPreview(output: Record<string, unknown> | null): string {
     if (!output || typeof output !== 'object') return '';
@@ -161,6 +174,22 @@
               label=""
               onValueChange={(v: string) => updateConfig(key, v)}
             />
+
+          {:else if field.type === 'string' && field.format === 'connection-ref'}
+            <select
+              value={(config[key] as string) || ''}
+              onchange={(e) => updateConfig(key, (e.target as HTMLSelectElement).value)}
+              class="w-full px-3 py-1.5 bg-gray-800 border {isEmptyRequired ? 'border-amber-700' : 'border-gray-700'} rounded-lg text-sm text-gray-200 focus:outline-none focus:border-indigo-500"
+            >
+              <option value="">Select a saved connection...</option>
+              {#each savedConnections.filter(item => !field.connection_type || item.type === field.connection_type) as connection (connection.id)}
+                <option value={connection.id}>{connection.name}{connection.is_valid ? ' · tested' : ' · not tested'}</option>
+              {/each}
+            </select>
+            <div class="mt-1 flex items-center justify-between gap-2 text-xs">
+              {#if connectionLoadError}<span class="text-red-400">{connectionLoadError}</span>{/if}
+              <a href="/settings#connections" class="ml-auto text-cyan-400 hover:text-cyan-300">Manage connections</a>
+            </div>
 
           {:else if field.type === 'string' && field.format === 'password'}
             <input

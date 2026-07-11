@@ -99,7 +99,7 @@ class GraphListResponse(BaseModel):
 
 class ConnectionCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=255)
-    type: str = Field(..., pattern="^(postgres|discord|github|webhook)$")
+    type: str = Field(..., pattern="^(postgres|discord)$")
     config: dict | None = None
 
 

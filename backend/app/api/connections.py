@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.connection_catalog import CONNECTION_DEFINITIONS
 from app.db.session import get_session
 from app.middleware.auth import get_current_user
 from app.services import connection_service
@@ -82,6 +83,15 @@ async def list_connections(
         connections=connections,
         total=len(connections),
     )
+
+
+@router.get("/types")
+async def list_connection_types(
+    current_user: dict = Depends(get_current_user),
+):
+    """Return typed connection forms supported by executable Studio nodes."""
+    del current_user
+    return {"types": list(CONNECTION_DEFINITIONS.values())}
 
 
 @router.get("/{connection_id}", response_model=ConnectionResponse)

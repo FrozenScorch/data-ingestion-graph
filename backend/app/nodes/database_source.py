@@ -54,6 +54,8 @@ class DatabaseSourceNode(BaseNode):
             "properties": {
                 "connection_id": {
                     "type": "string",
+                    "format": "connection-ref",
+                    "connection_type": "postgres",
                     "description": "Saved PostgreSQL connection ID",
                 },
                 "query": {
@@ -105,7 +107,9 @@ class DatabaseSourceNode(BaseNode):
             ).render_as_string(hide_password=False)
 
         if not connection_id:
-            raise ValueError("Database source requires connection_id")
+            raise ValueError(
+                "Database source requires connection_id; select an encrypted saved connection"
+            )
         raise ValueError(f"Saved connection not available: {connection_id}")
 
     async def execute(self, context: NodeContext) -> NodeResult:

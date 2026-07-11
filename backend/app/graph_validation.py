@@ -1,8 +1,42 @@
 """Validation for Studio graph edges against the live node registry."""
 
+from copy import deepcopy
 from typing import Any
 
 from app.nodes.registry import get_node
+
+
+def sanitize_node_configs(
+    nodes_data: dict[str, Any] | None,
+    node_configs: dict[str, Any] | None,
+) -> dict[str, dict[str, Any]]:
+    """Drop fields removed from current node contracts when saving a new version."""
+    node_types = {
+        item.get("id"): item.get("type") for item in (nodes_data or {}).get("nodes", [])
+    }
+    sanitized: dict[str, dict[str, Any]] = {}
+    for node_id, raw_config in (node_configs or {}).items():
+        definition = get_node(node_types.get(node_id))
+        if definition is None or not isinstance(raw_config, dict):
+            sanitized[node_id] = {}
+            continue
+        allowed = set(definition.config_schema.get("properties", {}))
+        sanitized[node_id] = {
+            key: value for key, value in raw_config.items() if key in allowed
+        }
+    return sanitized
+
+
+def strip_embedded_node_configs(nodes_data: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Normalize legacy nodes that duplicated config inside visual node data."""
+    if nodes_data is None:
+        return None
+    normalized = deepcopy(nodes_data)
+    for item in normalized.get("nodes", []):
+        data = item.get("data")
+        if isinstance(data, dict):
+            data["config"] = {}
+    return normalized
 
 
 def validate_graph_edges(

@@ -94,6 +94,16 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     except Exception as e:
         logger.error(f"Failed to seed admin user: {e}")
 
+    from app.services.query_artifact_service import prune_query_artifacts
+
+    try:
+        removed_artifacts = prune_query_artifacts()
+    except OSError as exc:
+        removed_artifacts = 0
+        logger.warning("Could not prune query artifacts: %s", exc)
+    if removed_artifacts:
+        logger.info("Pruned %s expired query artifacts", removed_artifacts)
+
     # Discover and register all node types
     try:
         from app.nodes.registry import discover_nodes

@@ -110,11 +110,9 @@ class TestDatabaseSourceNode:
         )
 
         errors = await node.validate_config(context.config)
-        result = await node.execute(context)
-
         assert "connection_id" in str(errors)
-        assert result.success is False
-        assert "requires connection_id" in result.error_message
+        with pytest.raises(ValueError, match="requires connection_id"):
+            node._build_connection_url(context)
 
     def test_rejects_ctes_and_multiple_statements(self):
         node = DatabaseSourceNode()
@@ -878,7 +876,12 @@ class TestConnectionService:
                 user_id=user_id,
                 name="Test DB",
                 type="postgres",
-                config={"host": "localhost"},
+                config={
+                    "host": "localhost",
+                    "database": "testdb",
+                    "username": "testuser",
+                    "password": "testpass",
+                },
             )
 
         assert result is not None
@@ -986,6 +989,7 @@ class TestConnectionService:
         mock_connection = MagicMock()
         mock_connection.user_id = user_id
         mock_connection.name = "Old Name"
+        mock_connection.type = "postgres"
 
         with patch(
             "app.services.connection_service.get_connection",
@@ -996,14 +1000,24 @@ class TestConnectionService:
                 connection_id=conn_id,
                 user_id=user_id,
                 name="New Name",
-                config={"host": "new-host"},
+                config={
+                    "host": "new-host",
+                    "database": "testdb",
+                    "username": "testuser",
+                    "password": "testpass",
+                },
             )
 
         assert result is not None
         assert result.name == "New Name"
         from app.services.connection_crypto import decrypt_connection_config
 
-        assert decrypt_connection_config(result.config) == {"host": "new-host"}
+        assert decrypt_connection_config(result.config) == {
+            "host": "new-host",
+            "database": "testdb",
+            "username": "testuser",
+            "password": "testpass",
+        }
         assert result.is_valid is False  # Reset after config change
         mock_db.commit.assert_called_once()
 

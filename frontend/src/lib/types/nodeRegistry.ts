@@ -26,6 +26,7 @@ export interface PortDef {
 export interface ConfigField {
   type: string;
   format?: string;
+  connection_type?: string;
   description?: string;
   enum?: string[];
   default?: unknown;

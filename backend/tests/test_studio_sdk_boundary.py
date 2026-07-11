@@ -12,7 +12,11 @@ from app.graph_templates import (
     materialize_template,
     validate_templates,
 )
-from app.graph_validation import validate_graph_edges
+from app.graph_validation import (
+    sanitize_node_configs,
+    strip_embedded_node_configs,
+    validate_graph_edges,
+)
 from app.nodes.discord_source import DiscordSourceNode
 from app.nodes.registry import discover_nodes
 from app.nodes.sdk_query_store import SDKQueryStoreNode
@@ -73,6 +77,30 @@ def test_saved_graph_edges_enforce_registered_port_types():
     )
     with pytest.raises(ValueError, match="cannot connect file_list to document"):
         validate_graph_edges(nodes_data, invalid_edges)
+
+
+def test_legacy_discord_secret_is_dropped_when_migrating_to_saved_connection():
+    discover_nodes()
+    nodes_data, _, _ = materialize_template(TEMPLATES["discord-search"])
+    configs = sanitize_node_configs(
+        nodes_data,
+        {
+            "discord": {
+                "bot_token": "legacy-secret",
+                "connection_id": "saved-connection",
+                "channel_id": "123",
+            }
+        },
+    )
+    assert configs["discord"] == {
+        "connection_id": "saved-connection",
+        "channel_id": "123",
+    }
+    legacy_nodes = deepcopy(nodes_data)
+    legacy_nodes["nodes"][0]["data"]["config"] = {"bot_token": "legacy-secret"}
+    normalized = strip_embedded_node_configs(legacy_nodes)
+    assert normalized is not None
+    assert normalized["nodes"][0]["data"]["config"] == {}
 
 
 @pytest.mark.asyncio

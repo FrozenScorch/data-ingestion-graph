@@ -6,10 +6,13 @@ import hashlib
 import json
 import re
 from collections.abc import Mapping
-from pathlib import Path
 from typing import Any
 
 from app.nodes.base import BaseNode, NodeContext, NodeResult, PortDataType, PortDef
+from app.services.query_artifact_service import (
+    artifact_expires_at,
+    query_artifact_path,
+)
 from ingestion_graph.destinations import SQLiteCollection
 from ingestion_graph.models import Envelope, Operation, RecordPayload, stable_record_id
 
@@ -73,7 +76,7 @@ class SDKQueryStoreNode(BaseNode):
             _to_envelope(item, context=context, collection=collection, index=index)
             for index, item in enumerate(items)
         ]
-        store_path = Path(context.working_dir) / "query" / f"{context.run_id}.db"
+        store_path = query_artifact_path(context.run_id, base_dir=context.working_dir)
         store = SQLiteCollection(store_path)
         try:
             check = await store.check()
@@ -98,6 +101,8 @@ class SDKQueryStoreNode(BaseNode):
                     "records_received": len(envelopes),
                     "records_written": written,
                     "query_endpoint": f"/api/executions/{context.run_id}/query",
+                    "artifact_size_bytes": store_path.stat().st_size,
+                    "artifact_expires_at": artifact_expires_at(store_path).isoformat(),
                 }
             },
             items_processed=len(envelopes),

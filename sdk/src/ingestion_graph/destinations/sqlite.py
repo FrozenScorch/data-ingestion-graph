@@ -9,6 +9,7 @@ import re
 import sqlite3
 import threading
 from collections.abc import Mapping, Sequence
+from contextlib import closing
 from pathlib import Path
 from typing import Any
 
@@ -45,7 +46,7 @@ class SQLiteCollection(Destination, QueryStore):
         with self._init_lock:
             if self._initialized:
                 return
-            with self._connect() as connection:
+            with closing(self._connect()) as connection, connection:
                 connection.executescript(
                     """
                     CREATE TABLE IF NOT EXISTS collection_records (
@@ -81,7 +82,7 @@ class SQLiteCollection(Destination, QueryStore):
     def _write_sync(self, records: list[Envelope]) -> int:
         self._initialize()
         applied = 0
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
             for envelope in records:
                 existing = connection.execute(
@@ -158,7 +159,7 @@ class SQLiteCollection(Destination, QueryStore):
 
     def _get_sync(self, source: str, stream: str, record_id: str) -> Envelope | None:
         self._initialize()
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             row = connection.execute(
                 """
                 SELECT envelope_json FROM collection_records
@@ -184,7 +185,7 @@ class SQLiteCollection(Destination, QueryStore):
             filters.append("records.stream=?")
             parameters.append(request.stream)
         filter_sql = " AND ".join(filters)
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             if request.text is not None and request.text.strip():
                 match = _fts_query(request.text)
                 fts_where = "WHERE collection_fts MATCH ?"
