@@ -1,9 +1,10 @@
 import asyncio
+import multiprocessing
 import os
 import time
 from io import BytesIO
 from unittest.mock import AsyncMock, MagicMock
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from app.api.files import delete_file, router
@@ -24,6 +25,18 @@ def upload_root(monkeypatch, tmp_path):
 
 def make_upload(name: str, content: bytes) -> UploadFile:
     return UploadFile(filename=name, file=BytesIO(content))
+
+
+def _hold_quota_lock(upload_dir: str, owner_id: str, ready) -> None:
+    """Spawn-safe helper: hold the real OS lock until this process is terminated."""
+    settings.upload_dir = upload_dir
+
+    async def hold() -> None:
+        async with upload_service._owner_quota_lock(UUID(owner_id)):
+            ready.set()
+            await asyncio.sleep(60)
+
+    asyncio.run(hold())
 
 
 @pytest.mark.asyncio
@@ -227,6 +240,34 @@ async def test_concurrent_uploads_cannot_race_owner_quota(upload_root, monkeypat
     errors = [item for item in results if isinstance(item, HTTPException)]
     assert len(errors) == 1 and errors[0].status_code == 413
     assert sum(item["size"] for item in upload_service.list_uploads(owner)) == 700_000
+
+
+@pytest.mark.asyncio
+async def test_quota_lock_blocks_other_process_and_recovers_after_crash(upload_root, monkeypatch):
+    owner = uuid4()
+    context = multiprocessing.get_context("spawn")
+    ready = context.Event()
+    process = context.Process(
+        target=_hold_quota_lock,
+        args=(str(upload_root), str(owner), ready),
+    )
+    process.start()
+    try:
+        assert ready.wait(10), "child process did not acquire quota lock"
+        monkeypatch.setattr(upload_service, "QUOTA_LOCK_WAIT_SECONDS", 0.2)
+        with pytest.raises(HTTPException) as blocked:
+            async with upload_service._owner_quota_lock(owner):
+                pass
+        assert blocked.value.status_code == 503
+    finally:
+        process.terminate()
+        process.join(10)
+    assert not process.is_alive()
+
+    # Kernel releases the advisory lock when the holder dies; no stale-lock
+    # deletion or lease takeover is needed.
+    async with upload_service._owner_quota_lock(owner):
+        pass
 
 
 @pytest.mark.asyncio

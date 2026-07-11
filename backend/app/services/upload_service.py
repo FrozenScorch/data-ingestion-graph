@@ -7,7 +7,7 @@ import json
 import os
 import shutil
 import time
-from contextlib import asynccontextmanager, suppress
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID, uuid4
@@ -29,7 +29,6 @@ ALLOWED_EXTENSIONS = {
 }
 CHUNK_SIZE = 1024 * 1024
 STAGING_MAX_AGE_SECONDS = 60 * 60
-QUOTA_LOCK_STALE_SECONDS = 10 * 60
 QUOTA_LOCK_WAIT_SECONDS = 30
 
 
@@ -78,33 +77,26 @@ def _artifact_dir(owner_id: UUID, artifact_id: UUID) -> Path:
 
 @asynccontextmanager
 async def _owner_quota_lock(owner_id: UUID):
-    """Serialize quota accounting across processes using atomic mkdir."""
-    lock = owner_root(owner_id) / ".quota-lock"
-    deadline = time.monotonic() + QUOTA_LOCK_WAIT_SECONDS
-    while True:
-        try:
-            lock.mkdir(mode=0o700)
-            break
-        except FileExistsError:
-            if lock.is_symlink():
-                raise RuntimeError("Upload quota lock must not be a symlink") from None
-            try:
-                if time.time() - lock.stat().st_mtime > QUOTA_LOCK_STALE_SECONDS:
-                    shutil.rmtree(lock)
-                    continue
-            except FileNotFoundError:
-                continue
-            if time.monotonic() >= deadline:
-                raise HTTPException(
-                    status.HTTP_503_SERVICE_UNAVAILABLE,
-                    "Upload storage is busy; retry shortly",
-                ) from None
-            await asyncio.sleep(0.05)
+    """Serialize quota accounting with a crash-safe OS advisory lock."""
+    from filelock import FileLock, Timeout
+
+    lock_path = owner_root(owner_id) / ".quota.lock"
+    if lock_path.is_symlink():
+        raise RuntimeError("Upload quota lock must not be a symlink")
+    # Acquisition/release run in worker threads to avoid blocking the event loop;
+    # shared context lets either worker release the same OS lock safely.
+    lock = FileLock(lock_path, thread_local=False)
     try:
-        yield lock
+        await asyncio.to_thread(lock.acquire, timeout=QUOTA_LOCK_WAIT_SECONDS)
+    except Timeout:
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "Upload storage is busy; retry shortly",
+        ) from None
+    try:
+        yield
     finally:
-        with suppress(FileNotFoundError):
-            lock.rmdir()
+        await asyncio.to_thread(lock.release)
 
 
 async def save_upload(owner_id: UUID, upload: UploadFile) -> dict:
@@ -116,7 +108,7 @@ async def save_upload(owner_id: UUID, upload: UploadFile) -> dict:
     max_bytes = settings.max_upload_size_mb * 1024 * 1024
     owner_limit = settings.max_upload_storage_mb * 1024 * 1024
     try:
-        async with _owner_quota_lock(owner_id) as quota_lock:
+        async with _owner_quota_lock(owner_id):
             staging.mkdir(mode=0o700)
             file_path = staging / name
             existing_bytes = sum(item["size"] for item in list_uploads(owner_id))
@@ -135,7 +127,6 @@ async def save_upload(owner_id: UUID, upload: UploadFile) -> dict:
                             f"Owner storage exceeds the {settings.max_upload_storage_mb} MB quota",
                         )
                     target.write(chunk)
-                    os.utime(quota_lock, None)
             created_at = datetime.now(UTC).isoformat()
             metadata = {
                 "id": str(artifact_id),
