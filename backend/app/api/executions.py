@@ -5,8 +5,9 @@ Execution API routes: run creation, management, and retrieval.
 from uuid import UUID
 
 from app.db.session import get_session
-from app.engine.executor import DAGExecutor
+from app.engine.graph_data import unpack_version_data
 from app.middleware.auth import get_current_user
+from app.models.execution import RunJobType
 from app.schemas.execution import (
     RunCreate,
     RunDetailResponse,
@@ -23,7 +24,8 @@ from app.services.execution_service import (
     resume_run,
 )
 from app.services.graph_service import get_graph, get_graph_versions
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
+from app.services.run_queue_service import enqueue_run_job
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -47,36 +49,7 @@ async def _check_run_access(run, current_user: dict, db: AsyncSession) -> None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found")
 
 
-def _unpack_version_data(
-    nodes_data: dict | None, edges_data: dict | list | None
-) -> tuple[dict, list]:
-    """Unpack version data from frontend storage format into executor format.
-
-    Frontend saves: nodes_data={"nodes": [GraphNode, ...]}, edges_data={"edges": [GraphEdge, ...]}
-    Executor expects: nodes_data={node_id: node_def}, edges_data=[edge_dict, ...]
-    """
-    # Unpack nodes: from {"nodes": [...]} to {node_id: node_def, ...}
-    if isinstance(nodes_data, dict) and "nodes" in nodes_data:
-        nodes_list = nodes_data["nodes"]
-        if isinstance(nodes_list, list):
-            nodes_data = {str(n.get("id", n.get("node_id"))): n for n in nodes_list}
-
-    # Unpack edges: from {"edges": [...]} to [edge_dict, ...]
-    if isinstance(edges_data, dict) and "edges" in edges_data:
-        edges_data = edges_data["edges"]
-
-    if isinstance(edges_data, list):
-        edges_data = [
-            {
-                **edge,
-                "source_port": edge.get("source_port") or edge.get("sourceHandle") or "output",
-                "target_port": edge.get("target_port") or edge.get("targetHandle") or "input",
-            }
-            for edge in edges_data
-            if isinstance(edge, dict)
-        ]
-
-    return nodes_data or {}, edges_data or []
+_unpack_version_data = unpack_version_data
 
 
 @router.post(
@@ -84,7 +57,6 @@ def _unpack_version_data(
 )
 async def start_run(
     graph_id: UUID,
-    background_tasks: BackgroundTasks,
     request: RunCreate | None = None,
     db: AsyncSession = Depends(get_session),
     current_user: dict = Depends(get_current_user),
@@ -99,10 +71,29 @@ async def start_run(
 
     # Get latest version if not specified
     graph_version_id = request.graph_version_id if request else None
-    if not graph_version_id:
+    if graph_version_id:
+        from app.models.graph import GraphVersion
+
+        version_result = await db.execute(
+            select(GraphVersion.id).where(
+                GraphVersion.id == graph_version_id,
+                GraphVersion.graph_id == graph_id,
+            )
+        )
+        if version_result.scalar_one_or_none() is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Graph version not found",
+            )
+    else:
         versions = await get_graph_versions(db, graph_id, limit=1)
         if versions:
             graph_version_id = versions[0].id
+    if graph_version_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Graph has no saved version to execute",
+        )
 
     trigger_type = request.trigger_type if request else "manual"
 
@@ -112,52 +103,8 @@ async def start_run(
         triggered_by=current_user["user_id"],
         trigger_type=trigger_type,
         graph_version_id=graph_version_id,
+        enqueue_job_type=RunJobType.FULL.value,
     )
-
-    # Execute in background
-    async def execute_background():
-        from app.db.session import AsyncSessionLocal
-        from app.models.execution import Run
-        from app.ws.execution_ws import ws_manager
-
-        # Capture outer-scope values before any local reassignment
-        run_id = run.id
-        version_id = graph_version_id
-
-        async with AsyncSessionLocal() as bg_db:
-            try:
-                # Reload run in background session to avoid detached instance error
-                bg_run = await bg_db.get(Run, run_id)
-                if not bg_run:
-                    return
-
-                if version_id:
-                    from app.models.graph import GraphVersion
-
-                    result = await bg_db.execute(
-                        __import__("sqlalchemy")
-                        .select(GraphVersion)
-                        .where(GraphVersion.id == version_id)
-                    )
-                    version = result.scalar_one_or_none()
-                    raw_nodes = version.nodes_data or {}
-                    raw_edges = version.edges_data or []
-                    node_configs = version.node_configs or {}
-                else:
-                    raw_nodes = {}
-                    raw_edges = []
-                    node_configs = {}
-
-                nodes_data, edges_data = _unpack_version_data(raw_nodes, raw_edges)
-
-                executor = DAGExecutor(bg_db, ws_manager)
-                await executor.execute(bg_run, nodes_data, edges_data, node_configs)
-            except Exception as e:
-                import logging
-
-                logging.getLogger(__name__).exception(f"Background execution failed: {e}")
-
-    background_tasks.add_task(execute_background)
     return run
 
 
@@ -249,7 +196,6 @@ async def resume_run_endpoint(
 @router.post("/api/executions/{run_id}/retry", response_model=RunResponse)
 async def retry_failed_run(
     run_id: UUID,
-    background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_session),
     current_user: dict = Depends(get_current_user),
 ):
@@ -271,173 +217,22 @@ async def retry_failed_run(
             ),
         )
 
-    # Load the graph version data
-    if run.graph_version_id:
-        from app.models.graph import GraphVersion
-
-        result = await db.execute(
-            __import__("sqlalchemy")
-            .select(GraphVersion)
-            .where(GraphVersion.id == run.graph_version_id)
-        )
-        version = result.scalar_one_or_none()
-        if not version:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND, detail="Graph version not found"
-            )
-        raw_nodes = version.nodes_data or {}
-        raw_edges = version.edges_data or []
-        node_configs = version.node_configs or {}
-    else:
+    if run.graph_version_id is None:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Run has no graph version, cannot retry",
         )
 
-    nodes_data, edges_data = _unpack_version_data(raw_nodes, raw_edges)
-
-    # Reset run status
     run.status = "pending"
     run.error_message = None
+    await enqueue_run_job(
+        db,
+        run.id,
+        job_type=RunJobType.RETRY_FAILED.value,
+        commit=False,
+    )
     await db.commit()
-
-    # Execute in background
-    async def retry_background():
-        from app.db.session import AsyncSessionLocal
-        from app.engine.checkpoint import get_checkpoints
-        from app.engine.runner import run_node_with_retry
-        from app.engine.scheduler import topological_sort
-        from app.models.execution import CheckpointType, Run, RunStatus
-        from app.ws.execution_ws import ws_manager
-
-        # Capture outer-scope values to avoid UnboundLocalError
-        orig_run_id = run.id
-
-        async with AsyncSessionLocal() as bg_db:
-            try:
-                # Reload run in background session to avoid detached instance error
-                bg_run = await bg_db.get(Run, orig_run_id)
-                if not bg_run:
-                    return
-
-                # Load checkpoints from the original (failed) run to restore
-                # successful node outputs
-                checkpoints = await get_checkpoints(bg_db, orig_run_id)
-                restored_outputs = {}
-                for cp in checkpoints:
-                    if cp.checkpoint_type == CheckpointType.POST_EXEC.value and cp.node_output:
-                        restored_outputs[cp.node_id] = cp.node_output
-
-                # Determine which nodes failed
-                from app.models.execution import NodeStatus, RunNode
-                from sqlalchemy import select
-
-                failed_nodes_result = await bg_db.execute(
-                    select(RunNode).where(
-                        RunNode.run_id == orig_run_id,
-                        RunNode.status == NodeStatus.FAILED.value,
-                    )
-                )
-                failed_nodes = list(failed_nodes_result.scalars().all())
-                failed_node_ids = set(n.node_id for n in failed_nodes)
-
-                # If no failed nodes, just run everything from scratch
-                if not failed_node_ids:
-                    executor = DAGExecutor(bg_db, ws_manager)
-                    await executor.execute(bg_run, nodes_data, edges_data, node_configs)
-                    return
-
-                # Compute topological levels
-                levels = topological_sort(nodes_data, edges_data)
-
-                # Build exec_state from restored checkpoints
-                from app.models.graph import Graph
-
-                owner_result = await bg_db.execute(
-                    select(Graph.owner_id).where(Graph.id == bg_run.graph_id)
-                )
-                owner_id = owner_result.scalar_one_or_none()
-                if owner_id is None:
-                    raise RuntimeError("Graph owner not found")
-                exec_state: dict = {
-                    "outputs": dict(restored_outputs),
-                    "owner_id": str(owner_id),
-                }
-
-                # Re-execute only failed nodes (and any downstream nodes that
-                # depend on them)
-                nodes_to_reexecute = set(failed_node_ids)
-
-                # Find all downstream nodes of failed nodes
-                for edge in edges_data:
-                    source = edge.get("source", edge.get("source_id"))
-                    target = edge.get("target", edge.get("target_id"))
-                    if source in nodes_to_reexecute:
-                        nodes_to_reexecute.add(target)
-
-                bg_run.status = RunStatus.RUNNING.value
-                await bg_db.commit()
-
-                # Execute levels, skipping already-completed nodes
-                for level_nodes in levels:
-                    nodes_in_level = [n for n in level_nodes if n in nodes_to_reexecute]
-                    if not nodes_in_level:
-                        continue
-
-                    for node_id in nodes_in_level:
-                        node_def = nodes_data[node_id]
-                        node_type = node_def.get("type", node_def.get("node_type", "unknown"))
-                        node_config = (node_configs or {}).get(node_id, {})
-
-                        # Collect inputs from restored outputs or re-executed outputs
-                        inputs = {}
-                        for edge in edges_data:
-                            target = edge.get("target", edge.get("target_id"))
-                            source = edge.get("source", edge.get("source_id"))
-                            source_port = edge.get("source_port", "output")
-                            target_port = edge.get("target_port", "input")
-                            if target == node_id and source in exec_state.get("outputs", {}):
-                                source_output = exec_state["outputs"][source]
-                                if isinstance(source_output, dict):
-                                    inputs[target_port] = source_output.get(
-                                        source_port, source_output
-                                    )
-                                else:
-                                    inputs[target_port] = source_output
-
-                        run_node = await run_node_with_retry(
-                            db=bg_db,
-                            run_id=orig_run_id,
-                            node_id=node_id,
-                            node_type=node_type,
-                            config=node_config,
-                            input_data=inputs,
-                            state=exec_state,
-                        )
-
-                        if run_node.output_data and run_node.status == "completed":
-                            exec_state["outputs"][node_id] = run_node.output_data
-                        elif run_node.status == "failed":
-                            bg_run.status = RunStatus.FAILED.value
-                            bg_run.error_message = (
-                                f"Retry failed at node {node_id}: {run_node.error_message}"
-                            )
-                            await bg_db.commit()
-                            return
-
-                if bg_run.status == RunStatus.RUNNING.value:
-                    bg_run.status = RunStatus.COMPLETED.value
-                    await bg_db.commit()
-
-            except Exception as e:
-                import logging
-
-                logging.getLogger(__name__).exception(f"Retry execution failed: {e}")
-                bg_run.status = RunStatus.FAILED.value
-                bg_run.error_message = str(e)
-                await bg_db.commit()
-
-    background_tasks.add_task(retry_background)
+    await db.refresh(run)
     return run
 
 
@@ -448,7 +243,6 @@ async def retry_failed_run(
 )
 async def replay_run(
     run_id: UUID,
-    background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_session),
     current_user: dict = Depends(get_current_user),
 ):
@@ -461,63 +255,18 @@ async def replay_run(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found")
     await _check_run_access(run, current_user, db)
 
-    # Load the graph version data
-    if run.graph_version_id:
-        from app.models.graph import GraphVersion
-
-        result = await db.execute(
-            __import__("sqlalchemy")
-            .select(GraphVersion)
-            .where(GraphVersion.id == run.graph_version_id)
-        )
-        version = result.scalar_one_or_none()
-        if not version:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND, detail="Graph version not found"
-            )
-        raw_nodes = version.nodes_data or {}
-        raw_edges = version.edges_data or []
-        node_configs = version.node_configs or {}
-    else:
+    if run.graph_version_id is None:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Run has no graph version, cannot replay",
         )
 
-    nodes_data, edges_data = _unpack_version_data(raw_nodes, raw_edges)
-
-    # Create a new run
     new_run = await create_run(
         db,
         graph_id=run.graph_id,
         triggered_by=current_user["user_id"],
         trigger_type="manual",
         graph_version_id=run.graph_version_id,
+        enqueue_job_type=RunJobType.FULL.value,
     )
-
-    # Execute in background
-    async def replay_background():
-        from app.db.session import AsyncSessionLocal
-        from app.ws.execution_ws import ws_manager
-
-        # Capture outer-scope values to avoid UnboundLocalError
-        new_run_id = new_run.id
-
-        async with AsyncSessionLocal() as bg_db:
-            try:
-                # Reload new_run in background session to avoid detached instance error
-                from app.models.execution import Run
-
-                bg_run = await bg_db.get(Run, new_run_id)
-                if not bg_run:
-                    return
-
-                executor = DAGExecutor(bg_db, ws_manager)
-                await executor.execute(bg_run, nodes_data, edges_data, node_configs)
-            except Exception as e:
-                import logging
-
-                logging.getLogger(__name__).exception(f"Replay execution failed: {e}")
-
-    background_tasks.add_task(replay_background)
     return new_run

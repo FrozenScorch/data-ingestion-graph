@@ -995,44 +995,24 @@ class TestRunRetry:
         mock_run_result.scalar_one_or_none.return_value = run
         mock_db.execute = AsyncMock(return_value=mock_run_result)
 
-        # Mock BackgroundTasks
-        mock_bg_tasks = MagicMock()
-
-        with patch("app.api.executions.get_run", new_callable=AsyncMock, return_value=run):
-            with patch(
-                "app.api.executions.get_graph_versions", new_callable=AsyncMock, return_value=[]
-            ):
-                # Need to mock the graph version lookup inside the endpoint
-                mock_version_result = MagicMock()
-                mock_version = MagicMock()
-                mock_version.nodes_data = {"node-1": {"id": "node-1", "type": "file_source"}}
-                mock_version.edges_data = []
-                mock_version.node_configs = {}
-                mock_version_result.scalar_one_or_none.return_value = mock_version
-
-                # Override execute for the graph version query
-                original_execute = mock_db.execute
-
-                call_count = [0]
-
-                async def execute_side_effect(query):
-                    call_count[0] += 1
-                    if call_count[0] == 1:
-                        return mock_run_result
-                    return mock_version_result
-
-                mock_db.execute = AsyncMock(side_effect=execute_side_effect)
-
-                result = await retry_failed_run(
-                    run_id=run.id,
-                    background_tasks=mock_bg_tasks,
-                    db=mock_db,
-                    current_user={"user_id": _make_uuid(), "role": "admin"},
-                )
+        with (
+            patch("app.api.executions.get_run", new_callable=AsyncMock, return_value=run),
+            patch("app.api.executions.enqueue_run_job", new_callable=AsyncMock) as enqueue,
+        ):
+            result = await retry_failed_run(
+                run_id=run.id,
+                db=mock_db,
+                current_user={"user_id": _make_uuid(), "role": "admin"},
+            )
 
         assert result.status == "pending"
         assert result.error_message is None
-        mock_bg_tasks.add_task.assert_called_once()
+        enqueue.assert_awaited_once_with(
+            mock_db,
+            run.id,
+            job_type="retry_failed",
+            commit=False,
+        )
 
     @pytest.mark.asyncio
     async def test_retry_run_not_failed(self):
@@ -1047,7 +1027,6 @@ class TestRunRetry:
             with pytest.raises(HTTPException) as exc_info:
                 await retry_failed_run(
                     run_id=run.id,
-                    background_tasks=MagicMock(),
                     db=mock_db,
                     current_user={"user_id": _make_uuid(), "role": "admin"},
                 )
@@ -1066,7 +1045,6 @@ class TestRunRetry:
             with pytest.raises(HTTPException) as exc_info:
                 await retry_failed_run(
                     run_id=_make_uuid(),
-                    background_tasks=MagicMock(),
                     db=mock_db,
                     current_user={"user_id": _make_uuid(), "role": "admin"},
                 )
@@ -1092,6 +1070,7 @@ class TestRunReplay:
 
         new_run = _make_run(status=RunStatus.PENDING.value)
         new_run.error_message = None
+        user_id = _make_uuid()
 
         # Mock the graph version lookup inside the endpoint
         mock_version = MagicMock()
@@ -1106,18 +1085,22 @@ class TestRunReplay:
         with patch("app.api.executions.get_run", new_callable=AsyncMock, return_value=run):
             with patch(
                 "app.api.executions.create_run", new_callable=AsyncMock, return_value=new_run
-            ):
-                mock_bg_tasks = MagicMock()
-
+            ) as create:
                 result = await replay_run(
                     run_id=run.id,
-                    background_tasks=mock_bg_tasks,
                     db=mock_db,
-                    current_user={"user_id": _make_uuid(), "role": "admin"},
+                    current_user={"user_id": user_id, "role": "admin"},
                 )
 
         assert result is new_run
-        mock_bg_tasks.add_task.assert_called_once()
+        create.assert_awaited_once_with(
+            mock_db,
+            graph_id=run.graph_id,
+            triggered_by=user_id,
+            trigger_type="manual",
+            graph_version_id=run.graph_version_id,
+            enqueue_job_type="full",
+        )
 
     @pytest.mark.asyncio
     async def test_replay_run_not_found(self):
@@ -1131,7 +1114,6 @@ class TestRunReplay:
             with pytest.raises(HTTPException) as exc_info:
                 await replay_run(
                     run_id=_make_uuid(),
-                    background_tasks=MagicMock(),
                     db=mock_db,
                     current_user={"user_id": _make_uuid(), "role": "admin"},
                 )

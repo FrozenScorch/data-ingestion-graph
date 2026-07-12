@@ -5,7 +5,7 @@ Loads from .env file with environment variable overrides.
 
 import logging
 
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 logger = logging.getLogger(__name__)
@@ -72,6 +72,19 @@ class Settings(BaseSettings):
     max_upload_request_mb: int = Field(default=250, ge=1)
     max_upload_storage_mb: int = Field(default=1024, ge=1)
     query_artifact_ttl_hours: int = Field(default=168, ge=1)
+
+    # Durable execution worker
+    run_worker_enabled: bool = True
+    run_worker_concurrency: int = Field(default=1, ge=1, le=32)
+    run_worker_poll_seconds: float = Field(default=1.0, ge=0.1, le=60)
+    run_worker_lease_seconds: int = Field(default=60, ge=15, le=3600)
+    run_worker_heartbeat_seconds: int = Field(default=15, ge=5, le=300)
+
+    @model_validator(mode="after")
+    def validate_worker_lease(self) -> "Settings":
+        if self.run_worker_heartbeat_seconds * 2 >= self.run_worker_lease_seconds:
+            raise ValueError("run worker heartbeat must be less than half the lease duration")
+        return self
 
     # Logging
     log_level: str = "INFO"
