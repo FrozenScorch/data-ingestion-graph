@@ -1,13 +1,12 @@
 """
 Lineage service: query data lineage and provenance records.
 """
-from uuid import UUID
 from typing import Optional
-
-from sqlalchemy import select, func
-from sqlalchemy.ext.asyncio import AsyncSession
+from uuid import UUID
 
 from app.models.lineage import DataLineage, Provenance
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 
 async def get_lineage_for_run(
@@ -48,6 +47,7 @@ async def get_lineage_for_graph(
 async def get_lineage_for_source(
     db: AsyncSession,
     source_ref: str,
+    owner_id: UUID | None = None,
 ) -> list[dict]:
     """
     Find all runs that consumed a specific source.
@@ -56,10 +56,18 @@ async def get_lineage_for_source(
     entries associated with those runs.
     """
     # First, find runs that have provenance records for this source
+    provenance_query = select(Provenance).where(Provenance.source_ref == source_ref)
+    if owner_id is not None:
+        from app.models.execution import Run
+        from app.models.graph import Graph
+
+        provenance_query = (
+            provenance_query.join(Run, Provenance.run_id == Run.id)
+            .join(Graph, Run.graph_id == Graph.id)
+            .where(Graph.owner_id == owner_id)
+        )
     provenance_result = await db.execute(
-        select(Provenance)
-        .where(Provenance.source_ref == source_ref)
-        .order_by(Provenance.created_at.desc())
+        provenance_query.order_by(Provenance.created_at.desc())
     )
     provenance_records = list(provenance_result.scalars().all())
 

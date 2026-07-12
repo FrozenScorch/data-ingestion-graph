@@ -1,6 +1,6 @@
 # Studio and SDK readiness roadmap
 
-Baseline: `main` after PR #29 (`44d7a11`), audited 2026-07-11.
+Baseline: `main` after PR #31 (`43678c3`), audited 2026-07-11.
 
 ## Executive assessment
 
@@ -139,9 +139,10 @@ Exit: multiple teams can operate audited, recoverable syncs on a LAN or private 
 - Literal “any source to any sync type” is an ecosystem, not a finite feature. The scalable
   target is a conformance-tested plugin platform where new connectors are cheap and safe.
 
-## Highest-leverage next feature
+## Highest-leverage next features
 
-Build secure browser upload plus server-owned file roots, then run it through an SDK
-file-source adapter with persistent state. It immediately makes the documents template
-real from any LAN browser and establishes the security and UX pattern needed by Drive,
-SharePoint, S3, email attachments, and watched folders.
+1. Close the remaining tenant-read authorization gaps in DLQ and lineage APIs.
+2. Add a first-class SDK transform contract and ordered transform chain so mapping,
+   normalization, filtering, and chunking are reusable outside Studio.
+3. Add a database-backed durable run queue with leases, heartbeat, and restart recovery,
+   then persist SDK source state per graph/node only after downstream writes are durable.

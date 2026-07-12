@@ -14,7 +14,7 @@ async def health_check(response: Response):
 
     Performs live checks against both database and Redis.
     - Database failure: returns HTTP 503 (service unavailable).
-    - Redis failure: returns HTTP 503 (degraded but not fatal).
+    - Redis failure: returns HTTP 200 with degraded status (cache is optional).
 
     Falls back to startup-time health status if live checks fail
     due to transient issues.
@@ -31,6 +31,7 @@ async def health_check(response: Response):
         health_status["components"]["database"] = {"status": "ok"}
     except Exception as e:
         has_error = True
+        health_status["status"] = "unhealthy"
         health_status["components"]["database"] = {"status": "error", "detail": str(e)}
 
     # Check Redis (live connectivity)

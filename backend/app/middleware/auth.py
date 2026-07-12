@@ -1,23 +1,20 @@
 """
 JWT authentication middleware for /api/* routes.
 """
-import secrets
-from typing import Optional
 from uuid import UUID
-
-from fastapi import Depends, HTTPException, Request, status
-from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import get_session
 from app.services.auth_service import decode_token, get_user_by_id
+from fastapi import Depends, HTTPException, Request, status
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from sqlalchemy.ext.asyncio import AsyncSession
 
 security = HTTPBearer(auto_error=False)
 
 
 async def get_current_user(
     request: Request,
-    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
+    credentials: HTTPAuthorizationCredentials | None = Depends(security),
     db: AsyncSession = Depends(get_session),
 ) -> dict:
     """
@@ -40,7 +37,7 @@ async def get_current_user(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or expired token",
             headers={"WWW-Authenticate": "Bearer"},
-        )
+        ) from None
 
     if payload.get("type") != "access":
         raise HTTPException(
@@ -55,7 +52,16 @@ async def get_current_user(
             detail="Invalid token payload",
         )
 
-    user = await get_user_by_id(db, UUID(user_id))
+    try:
+        parsed_user_id = user_id if isinstance(user_id, UUID) else UUID(str(user_id))
+    except (TypeError, ValueError, AttributeError):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid token payload",
+            headers={"WWW-Authenticate": "Bearer"},
+        ) from None
+
+    user = await get_user_by_id(db, parsed_user_id)
     if user is None or not user.is_active:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,

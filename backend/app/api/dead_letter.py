@@ -5,15 +5,16 @@ Dead Letter Queue API routes: list, retry, resolve, and delete DLQ items.
 import uuid
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel, Field
-from sqlalchemy import select, func
-from sqlalchemy.ext.asyncio import AsyncSession
-
 from app.db.session import get_session
 from app.middleware.auth import get_current_user
 from app.models.dead_letter import DeadLetterQueue
+from app.models.execution import Run
+from app.models.graph import Graph
 from app.services.graph_service import get_graph
+from fastapi import APIRouter, Depends, HTTPException, status
+from pydantic import BaseModel, Field
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 
 async def _check_dlq_item_access(item, current_user, db):
@@ -54,6 +55,19 @@ async def list_dlq_items(
     """List DLQ items with optional filtering and pagination."""
     query = select(DeadLetterQueue)
     count_query = select(func.count()).select_from(DeadLetterQueue)
+
+    # DLQ payloads can contain source records and connector errors. Non-admin
+    # users may only enumerate items belonging to graphs they own. Inner joins
+    # intentionally hide orphaned legacy items because they cannot be safely
+    # attributed to a tenant; administrators can still inspect those items.
+    if current_user["role"] != "admin":
+        owner_filter = Graph.owner_id == current_user["user_id"]
+        query = query.join(Run, DeadLetterQueue.run_id == Run.id).join(
+            Graph, Run.graph_id == Graph.id
+        ).where(owner_filter)
+        count_query = count_query.join(Run, DeadLetterQueue.run_id == Run.id).join(
+            Graph, Run.graph_id == Graph.id
+        ).where(owner_filter)
 
     if resolved is not None:
         query = query.where(DeadLetterQueue.resolved == resolved)
