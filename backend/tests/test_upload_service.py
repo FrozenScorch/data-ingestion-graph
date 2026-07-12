@@ -256,7 +256,10 @@ async def test_quota_lock_blocks_other_process_and_recovers_after_crash(upload_r
     )
     process.start()
     try:
-        assert ready.wait(10), "child process did not acquire quota lock"
+        # Windows spawn re-imports the full application in the child and can
+        # exceed ten seconds on Defender/OneDrive-backed workspaces.
+        startup_timeout = 30 if os.name == "nt" else 10
+        assert ready.wait(startup_timeout), "child process did not acquire quota lock"
         monkeypatch.setattr(upload_service, "QUOTA_LOCK_WAIT_SECONDS", 0.2)
         with pytest.raises(HTTPException) as blocked:
             async with upload_service._owner_quota_lock(owner):
