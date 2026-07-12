@@ -15,6 +15,7 @@ from ingestion_graph.pipeline import Pipeline, PipelineResult
 from ingestion_graph.query import Query, QueryHit, QueryRequest, QueryResult, QueryStore
 from ingestion_graph.secrets import EnvSecretProvider, SecretRef, SecretValue
 from ingestion_graph.state import MemoryStateStore, SQLiteStateStore
+from ingestion_graph.transforms import Transform
 
 __all__ = [
     "BlobRef",
@@ -37,7 +38,8 @@ __all__ = [
     "SecretValue",
     "TableBatch",
     "Tombstone",
+    "Transform",
     "stable_record_id",
 ]
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"

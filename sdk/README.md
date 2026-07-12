@@ -5,19 +5,22 @@ by Enterprise Data Ingestion Graph Studio and by any other Python project.
 
 It owns connector contracts, canonical envelopes, resumable checkpoints,
 idempotent destinations, artifacts, secret references, and queryable current
-views. It has no dependency on FastAPI, Svelte, PostgreSQL, Redis, or Studio.
+views. Ordered transform chains make mapping, filtering, and normalization
+reusable across embedded projects. The SDK has no dependency on FastAPI,
+Svelte, PostgreSQL, Redis, or Studio.
 
 ## Install
 
 From any Python project today, install the SDK directly from its independently
-packaged GitHub subdirectory. Pin a commit for reproducible projects:
+packaged GitHub subdirectory:
 
 ```shell
-python -m pip install "ingestion-graph[discord] @ git+https://github.com/FrozenScorch/data-ingestion-graph.git@44d7a11df3152ab54dbf7040e4654254c1ea1723#subdirectory=sdk"
+python -m pip install "ingestion-graph[discord] @ git+https://github.com/FrozenScorch/data-ingestion-graph.git@main#subdirectory=sdk"
 ```
 
-Track `@main` only when intentionally following SDK development. The package is
-not published to PyPI yet. From a checkout of this monorepo:
+For reproducible deployments, replace `@main` with a reviewed commit SHA or
+release tag. The package is not published to PyPI yet. From a checkout of this
+monorepo:
 
 ```shell
 python -m pip install -e "./sdk[discord]"
@@ -38,15 +41,23 @@ durable FTS5-backed current view.
 ## Embedded API
 
 ```python
-from ingestion_graph import Pipeline, QueryRequest, SQLiteStateStore
+from collections.abc import Sequence
+
+from ingestion_graph import Envelope, Pipeline, QueryRequest, SQLiteStateStore, Transform
 from ingestion_graph.destinations import SQLiteCollection
 from ingestion_graph.sources import JsonlSource
 
 collection = SQLiteCollection(".ingestion/people.db")
+
+class ActiveRecords(Transform):
+    async def apply(self, records: Sequence[Envelope]) -> Sequence[Envelope]:
+        return [record for record in records if record.metadata.get("active", True)]
+
 await Pipeline(
     "people",
     JsonlSource("data/people.jsonl"),
     collection,
+    transforms=[ActiveRecords()],
     state_store=SQLiteStateStore(".ingestion/state.db"),
 ).run()
 
@@ -58,6 +69,10 @@ for hit in await collection.query(QueryRequest("Ada", limit=5)):
 
 - Sources emit typed envelopes and explicit state messages.
 - State advances only after the destination durably writes and flushes a page.
+- Transforms run in order on checkpoint-bounded batches before destination writes.
+- A transform may map, filter, or expand records but cannot move them across streams.
+- Transform changes do not invalidate saved source state automatically; use a new
+  pipeline name or reset its state when existing records must be reprocessed.
 - Resumable destinations must declare idempotency.
 - UPSERT and DELETE operations share stable source/stream/record identity.
 - Large payloads can be represented by content-addressed `BlobRef` values.

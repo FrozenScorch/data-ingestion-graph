@@ -1,4 +1,5 @@
 from collections.abc import AsyncIterator, Mapping, Sequence
+from dataclasses import replace
 
 import pytest
 
@@ -16,6 +17,7 @@ from ingestion_graph.messages import RecordMessage, SourceMessage, StateMessage
 from ingestion_graph.models import Envelope, RecordPayload
 from ingestion_graph.pipeline import Pipeline
 from ingestion_graph.state import MemoryStateStore
+from ingestion_graph.transforms import Transform
 
 
 class ExampleSource(Source):
@@ -51,6 +53,18 @@ class ExampleSource(Source):
             yield StateMessage("items", {"cursor": "2"})
 
 
+class FailingCheckSource(ExampleSource):
+    def __init__(self):
+        super().__init__()
+        self.closed = False
+
+    async def check(self):
+        return CheckResult(False, "source unavailable")
+
+    async def close(self):
+        self.closed = True
+
+
 class FailingDestination(Destination):
     idempotent = True
 
@@ -62,6 +76,88 @@ class FailingDestination(Destination):
 
     async def flush(self):
         return None
+
+
+class RecordingDestination(Destination):
+    idempotent = True
+
+    def __init__(self):
+        self.records: list[Envelope] = []
+        self.write_calls = 0
+        self.flush_calls = 0
+        self.closed = False
+
+    async def check(self):
+        return CheckResult(True)
+
+    async def write(self, records):
+        self.write_calls += 1
+        self.records.extend(records)
+        return len(records)
+
+    async def flush(self):
+        self.flush_calls += 1
+
+    async def close(self):
+        self.closed = True
+
+
+class AddOne(Transform):
+    def __init__(self):
+        self.closed = False
+
+    async def apply(self, records):
+        return [
+            replace(record, payload=RecordPayload({"value": record.payload.data["value"] + 1}))
+            for record in records
+            if isinstance(record.payload, RecordPayload)
+        ]
+
+    async def close(self):
+        self.closed = True
+
+
+class MultiplyByTen(Transform):
+    async def apply(self, records):
+        return [
+            replace(record, payload=RecordPayload({"value": record.payload.data["value"] * 10}))
+            for record in records
+            if isinstance(record.payload, RecordPayload)
+        ]
+
+
+class DropAll(Transform):
+    async def apply(self, records):
+        return []
+
+
+class DuplicateEach(Transform):
+    async def apply(self, records):
+        return [
+            expanded
+            for record in records
+            for expanded in (record, replace(record, id=f"{record.id}-copy"))
+        ]
+
+
+class FailingTransform(Transform):
+    async def apply(self, records):
+        raise RuntimeError("transform unavailable")
+
+
+class InvalidTransform(Transform):
+    async def apply(self, records):
+        return None
+
+
+class FailingCloseTransform(FailingTransform):
+    async def close(self):
+        raise RuntimeError("cleanup unavailable")
+
+
+class MoveStream(Transform):
+    async def apply(self, records):
+        return [replace(record, stream="other") for record in records]
 
 
 @pytest.mark.asyncio
@@ -96,6 +192,144 @@ async def test_pipeline_does_not_advance_state_when_destination_fails():
     with pytest.raises(RuntimeError, match="destination unavailable"):
         await Pipeline("example", ExampleSource(), FailingDestination(), state_store=state).run()
     assert await state.load("example", "example", "items") == {}
+
+
+@pytest.mark.asyncio
+async def test_pipeline_closes_all_resources_when_preflight_fails():
+    source = FailingCheckSource()
+    destination = RecordingDestination()
+    transform = AddOne()
+
+    with pytest.raises(ProtocolError, match="Source check failed: source unavailable"):
+        await Pipeline(
+            "example",
+            source,
+            destination,
+            transforms=[transform],
+            state_store=MemoryStateStore(),
+        ).run()
+
+    assert source.closed is True
+    assert destination.closed is True
+    assert transform.closed is True
+
+
+@pytest.mark.asyncio
+async def test_pipeline_applies_transforms_in_order_before_flush_and_checkpoint():
+    state = MemoryStateStore()
+    destination = RecordingDestination()
+    add_one = AddOne()
+
+    result = await Pipeline(
+        "example",
+        ExampleSource(),
+        destination,
+        transforms=[add_one, MultiplyByTen()],
+        state_store=state,
+    ).run()
+
+    assert [record.payload.data["value"] for record in destination.records] == [20, 30]
+    assert destination.flush_calls == 1
+    assert result.records_written == 2
+    assert await state.load("example", "example", "items") == {"cursor": "2"}
+    assert add_one.closed is True
+
+
+@pytest.mark.asyncio
+async def test_pipeline_can_filter_entire_batch_and_still_checkpoint():
+    state = MemoryStateStore()
+    destination = RecordingDestination()
+
+    result = await Pipeline(
+        "example",
+        ExampleSource(),
+        destination,
+        transforms=[DropAll()],
+        state_store=state,
+    ).run()
+
+    assert destination.write_calls == 0
+    assert destination.flush_calls == 1
+    assert result.records_written == 0
+    assert await state.load("example", "example", "items") == {"cursor": "2"}
+
+
+@pytest.mark.asyncio
+async def test_pipeline_can_expand_a_checkpoint_batch():
+    destination = RecordingDestination()
+
+    result = await Pipeline(
+        "example",
+        ExampleSource(),
+        destination,
+        transforms=[DuplicateEach()],
+        state_store=MemoryStateStore(),
+    ).run()
+
+    assert [record.id for record in destination.records] == ["1", "1-copy", "2", "2-copy"]
+    assert result.records_written == 4
+
+
+@pytest.mark.asyncio
+async def test_pipeline_does_not_advance_state_when_transform_fails():
+    state = MemoryStateStore()
+    destination = RecordingDestination()
+    add_one = AddOne()
+
+    with pytest.raises(RuntimeError, match="transform unavailable"):
+        await Pipeline(
+            "example",
+            ExampleSource(),
+            destination,
+            transforms=[add_one, FailingTransform()],
+            state_store=state,
+        ).run()
+
+    assert destination.write_calls == 0
+    assert await state.load("example", "example", "items") == {}
+    assert add_one.closed is True
+
+
+@pytest.mark.asyncio
+async def test_pipeline_rejects_transform_output_for_another_stream():
+    state = MemoryStateStore()
+
+    with pytest.raises(ProtocolError, match="moved a record"):
+        await Pipeline(
+            "example",
+            ExampleSource(),
+            RecordingDestination(),
+            transforms=[MoveStream()],
+            state_store=state,
+        ).run()
+
+    assert await state.load("example", "example", "items") == {}
+
+
+@pytest.mark.asyncio
+async def test_pipeline_rejects_non_iterable_transform_output():
+    with pytest.raises(ProtocolError, match="non-iterable"):
+        await Pipeline(
+            "example",
+            ExampleSource(),
+            RecordingDestination(),
+            transforms=[InvalidTransform()],
+            state_store=MemoryStateStore(),
+        ).run()
+
+
+@pytest.mark.asyncio
+async def test_cleanup_failure_does_not_mask_transform_failure():
+    with pytest.raises(RuntimeError, match="transform unavailable") as exc_info:
+        await Pipeline(
+            "example",
+            ExampleSource(),
+            RecordingDestination(),
+            transforms=[FailingCloseTransform()],
+            state_store=MemoryStateStore(),
+        ).run()
+
+    assert any("cleanup unavailable" in note for note in exc_info.value.__notes__)
 
 
 @pytest.mark.asyncio

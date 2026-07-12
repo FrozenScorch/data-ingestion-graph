@@ -10,6 +10,7 @@ from ingestion_graph.errors import ProtocolError
 from ingestion_graph.messages import LogMessage, RecordMessage, SchemaMessage, StateMessage
 from ingestion_graph.models import Envelope
 from ingestion_graph.state import SQLiteStateStore, StateStore
+from ingestion_graph.transforms import Transform
 
 EventHandler = Callable[[object], Awaitable[None]]
 
@@ -29,6 +30,7 @@ class Pipeline:
         source: Source,
         destination: Destination,
         *,
+        transforms: Sequence[Transform] = (),
         state_store: StateStore | None = None,
         on_event: EventHandler | None = None,
     ) -> None:
@@ -39,22 +41,24 @@ class Pipeline:
         self.name = name
         self.source = source
         self.destination = destination
+        self.transforms = tuple(transforms)
         self.state_store = state_store or SQLiteStateStore()
         self.on_event = on_event
 
     async def run(self, streams: Sequence[StreamDescriptor] | None = None) -> PipelineResult:
-        source_name = self.source.spec().name
-        source_check = await self.source.check()
-        if not source_check.ok:
-            raise ProtocolError(f"Source check failed: {source_check.message}")
-        destination_check = await self.destination.check()
-        if not destination_check.ok:
-            raise ProtocolError(f"Destination check failed: {destination_check.message}")
-
-        selected_streams = list(streams or await self.source.discover())
-        records_written = 0
-        checkpoints = 0
+        run_error: BaseException | None = None
         try:
+            source_name = self.source.spec().name
+            source_check = await self.source.check()
+            if not source_check.ok:
+                raise ProtocolError(f"Source check failed: {source_check.message}")
+            destination_check = await self.destination.check()
+            if not destination_check.ok:
+                raise ProtocolError(f"Destination check failed: {destination_check.message}")
+
+            selected_streams = list(streams or await self.source.discover())
+            records_written = 0
+            checkpoints = 0
             for stream in selected_streams:
                 state = await self.state_store.load(self.name, source_name, stream.name)
                 pending: list[Envelope] = []
@@ -72,8 +76,11 @@ class Pipeline:
                         if message.stream != stream.name:
                             raise ProtocolError("State checkpoint belongs to a different stream")
                         if pending:
-                            newly_written = await self.destination.write(pending)
-                            if not 0 <= newly_written <= len(pending):
+                            transformed = await self._apply_transforms(pending, stream)
+                            newly_written = (
+                                await self.destination.write(transformed) if transformed else 0
+                            )
+                            if not 0 <= newly_written <= len(transformed):
                                 raise ProtocolError(
                                     "Destination returned an invalid newly-written record count"
                                 )
@@ -97,13 +104,63 @@ class Pipeline:
                         f"Source {source_name!r} ended stream {stream.name!r} "
                         "with uncheckpointed records"
                     )
-        finally:
-            await self.destination.close()
-            await self.source.close()
 
-        return PipelineResult(
-            pipeline=self.name,
-            streams_processed=len(selected_streams),
-            records_written=records_written,
-            checkpoints_committed=checkpoints,
-        )
+            return PipelineResult(
+                pipeline=self.name,
+                streams_processed=len(selected_streams),
+                records_written=records_written,
+                checkpoints_committed=checkpoints,
+            )
+        except BaseException as exc:
+            run_error = exc
+            raise
+        finally:
+            try:
+                await self._close_resources()
+            except BaseException as close_error:
+                if run_error is None:
+                    raise
+                run_error.add_note(f"Pipeline cleanup also failed: {close_error!r}")
+
+    async def _apply_transforms(
+        self,
+        records: Sequence[Envelope],
+        stream: StreamDescriptor,
+    ) -> tuple[Envelope, ...]:
+        transformed = tuple(records)
+        for transform in self.transforms:
+            result = await transform.apply(transformed)
+            try:
+                transformed = tuple(result)
+            except TypeError as exc:
+                raise ProtocolError(
+                    f"Transform {type(transform).__name__} returned a non-iterable result"
+                ) from exc
+            for record in transformed:
+                if not isinstance(record, Envelope):
+                    raise ProtocolError(
+                        f"Transform {type(transform).__name__} returned a non-Envelope value"
+                    )
+                if record.stream != stream.name:
+                    raise ProtocolError(
+                        f"Transform {type(transform).__name__} moved a record from stream "
+                        f"{stream.name!r} to {record.stream!r}"
+                    )
+        return transformed
+
+    async def _close_resources(self) -> None:
+        """Attempt every cleanup even when an earlier resource fails to close."""
+        first_error: BaseException | None = None
+        close_callbacks = [
+            *(transform.close for transform in reversed(self.transforms)),
+            self.destination.close,
+            self.source.close,
+        ]
+        for close in close_callbacks:
+            try:
+                await close()
+            except BaseException as exc:
+                if first_error is None:
+                    first_error = exc
+        if first_error is not None:
+            raise first_error
