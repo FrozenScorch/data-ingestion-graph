@@ -9,11 +9,15 @@ views. It has no dependency on FastAPI, Svelte, PostgreSQL, Redis, or Studio.
 
 ## Install
 
+From any Python project today, install the SDK directly from its independently
+packaged GitHub subdirectory. Pin a commit for reproducible projects:
+
 ```shell
-python -m pip install "ingestion-graph[discord]"
+python -m pip install "ingestion-graph[discord] @ git+https://github.com/FrozenScorch/data-ingestion-graph.git@44d7a11df3152ab54dbf7040e4654254c1ea1723#subdirectory=sdk"
 ```
 
-From this monorepo:
+Track `@main` only when intentionally following SDK development. The package is
+not published to PyPI yet. From a checkout of this monorepo:
 
 ```shell
 python -m pip install -e "./sdk[discord]"
