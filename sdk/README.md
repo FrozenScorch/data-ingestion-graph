@@ -5,7 +5,9 @@ by Enterprise Data Ingestion Graph Studio and by any other Python project.
 
 It owns connector contracts, canonical envelopes, resumable checkpoints,
 idempotent destinations, artifacts, secret references, and queryable current
-views. It has no dependency on FastAPI, Svelte, PostgreSQL, Redis, or Studio.
+views. Ordered transform chains make mapping, filtering, and normalization
+reusable across embedded projects. The SDK has no dependency on FastAPI,
+Svelte, PostgreSQL, Redis, or Studio.
 
 ## Install
 
@@ -38,15 +40,23 @@ durable FTS5-backed current view.
 ## Embedded API
 
 ```python
-from ingestion_graph import Pipeline, QueryRequest, SQLiteStateStore
+from collections.abc import Sequence
+
+from ingestion_graph import Envelope, Pipeline, QueryRequest, SQLiteStateStore, Transform
 from ingestion_graph.destinations import SQLiteCollection
 from ingestion_graph.sources import JsonlSource
 
 collection = SQLiteCollection(".ingestion/people.db")
+
+class ActiveRecords(Transform):
+    async def apply(self, records: Sequence[Envelope]) -> Sequence[Envelope]:
+        return [record for record in records if record.metadata.get("active", True)]
+
 await Pipeline(
     "people",
     JsonlSource("data/people.jsonl"),
     collection,
+    transforms=[ActiveRecords()],
     state_store=SQLiteStateStore(".ingestion/state.db"),
 ).run()
 
@@ -58,6 +68,8 @@ for hit in await collection.query(QueryRequest("Ada", limit=5)):
 
 - Sources emit typed envelopes and explicit state messages.
 - State advances only after the destination durably writes and flushes a page.
+- Transforms run in order on checkpoint-bounded batches before destination writes.
+- A transform may map, filter, or expand records but cannot move them across streams.
 - Resumable destinations must declare idempotency.
 - UPSERT and DELETE operations share stable source/stream/record identity.
 - Large payloads can be represented by content-addressed `BlobRef` values.
