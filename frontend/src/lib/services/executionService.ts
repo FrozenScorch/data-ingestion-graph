@@ -35,7 +35,8 @@ export const executionService = {
 
   /** List runs for a graph */
   async listRuns(graphId: string): Promise<RunListResponse> {
-    return api.get<RunListResponse>(`/graphs/${graphId}/runs`);
+    const params = new URLSearchParams({ graph_id: graphId });
+    return api.get<RunListResponse>(`/executions?${params.toString()}`);
   },
 
   /** List all executions across graphs */
