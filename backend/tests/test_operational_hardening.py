@@ -36,6 +36,35 @@ async def test_non_admin_dlq_list_is_scoped_to_graph_owner():
 
 
 @pytest.mark.asyncio
+async def test_non_admin_cannot_mutate_runless_dlq_item():
+    from app.api.dead_letter import _check_dlq_item_access
+
+    item = MagicMock(run_id=None)
+    with pytest.raises(HTTPException) as exc_info:
+        await _check_dlq_item_access(
+            item,
+            {"user_id": uuid4(), "role": "user"},
+            AsyncMock(),
+        )
+
+    assert exc_info.value.status_code == 404
+    assert exc_info.value.detail == "DLQ item not found"
+
+
+@pytest.mark.asyncio
+async def test_admin_can_access_runless_dlq_item():
+    from app.api.dead_letter import _check_dlq_item_access
+
+    db = AsyncMock()
+    await _check_dlq_item_access(
+        MagicMock(run_id=None),
+        {"user_id": uuid4(), "role": "admin"},
+        db,
+    )
+    db.execute.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_source_lineage_query_is_scoped_to_graph_owner():
     from app.services.lineage_service import get_lineage_for_source
 
@@ -67,9 +96,7 @@ async def test_source_lineage_endpoint_passes_owner_scope():
             current_user={"user_id": owner_id, "role": "user"},
         )
 
-    get_source.assert_awaited_once_with(
-        ANY, "s3://private/object", owner_id=owner_id
-    )
+    get_source.assert_awaited_once_with(ANY, "s3://private/object", owner_id=owner_id)
     assert result["total"] == 0
 
 
@@ -92,6 +119,7 @@ async def test_database_health_failure_returns_unhealthy_503():
     assert response.status_code == 503
     assert result["status"] == "unhealthy"
     assert result["components"]["database"]["status"] == "error"
+    assert "detail" not in result["components"]["database"]
 
 
 @pytest.mark.asyncio
@@ -108,9 +136,7 @@ async def test_malformed_access_token_subject_returns_401():
         patch("app.middleware.auth.get_user_by_id", get_user),
         pytest.raises(HTTPException) as exc_info,
     ):
-        await get_current_user(
-            request=MagicMock(), credentials=credentials, db=AsyncMock()
-        )
+        await get_current_user(request=MagicMock(), credentials=credentials, db=AsyncMock())
 
     assert exc_info.value.status_code == 401
     assert exc_info.value.detail == "Invalid token payload"

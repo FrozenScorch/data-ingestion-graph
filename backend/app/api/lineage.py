@@ -1,6 +1,7 @@
 """
 Lineage API routes: query data lineage and provenance.
 """
+
 from uuid import UUID
 
 from app.db.session import get_session
@@ -19,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 async def _check_lineage_run_access(run_id, current_user, db):
     from app.models.execution import Run
+
     result = await db.execute(select(Run).where(Run.id == run_id))
     run = result.scalar_one_or_none()
     if not run:
@@ -27,7 +29,8 @@ async def _check_lineage_run_access(run_id, current_user, db):
     if not graph:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Parent graph not found")
     if current_user["role"] != "admin" and str(graph.owner_id) != str(current_user["user_id"]):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No permission")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found")
+
 
 router = APIRouter(prefix="/api/lineage", tags=["lineage"])
 
@@ -73,7 +76,7 @@ async def list_lineage_for_graph(
     if not graph:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Graph not found")
     if current_user["role"] != "admin" and str(graph.owner_id) != str(current_user["user_id"]):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No permission")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Graph not found")
     entries = await get_lineage_for_graph(db, graph_id, limit=limit)
     return {
         "graph_id": str(graph_id),

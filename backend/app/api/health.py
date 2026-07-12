@@ -2,9 +2,13 @@
 Health check endpoint: verifies database and Redis connectivity.
 Performs live connectivity checks rather than relying on cached startup state.
 """
+
+import logging
+
 from fastapi import APIRouter, Response
 
 router = APIRouter(tags=["health"])
+logger = logging.getLogger(__name__)
 
 
 @router.get("/health")
@@ -25,24 +29,29 @@ async def health_check(response: Response):
     # Check database (live connectivity)
     try:
         from app.db.session import AsyncSessionLocal
+
         async with AsyncSessionLocal() as session:
             from sqlalchemy import text
+
             await session.execute(text("SELECT 1"))
         health_status["components"]["database"] = {"status": "ok"}
     except Exception as e:
+        logger.warning("Database health check failed", exc_info=e)
         has_error = True
         health_status["status"] = "unhealthy"
-        health_status["components"]["database"] = {"status": "error", "detail": str(e)}
+        health_status["components"]["database"] = {"status": "error"}
 
     # Check Redis (live connectivity)
     try:
         from app.db.redis import get_redis
+
         redis = get_redis()
         await redis.ping()
         health_status["components"]["redis"] = {"status": "ok"}
     except Exception as e:
+        logger.warning("Redis health check failed", exc_info=e)
         # Redis is optional; report unhealthy but don't fail the endpoint
-        health_status["components"]["redis"] = {"status": "error", "detail": str(e)}
+        health_status["components"]["redis"] = {"status": "error"}
         # Only mark as degraded if database is fine but Redis is not
         if not has_error:
             health_status["status"] = "degraded"
