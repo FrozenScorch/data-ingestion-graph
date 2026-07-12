@@ -46,19 +46,19 @@ class Pipeline:
         self.on_event = on_event
 
     async def run(self, streams: Sequence[StreamDescriptor] | None = None) -> PipelineResult:
-        source_name = self.source.spec().name
-        source_check = await self.source.check()
-        if not source_check.ok:
-            raise ProtocolError(f"Source check failed: {source_check.message}")
-        destination_check = await self.destination.check()
-        if not destination_check.ok:
-            raise ProtocolError(f"Destination check failed: {destination_check.message}")
-
-        selected_streams = list(streams or await self.source.discover())
-        records_written = 0
-        checkpoints = 0
         run_error: BaseException | None = None
         try:
+            source_name = self.source.spec().name
+            source_check = await self.source.check()
+            if not source_check.ok:
+                raise ProtocolError(f"Source check failed: {source_check.message}")
+            destination_check = await self.destination.check()
+            if not destination_check.ok:
+                raise ProtocolError(f"Destination check failed: {destination_check.message}")
+
+            selected_streams = list(streams or await self.source.discover())
+            records_written = 0
+            checkpoints = 0
             for stream in selected_streams:
                 state = await self.state_store.load(self.name, source_name, stream.name)
                 pending: list[Envelope] = []
@@ -104,6 +104,13 @@ class Pipeline:
                         f"Source {source_name!r} ended stream {stream.name!r} "
                         "with uncheckpointed records"
                     )
+
+            return PipelineResult(
+                pipeline=self.name,
+                streams_processed=len(selected_streams),
+                records_written=records_written,
+                checkpoints_committed=checkpoints,
+            )
         except BaseException as exc:
             run_error = exc
             raise
@@ -114,13 +121,6 @@ class Pipeline:
                 if run_error is None:
                     raise
                 run_error.add_note(f"Pipeline cleanup also failed: {close_error!r}")
-
-        return PipelineResult(
-            pipeline=self.name,
-            streams_processed=len(selected_streams),
-            records_written=records_written,
-            checkpoints_committed=checkpoints,
-        )
 
     async def _apply_transforms(
         self,

@@ -71,6 +71,8 @@ for hit in await collection.query(QueryRequest("Ada", limit=5)):
 - State advances only after the destination durably writes and flushes a page.
 - Transforms run in order on checkpoint-bounded batches before destination writes.
 - A transform may map, filter, or expand records but cannot move them across streams.
+- Transform changes do not invalidate saved source state automatically; use a new
+  pipeline name or reset its state when existing records must be reprocessed.
 - Resumable destinations must declare idempotency.
 - UPSERT and DELETE operations share stable source/stream/record identity.
 - Large payloads can be represented by content-addressed `BlobRef` values.

@@ -53,6 +53,18 @@ class ExampleSource(Source):
             yield StateMessage("items", {"cursor": "2"})
 
 
+class FailingCheckSource(ExampleSource):
+    def __init__(self):
+        super().__init__()
+        self.closed = False
+
+    async def check(self):
+        return CheckResult(False, "source unavailable")
+
+    async def close(self):
+        self.closed = True
+
+
 class FailingDestination(Destination):
     idempotent = True
 
@@ -73,6 +85,7 @@ class RecordingDestination(Destination):
         self.records: list[Envelope] = []
         self.write_calls = 0
         self.flush_calls = 0
+        self.closed = False
 
     async def check(self):
         return CheckResult(True)
@@ -84,6 +97,9 @@ class RecordingDestination(Destination):
 
     async def flush(self):
         self.flush_calls += 1
+
+    async def close(self):
+        self.closed = True
 
 
 class AddOne(Transform):
@@ -113,6 +129,15 @@ class MultiplyByTen(Transform):
 class DropAll(Transform):
     async def apply(self, records):
         return []
+
+
+class DuplicateEach(Transform):
+    async def apply(self, records):
+        return [
+            expanded
+            for record in records
+            for expanded in (record, replace(record, id=f"{record.id}-copy"))
+        ]
 
 
 class FailingTransform(Transform):
@@ -170,6 +195,26 @@ async def test_pipeline_does_not_advance_state_when_destination_fails():
 
 
 @pytest.mark.asyncio
+async def test_pipeline_closes_all_resources_when_preflight_fails():
+    source = FailingCheckSource()
+    destination = RecordingDestination()
+    transform = AddOne()
+
+    with pytest.raises(ProtocolError, match="Source check failed: source unavailable"):
+        await Pipeline(
+            "example",
+            source,
+            destination,
+            transforms=[transform],
+            state_store=MemoryStateStore(),
+        ).run()
+
+    assert source.closed is True
+    assert destination.closed is True
+    assert transform.closed is True
+
+
+@pytest.mark.asyncio
 async def test_pipeline_applies_transforms_in_order_before_flush_and_checkpoint():
     state = MemoryStateStore()
     destination = RecordingDestination()
@@ -207,6 +252,22 @@ async def test_pipeline_can_filter_entire_batch_and_still_checkpoint():
     assert destination.flush_calls == 1
     assert result.records_written == 0
     assert await state.load("example", "example", "items") == {"cursor": "2"}
+
+
+@pytest.mark.asyncio
+async def test_pipeline_can_expand_a_checkpoint_batch():
+    destination = RecordingDestination()
+
+    result = await Pipeline(
+        "example",
+        ExampleSource(),
+        destination,
+        transforms=[DuplicateEach()],
+        state_store=MemoryStateStore(),
+    ).run()
+
+    assert [record.id for record in destination.records] == ["1", "1-copy", "2", "2-copy"]
+    assert result.records_written == 4
 
 
 @pytest.mark.asyncio
