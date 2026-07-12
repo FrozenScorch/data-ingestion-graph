@@ -92,17 +92,22 @@ class DAGExecutor:
         # Resolve only graph-owner connections referenced by this immutable graph
         # version. Credentials remain server-side and are never copied into node configs.
         try:
-            connections = await self._resolve_connections(run.graph_id, node_configs or {})
+            owner_id = await self._graph_owner(run.graph_id)
+            connections = await self._resolve_connections(owner_id, node_configs or {})
         except ValueError:
             run.status = RunStatus.FAILED.value
-            run.error_message = "Invalid or unauthorized saved connection reference"
+            run.error_message = "Invalid or unauthorized graph resource reference"
             await self.db.commit()
             await self._emit_event(run.id, "run_failed", {"error": run.error_message})
             return run
 
         # Shared orchestration state. Credentials are scoped into a per-node copy
         # immediately before execution and are never exposed to unrelated nodes.
-        exec_state: dict[str, Any] = {"outputs": {}, "connections": connections}
+        exec_state: dict[str, Any] = {
+            "outputs": {},
+            "connections": connections,
+            "owner_id": str(owner_id),
+        }
 
         # Execute each level
         for level_idx, level_nodes in enumerate(levels):
@@ -166,8 +171,15 @@ class DAGExecutor:
 
         return run
 
+    async def _graph_owner(self, graph_id: UUID) -> UUID:
+        result = await self.db.execute(select(Graph.owner_id).where(Graph.id == graph_id))
+        owner_id = result.scalar_one_or_none()
+        if owner_id is None:
+            raise ValueError("Graph owner not found")
+        return owner_id
+
     async def _resolve_connections(
-        self, graph_id: UUID, node_configs: dict[str, dict]
+        self, owner_id: UUID, node_configs: dict[str, dict]
     ) -> dict[str, dict[str, Any]]:
         raw_ids = {
             str(config["connection_id"])
@@ -180,11 +192,6 @@ class DAGExecutor:
             connection_ids = {UUID(value) for value in raw_ids}
         except ValueError as exc:
             raise ValueError("Invalid connection reference") from exc
-
-        owner_result = await self.db.execute(select(Graph.owner_id).where(Graph.id == graph_id))
-        owner_id = owner_result.scalar_one_or_none()
-        if owner_id is None:
-            raise ValueError("Graph owner not found")
 
         result = await self.db.execute(
             select(Connection).where(
@@ -214,7 +221,10 @@ class DAGExecutor:
         scoped_connections = {}
         if connection_id and connection_id in connections:
             scoped_connections[str(connection_id)] = connections[connection_id]
-        return {"connections": scoped_connections}
+        return {
+            "connections": scoped_connections,
+            "owner_id": exec_state.get("owner_id"),
+        }
 
     async def _execute_level_parallel(
         self,

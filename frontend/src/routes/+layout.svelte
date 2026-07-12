@@ -43,6 +43,7 @@
       <div class="flex items-center gap-4">
         <nav class="flex items-center gap-1 text-sm">
           <a href="/graphs" class="px-3 py-1 rounded-md text-gray-400 hover:text-gray-200 hover:bg-gray-800 transition-colors">Graphs</a>
+          <a href="/files" class="px-3 py-1 rounded-md text-gray-400 hover:text-gray-200 hover:bg-gray-800 transition-colors">Files</a>
           <a href="/executions" class="px-3 py-1 rounded-md text-gray-400 hover:text-gray-200 hover:bg-gray-800 transition-colors">Executions</a>
           <a href="/dead-letter" class="px-3 py-1 rounded-md text-gray-400 hover:text-gray-200 hover:bg-gray-800 transition-colors">DLQ</a>
           <a href="/settings" class="px-3 py-1 rounded-md text-gray-400 hover:text-gray-200 hover:bg-gray-800 transition-colors">Settings</a>

@@ -23,7 +23,7 @@ def _make_context(config: dict = None, input_data: dict = None, working_dir: str
         node_id="test-integration-node",
         config=config or {},
         input_data=input_data or {},
-        state={},
+        state={"trusted_server_paths": True},
         working_dir=working_dir or tempfile.mkdtemp(),
     )
 
@@ -62,7 +62,7 @@ class TestFullPipelineExecution:
         ctx1 = _make_context(
             config={
                 "source_type": "path",
-                "file_path": temp_file,
+                "file_path": os.path.basename(temp_file),
             },
             working_dir=os.path.dirname(temp_file),
         )
@@ -158,7 +158,7 @@ class TestFullPipelineExecution:
             # Step 1: FileSource
             file_source = FileSourceNode()
             ctx1 = _make_context(
-                config={"source_type": "path", "file_path": path},
+                config={"source_type": "path", "file_path": os.path.basename(path)},
                 working_dir=os.path.dirname(path),
             )
             source_result = await file_source.execute(ctx1)
@@ -200,7 +200,7 @@ class TestFullPipelineExecution:
             # FileSource
             file_source = FileSourceNode()
             ctx1 = _make_context(
-                config={"source_type": "path", "file_path": path},
+                config={"source_type": "path", "file_path": os.path.basename(path)},
                 working_dir=os.path.dirname(path),
             )
             source_result = await file_source.execute(ctx1)

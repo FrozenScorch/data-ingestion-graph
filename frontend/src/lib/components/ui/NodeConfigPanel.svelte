@@ -6,6 +6,7 @@
   import type { ConfigField } from '$lib/types';
   import type { SavedConnection } from '$lib/types/connection.js';
   import ModelSelector from './ModelSelector.svelte';
+  import ArtifactPicker from './ArtifactPicker.svelte';
 
   let { onClose, onDelete }: { onClose: () => void; onDelete: () => void } = $props();
 
@@ -153,7 +154,13 @@
             <p class="text-xs text-gray-500 mb-1">{field.description}</p>
           {/if}
 
-          {#if field.type === 'string' && field.enum}
+          {#if field.type === 'array' && field.format === 'artifact-refs'}
+            <ArtifactPicker
+              value={(config[key] as string[]) || []}
+              onValueChange={(ids: string[]) => updateConfig(key, ids)}
+            />
+
+          {:else if field.type === 'string' && field.enum}
             <!-- Enum dropdown -->
             <select
               value={(config[key] as string) || field.default || ''}

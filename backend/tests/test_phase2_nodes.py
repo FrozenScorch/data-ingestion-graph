@@ -33,7 +33,7 @@ def _make_context(config: dict = None, input_data: dict = None, working_dir: str
         node_id="test-node",
         config=config or {},
         input_data=input_data or {},
-        state={},
+        state={"trusted_server_paths": True},
         working_dir=working_dir or tempfile.mkdtemp(),
     )
 
@@ -86,8 +86,7 @@ class TestFileSourceNode:
             ctx = _make_context(
                 config={
                     "source_type": "path",
-                    "file_path": str(filepath),
-                    "base_dir": tmpdir,
+                    "file_path": filepath.name,
                 },
                 working_dir=tmpdir,
             )
@@ -171,8 +170,7 @@ class TestFileSourceNode:
             ctx = _make_context(
                 config={
                     "source_type": "path",
-                    "file_path": str(filepath),
-                    "base_dir": tmpdir,
+                    "file_path": filepath.name,
                 },
                 working_dir=tmpdir,
             )

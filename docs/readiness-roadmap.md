@@ -47,7 +47,8 @@ Real SDK coverage is currently two sources and two local destinations. Studio
 adds PostgreSQL, server-side files, SEC EDGAR, transforms, PostgreSQL/pgvector,
 and HTTP actions, but several displayed capabilities are incomplete:
 
-- No browser upload API/file picker; document ingestion requires server-side file placement.
+- Browser uploads and File Source selection are owner-scoped and usable; folder watch,
+  object storage, quotas, malware scanning, and multi-replica shared storage remain.
 - No Excel/XLSX parser, OCR implementation, email, Slack/Teams, Drive/SharePoint/S3,
   SQL Server/MySQL/Oracle/MongoDB, queues, generic paginated REST, or database CDC.
 - GitHub Source is a stub; Webhook Source has no receiver route.
@@ -77,7 +78,7 @@ and HTTP actions, but several displayed capabilities are incomplete:
 
 ### UX and LAN readiness
 
-- File upload, folder selection/watch, connector discovery/preview, schema mapping,
+- Folder selection/watch, connector discovery/preview, schema mapping,
   run freshness, and schedule management need first-class UX.
 - Complete owner checks are required across every execution, WebSocket, DLQ, and lineage path.
 - LAN deployment needs non-default secrets, private service networks, TLS/reverse proxy,
@@ -96,7 +97,7 @@ assume connectors can use stable upstream APIs. They are planning ranges, not pr
 ### Milestone 0 — safe local/LAN foundation (1–3 weeks)
 
 1. Fix authorization coverage for runs, controls, WebSockets, DLQ, and lineage.
-2. Add browser upload with server-owned path isolation and repair the documents template.
+2. Done: browser upload, server-owned owner isolation, file picker, and documents template.
 3. Add production Compose profiles: generated secrets, private networks, reverse proxy/TLS,
    WebSockets, LAN origins, health correctness, and migrations.
 4. Lock down outbound HTTP and add a scoped agent/service authentication path.

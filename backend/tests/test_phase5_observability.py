@@ -172,15 +172,13 @@ class TestLineageRecording:
             {"host": "postgres", "database": "data", "password": "secret"}
         )
 
-        owner_result = MagicMock()
-        owner_result.scalar_one_or_none.return_value = owner_id
         connection_result = MagicMock()
         connection_result.scalars.return_value.all.return_value = [connection]
         mock_db = AsyncMock()
-        mock_db.execute = AsyncMock(side_effect=[owner_result, connection_result])
+        mock_db.execute = AsyncMock(return_value=connection_result)
 
         resolved = await DAGExecutor(mock_db)._resolve_connections(
-            graph_id,
+            owner_id,
             {"source": {"connection_id": str(connection_id)}},
         )
 
