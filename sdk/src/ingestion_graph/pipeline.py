@@ -57,6 +57,7 @@ class Pipeline:
         selected_streams = list(streams or await self.source.discover())
         records_written = 0
         checkpoints = 0
+        run_error: BaseException | None = None
         try:
             for stream in selected_streams:
                 state = await self.state_store.load(self.name, source_name, stream.name)
@@ -103,8 +104,16 @@ class Pipeline:
                         f"Source {source_name!r} ended stream {stream.name!r} "
                         "with uncheckpointed records"
                     )
+        except BaseException as exc:
+            run_error = exc
+            raise
         finally:
-            await self._close_resources()
+            try:
+                await self._close_resources()
+            except BaseException as close_error:
+                if run_error is None:
+                    raise
+                run_error.add_note(f"Pipeline cleanup also failed: {close_error!r}")
 
         return PipelineResult(
             pipeline=self.name,
@@ -121,7 +130,12 @@ class Pipeline:
         transformed = tuple(records)
         for transform in self.transforms:
             result = await transform.apply(transformed)
-            transformed = tuple(result)
+            try:
+                transformed = tuple(result)
+            except TypeError as exc:
+                raise ProtocolError(
+                    f"Transform {type(transform).__name__} returned a non-iterable result"
+                ) from exc
             for record in transformed:
                 if not isinstance(record, Envelope):
                     raise ProtocolError(

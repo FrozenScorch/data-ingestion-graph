@@ -120,6 +120,16 @@ class FailingTransform(Transform):
         raise RuntimeError("transform unavailable")
 
 
+class InvalidTransform(Transform):
+    async def apply(self, records):
+        return None
+
+
+class FailingCloseTransform(FailingTransform):
+    async def close(self):
+        raise RuntimeError("cleanup unavailable")
+
+
 class MoveStream(Transform):
     async def apply(self, records):
         return [replace(record, stream="other") for record in records]
@@ -233,6 +243,32 @@ async def test_pipeline_rejects_transform_output_for_another_stream():
         ).run()
 
     assert await state.load("example", "example", "items") == {}
+
+
+@pytest.mark.asyncio
+async def test_pipeline_rejects_non_iterable_transform_output():
+    with pytest.raises(ProtocolError, match="non-iterable"):
+        await Pipeline(
+            "example",
+            ExampleSource(),
+            RecordingDestination(),
+            transforms=[InvalidTransform()],
+            state_store=MemoryStateStore(),
+        ).run()
+
+
+@pytest.mark.asyncio
+async def test_cleanup_failure_does_not_mask_transform_failure():
+    with pytest.raises(RuntimeError, match="transform unavailable") as exc_info:
+        await Pipeline(
+            "example",
+            ExampleSource(),
+            RecordingDestination(),
+            transforms=[FailingCloseTransform()],
+            state_store=MemoryStateStore(),
+        ).run()
+
+    assert any("cleanup unavailable" in note for note in exc_info.value.__notes__)
 
 
 @pytest.mark.asyncio
