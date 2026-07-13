@@ -90,33 +90,28 @@ TEMPLATES: dict[str, GraphTemplate] = {
     ),
     "documents-search": GraphTemplate(
         id="documents-search",
-        name="Documents to Search",
-        description="Parse and chunk server-side PDF, Word, CSV, or text files for inspection.",
+        name="Document Deltas to Search",
+        description=(
+            "Resume selected managed documents through the SDK and inspect this run's delta."
+        ),
         category="documents",
-        setup=("Upload files in Studio, then explicitly select them on the File Source node",),
+        setup=(
+            "Upload files in Studio, then explicitly select them on the Document Source node",
+            "Each run's query store contains only records changed or deleted in that run",
+        ),
         nodes=(
             TemplateNode(
-                "files",
-                "file_source",
-                40,
+                "documents",
+                "sdk_document_source",
+                80,
                 140,
-                {"source_type": "upload", "artifact_ids": []},
+                {"artifact_ids": [], "checkpoint_interval": 50},
             ),
-            TemplateNode("parse", "file_parser", 310, 140, {"parser": "auto"}),
             TemplateNode(
-                "chunk",
-                "text_chunker",
-                580,
-                140,
-                {"chunk_size": 512, "chunk_overlap": 50, "tokenizer": "words"},
+                "query_store", "sdk_query_store", 500, 140, {"collection": "document-deltas"}
             ),
-            TemplateNode("query_store", "sdk_query_store", 850, 140, {"collection": "documents"}),
         ),
-        edges=(
-            TemplateEdge("files-parse", "files", "parse", "file_list", "file_list"),
-            TemplateEdge("parse-chunk", "parse", "chunk", "documents", "documents"),
-            TemplateEdge("chunk-query", "chunk", "query_store", "chunks", "items"),
-        ),
+        edges=(TemplateEdge("documents-query", "documents", "query_store", "items", "items"),),
     ),
 }
 

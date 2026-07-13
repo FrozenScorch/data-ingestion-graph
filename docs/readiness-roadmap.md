@@ -1,6 +1,7 @@
 # Studio and SDK readiness roadmap
 
-Baseline: document-source branch after PR #33, audited 2026-07-12.
+Baseline: durable-worker, SDK document source, and Studio adapter work after PRs #34–#35,
+audited 2026-07-12.
 
 ## Executive assessment
 
@@ -11,9 +12,9 @@ a continuous anything-to-anything synchronization platform.
 | Outcome | Readiness | Current reality |
 | --- | ---: | --- |
 | Reusable Python SDK | 78% | Installable, typed, resumable core with Discord, JSONL, and local document sources plus JSONL/SQLite destinations |
-| Local single-user visual ingestion | 60% | Manual batch graphs, transforms, PostgreSQL, server files, Discord preview, query inspection |
-| Trusted-LAN Studio | 25–30% | Experimental deployment only; upload, networking, auth coverage, and worker durability are incomplete |
-| Enterprise multi-user Studio | 10–15% | Tenant isolation, service auth, SSO, durable workers, HA, backups, and observability are release gates |
+| Local single-user visual ingestion | 65% | Manual graphs, durable queued execution, resumable managed documents, transforms, PostgreSQL, Discord preview, query inspection |
+| Trusted-LAN Studio | 30–35% | Experimental deployment only; networking, auth coverage, shared storage, and deployment hardening remain incomplete |
+| Enterprise multi-user Studio | 15–20% | Tenant isolation, service auth, SSO, external worker deployment, HA, backups, and observability are release gates |
 | Anywhere-to-anywhere continuous sync | 15–20% | The SDK protocol is credible, but connector breadth and sync modes are narrow |
 
 These percentages measure delivered capability, not code volume.
@@ -37,9 +38,11 @@ These percentages measure delivered capability, not code volume.
 - Svelte visual DAG editor backed by a dynamic node registry and typed ports.
 - Graph versions, manual execution, retries/replay, node checkpoints, DLQ, lineage, and run inspection.
 - Encrypted owner-scoped PostgreSQL and Discord Connection Center.
-- Discord, PostgreSQL, and documents starter graphs.
-- PDF, DOCX, CSV, text/Markdown/JSON/XML/HTML parsing; chunking and AI transforms.
+- Discord, PostgreSQL, and incremental SDK document-delta starter graphs.
+- Owner-scoped SDK ingestion for PDF, DOCX, XLSX/CSV, EML, HTML, Markdown, and text,
+  with PostgreSQL state per owner/graph/node/stream and path-safe canonical output.
 - PostgreSQL writer, pgvector writer, and expiring per-run SDK query collections.
+- Durable leased run jobs with worker heartbeats, retry jobs, and immutable graph versions.
 
 ## Material gaps
 
@@ -72,11 +75,13 @@ and HTTP actions, but several displayed capabilities are incomplete:
 
 ### Sync semantics
 
-- Studio runs are manual, stateless batch/preview jobs. SDK source state is not persisted
-  per graph/node across Studio runs.
+- Studio's SDK Document Source now resumes and reconciles per graph/node, but Discord
+  and native sources do not yet share the same durable state bridge.
+- Document state commits atomically with successful bounded source output, not yet after
+  a downstream destination flush; its starter query collection is a per-run delta view.
 - `schedule` and `webhook` are labels, not implemented trigger services.
-- Work executes inside FastAPI background tasks, without a durable queue, leases,
-  heartbeat, restart recovery, or per-stream concurrency control.
+- Durable leased workers execute queued runs and recover expired jobs, but there is no
+  per-stream concurrency policy or independently scaled worker deployment profile yet.
 - Missing modes: scheduled polling, snapshot-to-incremental handoff, CDC, streaming,
   bidirectional conflict resolution, partitioned backfill, and reconciliation.
 
@@ -110,8 +115,10 @@ Exit: a trusted user can safely upload documents and run graphs from another LAN
 
 ### Milestone 1 — real recurring sync (3–6 additional weeks)
 
-1. Execute SDK `Pipeline` adapters with per-graph/per-node durable source state.
-2. Add durable queued workers, run leases, heartbeat/recovery, and concurrency policies.
+1. Done for managed documents: SDK adapter with per-graph/per-node PostgreSQL state.
+   Extend the bridge to other sources and advance state after durable destinations.
+2. Done in-process: durable queued workers, run leases, heartbeat, and recovery.
+   Add per-stream concurrency policies and a separately deployed worker profile.
 3. Implement cron/interval schedules and authenticated webhook triggers with UI.
 4. Add freshness, cursor, lag, and reconciliation status to each stream.
 
@@ -145,9 +152,9 @@ Exit: multiple teams can operate audited, recoverable syncs on a LAN or private 
 
 ## Highest-leverage next features
 
-1. Generate a safe Studio adapter for `LocalDocumentsSource`, using owner-scoped
-   uploads and LAN folder roots without exposing arbitrary server paths.
+1. Complete the source-to-destination acknowledgement boundary so SDK state advances
+   only after a persistent destination applies upserts and tombstones.
 2. Add database and object-storage source/destination packs plus connector
    conformance tests shared by SDK and Studio.
-3. Merge the reviewed durable-run worker, then persist SDK source state per
-   graph/node only after downstream writes are durable.
+3. Add safe LAN folder capabilities separately from managed browser uploads, with
+   administrator-owned roots and no graph-configured server paths.
