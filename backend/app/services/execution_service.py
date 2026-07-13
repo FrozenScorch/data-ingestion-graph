@@ -106,8 +106,9 @@ async def update_run_status(
     run_id: UUID,
     new_status: str,
 ) -> Run | None:
-    """Update a run's status."""
-    run = await get_run(db, run_id)
+    """Update a run's status while serializing against final acknowledgement."""
+    result = await db.execute(select(Run).where(Run.id == run_id).with_for_update())
+    run = result.scalar_one_or_none()
     if not run:
         return None
 

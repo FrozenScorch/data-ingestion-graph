@@ -10,6 +10,12 @@ At startup, the worker also queues legacy pending or running runs that have an
 immutable graph version but no job record. Completed and cancelled runs are
 never re-executed when an expired lease is reclaimed.
 
+SDK source adapters stage run-scoped state candidates at source POST_EXEC. The
+worker promotes them only after all graph nodes succeed, while holding the live
+job lease and run row lock, in the same transaction that marks the run completed.
+A downstream failure or cancellation keeps candidates for same-run failed-node
+retry; a crash or lease loss cannot expose them as committed source state.
+
 ## Runtime settings
 
 ```dotenv
@@ -33,6 +39,11 @@ must use stable source keys, destination upserts, idempotency keys, or
 transactional writes. Non-idempotent destinations should not be used for
 automatically recovered production runs until they implement one of those
 guards.
+
+Source-state promotion observes the node success boundary; it does not strengthen
+a destination that returns success before its data is durable. Destination nodes
+participating in flush-before-acknowledgement must finish their durable write or
+flush before returning success.
 
 ## Verification
 

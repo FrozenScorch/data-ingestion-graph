@@ -19,6 +19,7 @@ from app.models.execution import (
     RunStatus,
 )
 from app.models.graph import Graph, GraphVersion
+from app.services.sdk_source_state_service import complete_run_with_source_state_promotion
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -30,9 +31,9 @@ async def execute_run_job(db: AsyncSession, job: RunJob, ws_manager: Any = None)
     if run.status in (RunStatus.CANCELLED.value, RunStatus.COMPLETED.value):
         return
     if job.job_type == RunJobType.RETRY_FAILED.value:
-        await _execute_failed_nodes(db, run, ws_manager)
+        await _execute_failed_nodes(db, run, job, ws_manager)
     else:
-        await _execute_full_run(db, run, ws_manager)
+        await _execute_full_run(db, run, job, ws_manager)
 
 
 async def _load_version(
@@ -49,12 +50,21 @@ async def _load_version(
     return nodes, edges, version.node_configs or {}
 
 
-async def _execute_full_run(db: AsyncSession, run: Run, ws_manager: Any) -> None:
+async def _execute_full_run(
+    db: AsyncSession, run: Run, job: RunJob, ws_manager: Any
+) -> None:
     nodes, edges, node_configs = await _load_version(db, run)
-    await DAGExecutor(db, ws_manager).execute(run, nodes, edges, node_configs)
+    await DAGExecutor(
+        db,
+        ws_manager,
+        completion_job_id=job.id,
+        completion_lease_owner=job.lease_owner,
+    ).execute(run, nodes, edges, node_configs)
 
 
-async def _execute_failed_nodes(db: AsyncSession, run: Run, ws_manager: Any) -> None:
+async def _execute_failed_nodes(
+    db: AsyncSession, run: Run, job: RunJob, ws_manager: Any
+) -> None:
     nodes, edges, node_configs = await _load_version(db, run)
     checkpoints = await get_checkpoints(db, run.id)
     restored_outputs: dict[str, Any] = {}
@@ -78,7 +88,7 @@ async def _execute_failed_nodes(db: AsyncSession, run: Run, ws_manager: Any) -> 
         if run_node.status == NodeStatus.FAILED.value
     }
     if not failed_node_ids:
-        await _execute_full_run(db, run, ws_manager)
+        await _execute_full_run(db, run, job, ws_manager)
         return
 
     downstream: dict[str, set[str]] = {}
@@ -148,5 +158,9 @@ async def _execute_failed_nodes(db: AsyncSession, run: Run, ws_manager: Any) -> 
                 node_output=run_node.output_data,
             )
 
-    run.status = RunStatus.COMPLETED.value
-    await db.commit()
+    await complete_run_with_source_state_promotion(
+        db,
+        run.id,
+        job_id=job.id,
+        lease_owner=job.lease_owner,
+    )

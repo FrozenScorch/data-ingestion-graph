@@ -51,19 +51,29 @@ If execution stops between steps 2 and 4, replay may resend the page. Stable
 record IDs and an idempotent destination make that replay safe. A source ending
 after records without a state message is a protocol error.
 
-The Studio document adapter binds the SDK `StateStore` contract to PostgreSQL
-rows keyed by owner, graph, node, source, and stream. An advisory lock serializes
-concurrent runs for the same graph node. The adapter buffers all state messages
-until every stream completes. The node runner flushes successful bounded output
-and staged source state without committing; the executor's POST_EXEC checkpoint
-then commits all three in one database transaction. Failed or over-limit reads and
-checkpoint failures cannot advance state.
+The Studio document adapter binds the SDK `StateStore` contract to committed
+PostgreSQL rows keyed by owner, graph, node, source, and stream. Source writes go
+to a separate run-scoped candidate table containing the base revision/state and a
+save-or-delete intent. The adapter buffers all state messages until every stream
+completes. The source POST_EXEC checkpoint commits its successful bounded output
+and candidates together, but committed SDK reads do not see those candidates.
+
+After every graph node reports success, the durable worker fences its live job
+lease, locks the run and affected source scopes, rejects stale base revisions, and
+promotes all candidates in the same transaction that marks the run completed.
+Downstream failure, cancellation, lease loss, or a crash before that transaction
+leaves committed source state unchanged. Failed-node retry restores the source
+POST_EXEC output and promotes the same durable candidates after its downstream
+nodes succeed, without rerunning the source. Revisions and retained delete
+tombstones prevent an older concurrent run from recreating or regressing state.
 
 This makes each Document Source run an incremental delta: unchanged uploads emit
 nothing, changed files emit stable upserts and deletes, and deselecting a prior
-artifact emits tombstones. Downstream Studio nodes are not yet part of that same
-flush-before-checkpoint transaction. The per-run Queryable Test Store is therefore
-a delta inspector, not a persistent current view across runs.
+artifact emits tombstones. Promotion relies on each downstream node's existing
+success contract. It does not make a generic Studio destination durable: a
+destination provides flush-before-acknowledgement only when it reports success
+after its own durable write/flush. The per-run Queryable Test Store remains a
+delta inspector, not a persistent current view across runs.
 
 ## Connector conformance requirements
 

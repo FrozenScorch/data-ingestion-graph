@@ -9,18 +9,17 @@ import sys
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
-
 from app.db.session import AsyncSessionLocal
-from app.engine.scheduler import topological_sort, validate_dag
-from app.engine.state import can_transition, ExecutionState
-from app.engine.runner import run_node_with_retry
 from app.engine.checkpoint import save_checkpoint
-from app.engine.retry import RetryConfig
-from app.models.execution import Run, RunStatus, CheckpointType
+from app.engine.runner import run_node_with_retry
+from app.engine.scheduler import topological_sort, validate_dag
+from app.engine.state import can_transition
+from app.models.execution import CheckpointType, Run, RunStatus
 from app.models.graph import Connection, Graph
 from app.services.connection_crypto import decrypt_connection_config
+from app.services.sdk_source_state_service import complete_run_with_source_state_promotion
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 logger = logging.getLogger(__name__)
 
@@ -40,9 +39,18 @@ class DAGExecutor:
     5. Tracking lineage and costs
     """
 
-    def __init__(self, db: AsyncSession, ws_manager=None):
+    def __init__(
+        self,
+        db: AsyncSession,
+        ws_manager=None,
+        *,
+        completion_job_id: UUID | None = None,
+        completion_lease_owner: str | None = None,
+    ):
         self.db = db
         self.ws_manager = ws_manager
+        self.completion_job_id = completion_job_id
+        self.completion_lease_owner = completion_lease_owner
 
     async def execute(
         self,
@@ -164,11 +172,17 @@ class DAGExecutor:
                     return result  # A failure occurred
 
         # Mark run as completed if no failures (with state machine validation)
-        if run.status == RunStatus.RUNNING.value:
-            if can_transition(run.status, RunStatus.COMPLETED.value):
-                run.status = RunStatus.COMPLETED.value
-                await self.db.commit()
-            await self._emit_event(run.id, "run_completed", {})
+        if run.status == RunStatus.RUNNING.value and can_transition(
+            run.status, RunStatus.COMPLETED.value
+        ):
+            completed = await complete_run_with_source_state_promotion(
+                self.db,
+                run.id,
+                job_id=self.completion_job_id,
+                lease_owner=self.completion_lease_owner,
+            )
+            if completed:
+                await self._emit_event(run.id, "run_completed", {})
 
         return run
 
@@ -256,7 +270,8 @@ class DAGExecutor:
 
                     node_run = await node_db.get(Run, run.id)
                     if node_run and node_run.status == RunStatus.CANCELLED.value:
-                        from app.models.execution import RunNode as RN, NodeStatus
+                        from app.models.execution import NodeStatus
+                        from app.models.execution import RunNode as RN
 
                         return node_id, RN(
                             run_id=run.id,
@@ -359,7 +374,8 @@ class DAGExecutor:
                     return node_id, run_node
                 except Exception:
                     logger.exception(f"Unexpected error in parallel node {node_id}")
-                    from app.models.execution import RunNode as RN, NodeStatus
+                    from app.models.execution import NodeStatus
+                    from app.models.execution import RunNode as RN
 
                     return node_id, RN(
                         run_id=run.id,
@@ -555,14 +571,15 @@ class DAGExecutor:
     ) -> None:
         """Record a lineage entry for data flowing from source to target node."""
         try:
-            from app.models.lineage import DataLineage
             import json
+
+            from app.models.lineage import DataLineage
 
             session = db or self.db
 
             # Calculate approximate metrics
             items_count = None
-            items_sample = None
+            items_sample: Any = None
             bytes_transferred = None
 
             if isinstance(data, (list, tuple)):

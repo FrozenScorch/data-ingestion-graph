@@ -76,9 +76,11 @@ and HTTP actions, but several displayed capabilities are incomplete:
 
 - Studio's SDK Document Source resumes and reconciles per graph/node, but Discord
   and native sources do not yet share the same durable state bridge.
-- Document state, successful bounded source output, and the POST_EXEC checkpoint commit
-  atomically, but not yet with a downstream destination flush; its starter query
-  collection is a per-run delta view.
+- Document state is staged durably with source POST_EXEC output and promoted only
+  when every downstream node succeeds. Failed-node retry reuses that run-scoped
+  candidate, and concurrent stale runs cannot regress the committed checkpoint.
+  This boundary depends on destinations returning success only after their own
+  durable write/flush; the starter query collection remains a per-run delta view.
 - `schedule` and `webhook` are labels, not implemented trigger services.
 - Durable PostgreSQL jobs, leases, heartbeat, and expired-job recovery are implemented.
   The worker still runs inside the API deployment and lacks an independently scaled
@@ -117,8 +119,9 @@ Exit: a trusted user can safely upload documents and run graphs from another LAN
 
 ### Milestone 1 — real recurring sync (3–6 additional weeks)
 
-1. Done for managed documents: SDK adapter with per-graph/per-node PostgreSQL state.
-   Extend the bridge to other sources and advance state after durable destinations.
+1. Done for managed documents: per-graph/per-node PostgreSQL state advances only
+   after full graph success, with durable same-run retry candidates. Extend the
+   bridge to other sources and audit every destination's durable-success contract.
 2. Done in-process: durable queued workers, run leases, heartbeat, and recovery.
    Add per-stream concurrency policies and a separately deployed worker profile.
 3. Implement cron/interval schedules and authenticated webhook triggers with UI.
