@@ -128,6 +128,10 @@ class RestSource(Source):
             raise ConfigurationError("REST allow_http must be a boolean")
         if not isinstance(allow_cross_origin_next, bool):
             raise ConfigurationError("REST allow_cross_origin_next must be a boolean")
+        if allow_cross_origin_next and client is not None:
+            raise ConfigurationError(
+                "REST cross-origin pagination cannot use an injected HTTP client"
+            )
         self.base_url = _validate_base_url(base_url, allow_http=allow_http)
         self.path = _validate_path(path)
         if not isinstance(stream, str) or not _STREAM_NAME.fullmatch(stream):
@@ -437,7 +441,15 @@ class RestSource(Source):
         if self.auth_type == "none":
             return
         credential = self._resolve_credential()
-        if any(value == credential for _key, value in parse_qsl(urlsplit(request_url).query)):
+        parsed = urlsplit(request_url)
+        decoded_query = (
+            component
+            for pair in parse_qsl(parsed.query, keep_blank_values=True)
+            for component in pair
+        )
+        if credential in unquote(parsed.path) or any(
+            credential in component for component in decoded_query
+        ):
             raise ProtocolError("REST request URL must not contain the authentication secret")
 
     async def _request(self, request_url: str) -> Any:

@@ -83,4 +83,6 @@ bounds; a non-final bound leaves a continuation checkpoint for the next run.
 
 Cross-origin next links are rejected by default. `allow_cross_origin_next=True`
 permits HTTPS traversal, but authentication headers are deliberately withheld from
-the other origin. Redirect responses are not followed automatically.
+the other origin. This mode uses the connector-owned HTTP client; injected clients
+are rejected because their default authentication or cookies cannot be safely
+stripped for an unrelated origin. Redirect responses are not followed automatically.

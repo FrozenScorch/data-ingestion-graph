@@ -464,6 +464,29 @@ async def test_resolved_auth_secret_cannot_enter_pagination_checkpoint() -> None
 
 
 @pytest.mark.asyncio
+async def test_resolved_auth_secret_cannot_enter_pagination_path_checkpoint() -> None:
+    client = FakeClient(
+        [
+            FakeResponse(
+                {"data": {"items": []}},
+                headers={"Link": '</v1/next/top-secret>; rel="next"'},
+            )
+        ]
+    )
+    source = rest_source(
+        client,
+        pagination="link",
+        auth_type="bearer",
+        secret=SecretRef("REST_SECRET"),
+        secret_provider=EnvSecretProvider({"REST_SECRET": "top-secret"}),
+    )
+
+    with pytest.raises(ProtocolError, match="must not contain the authentication secret"):
+        await collect(source)
+    assert len(client.requests) == 1
+
+
+@pytest.mark.asyncio
 async def test_injected_redirect_following_client_cannot_forward_auth() -> None:
     requests: list[httpx.Request] = []
 
@@ -510,19 +533,30 @@ async def test_opted_in_cross_origin_link_never_receives_auth_header() -> None:
             FakeResponse({"data": {"items": [{"id": 2}]}}),
         ]
     )
-    source = rest_source(
-        client,
-        pagination="link",
-        allow_cross_origin_next=True,
-        auth_type="bearer",
-        secret=SecretRef("REST_SECRET"),
-        secret_provider=EnvSecretProvider({"REST_SECRET": "top-secret"}),
-    )
+    with patch.object(rest_module.httpx, "AsyncClient", return_value=client):
+        source = rest_source(
+            None,
+            pagination="link",
+            allow_cross_origin_next=True,
+            auth_type="bearer",
+            secret=SecretRef("REST_SECRET"),
+            secret_provider=EnvSecretProvider({"REST_SECRET": "top-secret"}),
+        )
 
-    await collect(source)
+        await collect(source)
 
     assert client.requests[0][2]["headers"] == {"Authorization": "Bearer top-secret"}
     assert client.requests[1][2]["headers"] == {}
+
+
+@pytest.mark.asyncio
+async def test_cross_origin_pagination_rejects_injected_client_defaults() -> None:
+    client = httpx.AsyncClient(headers={"Authorization": "Bearer client-default"})
+    try:
+        with pytest.raises(ConfigurationError, match="cannot use an injected HTTP client"):
+            rest_source(client, pagination="link", allow_cross_origin_next=True)
+    finally:
+        await client.aclose()
 
 
 @pytest.mark.asyncio
