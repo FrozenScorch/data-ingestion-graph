@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from typing import Any
 
 from app.nodes.base import BaseNode, NodeContext, NodeResult, PortDataType, PortDef
@@ -159,16 +160,28 @@ class DatabaseSourceNode(BaseNode):
                 return NodeResult(success=False, error_message="Database query check failed")
             descriptor = (await connector.discover())[0]
             rows: list[dict[str, Any]] = []
+            postgres_type_hints: list[dict[str, Any]] = []
             async for message in connector.read(descriptor, {}):
                 if isinstance(message, RecordMessage):
                     payload = message.envelope.payload
                     if not isinstance(payload, RecordPayload):
                         raise TypeError("PostgreSQL source emitted a non-row payload")
                     rows.append(dict(payload.data))
+                    raw_type_hints = message.envelope.metadata.get(
+                        "ingestion_graph.postgres_types", {}
+                    )
+                    if not isinstance(raw_type_hints, Mapping):
+                        raise TypeError("PostgreSQL source emitted invalid type hints")
+                    postgres_type_hints.append(dict(raw_type_hints))
             columns = list(descriptor.json_schema.get("properties", {}))
             return NodeResult(
                 success=True,
-                output_data={"rows": rows, "row_count": len(rows), "columns": columns},
+                output_data={
+                    "rows": rows,
+                    "row_count": len(rows),
+                    "columns": columns,
+                    "postgres_type_hints": postgres_type_hints,
+                },
                 items_processed=len(rows),
                 metadata={"query": str(query), "batch_size": batch_size},
             )

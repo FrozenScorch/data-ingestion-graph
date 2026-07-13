@@ -60,8 +60,8 @@ cross-pipeline conflicts are last-committed-wins.
 
 The destination resolves each target to its PostgreSQL table OID and canonical
 schema inside the transaction. Qualified and unqualified aliases share one
-advisory lock and replay-ledger scope. Upsert readiness accepts only immediate,
-non-partial, non-expression unique indexes that PostgreSQL can infer for
+advisory lock and replay-ledger scope. Upsert readiness accepts only valid,
+immediate, non-partial, non-expression unique indexes that PostgreSQL can infer for
 `ON CONFLICT`; included columns are not mistaken for conflict keys.
 
 Timestamps, dates, times, intervals, UUIDs, decimals, bytes, and arrays containing

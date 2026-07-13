@@ -53,6 +53,7 @@ async def test_database_source_writer_and_vector_store_against_postgres():
     partial_target = f"verify_partial_target_{uuid4().hex}"
     included_target = f"verify_included_target_{uuid4().hex}"
     deferred_target = f"verify_deferred_target_{uuid4().hex}"
+    invalid_target = f"verify_invalid_target_{uuid4().hex}"
     vectors = f"verify_vectors_{uuid4().hex}"
     admin = await asyncpg.connect(
         host=connection["host"],
@@ -88,6 +89,13 @@ async def test_database_source_writer_and_vector_store_against_postgres():
             f'CREATE TABLE "{deferred_target}" '
             "(id INTEGER, name TEXT, UNIQUE (id) DEFERRABLE INITIALLY IMMEDIATE)"
         )
+        await admin.execute(f'CREATE TABLE "{invalid_target}" (id INTEGER, name TEXT)')
+        await admin.execute(f"INSERT INTO \"{invalid_target}\" VALUES (1, 'one'), (1, 'duplicate')")
+        with pytest.raises(asyncpg.UniqueViolationError):
+            await admin.execute(
+                f'CREATE UNIQUE INDEX CONCURRENTLY "{invalid_target}_key" '
+                f'ON "{invalid_target}" (id)'
+            )
         state = {"connections": {"integration": connection}}
 
         writer_result = await DatabaseWriterNode().execute(
@@ -228,6 +236,46 @@ async def test_database_source_writer_and_vector_store_against_postgres():
             duration,
             body,
         )
+        studio_typed_source = await DatabaseSourceNode().execute(
+            NodeContext(
+                run_id="integration",
+                node_id="typed-source",
+                config={
+                    "connection_id": "integration",
+                    "query": f'SELECT * FROM "{typed_source}"',
+                },
+                input_data={},
+                state=state,
+            )
+        )
+        assert studio_typed_source.success is True
+        assert studio_typed_source.output_data["postgres_type_hints"][0]["body"] == "bytes"
+        studio_typed_writer = await DatabaseWriterNode().execute(
+            NodeContext(
+                run_id="integration",
+                node_id="typed-writer",
+                config={
+                    "connection_id": "integration",
+                    "table_name": typed_target,
+                    "mode": "insert",
+                },
+                input_data=studio_typed_source.output_data,
+                state=state,
+            )
+        )
+        assert studio_typed_writer.success is True
+        studio_typed_row = await admin.fetchrow(f'SELECT * FROM "{typed_target}" WHERE id=1')
+        assert dict(studio_typed_row) == {
+            "id": 1,
+            "occurred_at": occurred_at,
+            "local_at": local_at,
+            "day": day,
+            "at": at,
+            "duration": duration,
+            "body": body,
+        }
+        await admin.execute(f'TRUNCATE TABLE "{typed_target}"')
+
         typed_reader = PostgresSource(
             connection["host"],
             connection["port"],
@@ -332,6 +380,7 @@ async def test_database_source_writer_and_vector_store_against_postgres():
         assert await upsert_check(partial_target) is False
         assert await upsert_check(included_target) is True
         assert await upsert_check(deferred_target) is False
+        assert await upsert_check(invalid_target) is False
 
         if os.getenv("INTEGRATION_POSTGRES_HOST"):
             vector_result = await VectorStoreNode().execute(
@@ -362,6 +411,7 @@ async def test_database_source_writer_and_vector_store_against_postgres():
     finally:
         await admin.execute(f'DROP TABLE IF EXISTS "{vectors}"')
         await admin.execute(f'DROP TABLE IF EXISTS "{deferred_target}"')
+        await admin.execute(f'DROP TABLE IF EXISTS "{invalid_target}"')
         await admin.execute(f'DROP TABLE IF EXISTS "{included_target}"')
         await admin.execute(f'DROP TABLE IF EXISTS "{partial_target}"')
         await admin.execute(f'DROP TABLE IF EXISTS "{typed_target}"')

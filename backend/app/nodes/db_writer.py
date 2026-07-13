@@ -135,6 +135,19 @@ class DatabaseWriterNode(BaseNode):
             ):
                 raise ValueError("Database writer input rows must be objects")
             rows = [dict(row) for row in raw_rows]
+            raw_type_hints = context.input_data.get("postgres_type_hints")
+            if raw_type_hints is None:
+                postgres_type_hints: list[dict[str, Any]] = [{} for _ in rows]
+            elif (
+                not isinstance(raw_type_hints, list)
+                or len(raw_type_hints) != len(rows)
+                or any(not isinstance(item, Mapping) for item in raw_type_hints)
+            ):
+                raise ValueError(
+                    "Database writer postgres_type_hints must align one-to-one with rows"
+                )
+            else:
+                postgres_type_hints = [dict(item) for item in raw_type_hints]
             upsert_keys = tuple(
                 key.strip()
                 for key in str(context.config.get("upsert_key") or "").split(",")
@@ -163,6 +176,7 @@ class DatabaseWriterNode(BaseNode):
                 table_name=table_name,
                 mode=mode,
                 key_fields=upsert_keys,
+                postgres_type_hints=postgres_type_hints,
             )
             written = (
                 await destination.replace(envelopes)
@@ -197,6 +211,7 @@ def _rows_to_envelopes(
     table_name: str,
     mode: str,
     key_fields: tuple[str, ...],
+    postgres_type_hints: list[dict[str, Any]],
 ) -> list[Envelope]:
     result: list[Envelope] = []
     for index, row in enumerate(rows):
@@ -218,7 +233,12 @@ def _rows_to_envelopes(
                 operation=Operation.UPSERT,
                 cursor=str(index),
                 payload=RecordPayload(row),
-                metadata={"key": key, "run_id": context.run_id, "node_id": context.node_id},
+                metadata={
+                    "key": key,
+                    "run_id": context.run_id,
+                    "node_id": context.node_id,
+                    "ingestion_graph.postgres_types": postgres_type_hints[index],
+                },
                 provenance={"adapter": "backend.database_writer"},
             )
         )

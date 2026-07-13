@@ -464,6 +464,7 @@ async def test_upsert_check_requires_an_inferable_unique_index(connect) -> None:
 
     assert result.ok is False
     query = next(query for query, _ in connection.fetch_calls if "FROM pg_index" in query)
+    assert "index.indisvalid" in query
     assert "index.indimmediate" in query
     assert "index.indpred IS NULL" in query
     assert "index.indexprs IS NULL" in query

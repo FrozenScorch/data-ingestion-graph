@@ -399,6 +399,7 @@ class PostgresDestination(Destination):
               ON attribute.attrelid=index.indrelid AND attribute.attnum=key.attnum
             WHERE index.indrelid=$1::oid
               AND index.indisunique
+              AND index.indisvalid
               AND index.indimmediate
               AND index.indpred IS NULL
               AND index.indexprs IS NULL

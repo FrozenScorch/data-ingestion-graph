@@ -51,7 +51,7 @@ def base_context(sample_connection_config):
     )
 
 
-def _mock_postgres_source(rows_data, columns):
+def _mock_postgres_source(rows_data, columns, type_hints=None):
     connector = MagicMock()
     connector.check = AsyncMock(return_value=CheckResult(True))
     connector.discover = AsyncMock(
@@ -75,6 +75,11 @@ def _mock_postgres_source(rows_data, columns):
                     source="postgres",
                     stream="studio_query",
                     payload=RecordPayload(row),
+                    metadata={
+                        "ingestion_graph.postgres_types": (
+                            type_hints[index] if type_hints is not None else {}
+                        )
+                    },
                 )
             )
         yield StateMessage("studio_query", {})
@@ -180,6 +185,21 @@ class TestDatabaseSourceNode:
         assert result.output_data["row_count"] == 2
         assert result.items_processed == 2
         assert sdk.call_args.kwargs["max_records"] == 2
+
+    @pytest.mark.asyncio
+    async def test_execute_preserves_postgres_type_hint_sidecar(self, base_context):
+        node = DatabaseSourceNode()
+        base_context.config["query"] = "SELECT occurred_at FROM items"
+        connector = _mock_postgres_source(
+            [{"occurred_at": "2026-01-02T03:04:05+00:00"}],
+            ["occurred_at"],
+            [{"occurred_at": "datetime"}],
+        )
+
+        with patch("app.nodes.database_source.PostgresSource", return_value=connector):
+            result = await node.execute(base_context)
+
+        assert result.output_data["postgres_type_hints"] == [{"occurred_at": "datetime"}]
 
     @pytest.mark.asyncio
     async def test_execute_non_select_query(self, base_context):
@@ -322,6 +342,23 @@ class TestDatabaseWriterNode:
         assert result.items_processed == 2
         connector.write.assert_awaited_once()
         assert len(connector.write.await_args.args[0]) == 2
+
+    @pytest.mark.asyncio
+    async def test_execute_forwards_postgres_type_hint_sidecar(self, base_context):
+        node = DatabaseWriterNode()
+        base_context.config["table_name"] = "output_table"
+        base_context.input_data = {
+            "rows": [{"occurred_at": "2026-01-02T03:04:05+00:00"}],
+            "postgres_type_hints": [{"occurred_at": "datetime"}],
+        }
+        connector = _mock_postgres_destination(written=1)
+
+        with patch("app.nodes.db_writer.PostgresDestination", return_value=connector):
+            result = await node.execute(base_context)
+
+        assert result.success is True
+        envelope = connector.write.await_args.args[0][0]
+        assert envelope.metadata["ingestion_graph.postgres_types"] == {"occurred_at": "datetime"}
 
     @pytest.mark.asyncio
     async def test_execute_replace_mode(self, base_context):
