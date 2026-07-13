@@ -47,6 +47,7 @@ Sleep: TypeAlias = Callable[[float], Awaitable[None]]
 
 _HEADER_NAME = re.compile(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
 _STREAM_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+_MAX_COMPLETED_REQUEST_HASHES = 100_000
 _SENSITIVE_QUERY_COMPONENTS = frozenset(
     {
         "apikey",
@@ -144,6 +145,12 @@ class RestSource(Source):
         if pagination == "cursor" and not self.next_cursor_path:
             raise ConfigurationError("REST cursor pagination requires next_cursor_path")
         self.cursor_param = _validate_parameter_name(cursor_param, "cursor_param")
+        if _is_sensitive_query_name(self.cursor_param) and not _is_pagination_token_query_name(
+            self.cursor_param
+        ):
+            raise ConfigurationError(
+                "REST cursor_param must be a pagination parameter, not a credential name"
+            )
         self.query_params = _validate_query_params(
             {} if query_params is None else query_params, self.cursor_param
         )
@@ -296,6 +303,8 @@ class RestSource(Source):
         emitted = 0
 
         for _page_number in range(self.max_pages):
+            if len(completed_request_hashes) >= _MAX_COMPLETED_REQUEST_HASHES:
+                raise ProtocolError("REST pagination exceeded the cycle page-history limit")
             request_hash = _request_hash(request_url)
             if request_hash in completed_request_hashes:
                 raise ProtocolError("REST pagination repeated a request URL without progress")
@@ -437,6 +446,10 @@ class RestSource(Source):
             base_url=self.base_url,
             allow_http=self.allow_http,
             allow_cross_origin=self.allow_cross_origin_next,
+            allowed_sensitive_query_names=(self.cursor_param,)
+            if self.pagination == "cursor"
+            else (),
+            allow_pagination_tokens=self.pagination == "link",
         )
         self._reject_credential_url(request_url)
         client = await self._get_client()
@@ -508,6 +521,10 @@ class RestSource(Source):
                 base_url=self.base_url,
                 allow_http=self.allow_http,
                 allow_cross_origin=self.allow_cross_origin_next,
+                allowed_sensitive_query_names=(self.cursor_param,)
+                if self.pagination == "cursor"
+                else (),
+                allow_pagination_tokens=self.pagination == "link",
             )
         return _Page(records, next_url, _page_fingerprint(records, next_url))
 
@@ -716,13 +733,42 @@ def _query_value(value: JsonScalar) -> str:
     return str(value)
 
 
+def _query_name_components(value: str) -> tuple[tuple[str, ...], str]:
+    separated = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", value)
+    components = tuple(item for item in re.split(r"[^A-Za-z0-9]+", separated.lower()) if item)
+    return components, "".join(components)
+
+
+def _is_pagination_token_query_name(value: str) -> bool:
+    components, collapsed = _query_name_components(value)
+    forbidden = {
+        "access",
+        "api",
+        "auth",
+        "authorization",
+        "client",
+        "credential",
+        "password",
+        "refresh",
+        "secret",
+        "signature",
+        "sig",
+    }
+    if forbidden.intersection(components):
+        return False
+    has_token = "token" in components or collapsed.endswith("token")
+    pagination_markers = {"after", "before", "continuation", "cursor", "next", "page"}
+    has_marker = bool(pagination_markers.intersection(components)) or any(
+        collapsed.startswith(marker) for marker in pagination_markers
+    )
+    return has_token and has_marker
+
+
 def _is_sensitive_query_name(value: str) -> bool:
     # Split separators and camelCase before comparing whole semantic components.
     # The suffix check also covers common all-lowercase spellings such as
     # ``refreshtoken`` without treating unrelated names such as ``monkey`` as keys.
-    separated = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", value)
-    components = tuple(item for item in re.split(r"[^A-Za-z0-9]+", separated.lower()) if item)
-    collapsed = "".join(components)
+    components, collapsed = _query_name_components(value)
     if any(item in _SENSITIVE_QUERY_COMPONENTS for item in components):
         return True
     if collapsed in _SENSITIVE_QUERY_COMPONENTS:
@@ -773,6 +819,8 @@ def _validate_request_url(
     base_url: str,
     allow_http: bool,
     allow_cross_origin: bool,
+    allowed_sensitive_query_names: Iterable[str] = (),
+    allow_pagination_tokens: bool = False,
 ) -> str:
     if not isinstance(value, str) or any(ord(char) < 32 for char in value):
         raise ProtocolError("REST pagination produced an invalid next URL")
@@ -787,8 +835,12 @@ def _validate_request_url(
         raise ProtocolError("REST pagination attempted an unsafe plain-HTTP request")
     if not allow_cross_origin and not _same_origin(value, base_url):
         raise ProtocolError("REST pagination attempted a cross-origin next link")
+    allowed_names = {name.casefold() for name in allowed_sensitive_query_names}
     for key, _item in parse_qsl(parsed.query, keep_blank_values=True):
-        if _is_sensitive_query_name(key):
+        if _is_sensitive_query_name(key) and not (
+            key.casefold() in allowed_names
+            or (allow_pagination_tokens and _is_pagination_token_query_name(key))
+        ):
             raise ProtocolError("REST pagination next URL appears to contain credentials")
     return value
 
@@ -967,6 +1019,8 @@ def _encode_state(
             path: list(types) for path, types in sorted(record_field_types.items())
         }
     completed = sorted(set(completed_request_hashes))
+    if len(completed) > _MAX_COMPLETED_REQUEST_HASHES:
+        raise ProtocolError("REST pagination exceeded the cycle page-history limit")
     if completed:
         state["completed_request_hashes"] = completed
     return state
@@ -1040,7 +1094,7 @@ def _decode_state(
     raw_completed = state.get("completed_request_hashes", [])
     if (
         not isinstance(raw_completed, list)
-        or len(raw_completed) > 100_000
+        or len(raw_completed) > _MAX_COMPLETED_REQUEST_HASHES
         or len(raw_completed) != len(set(raw_completed))
         or any(
             not isinstance(item, str) or re.fullmatch(r"[0-9a-f]{64}", item) is None

@@ -9,6 +9,7 @@ from urllib.parse import parse_qs, parse_qsl, urlsplit
 import httpx
 import pytest
 
+import ingestion_graph.sources.rest as rest_module
 from ingestion_graph.conformance import inspect_source_messages
 from ingestion_graph.connectors.base import StreamDescriptor
 from ingestion_graph.errors import ConfigurationError, ProtocolError
@@ -120,6 +121,14 @@ def test_rest_rejects_sensitive_query_parameter_names(name: str) -> None:
         rest_source(FakeClient([]), query_params={name: "plaintext"})
 
 
+def test_rest_allows_pagination_token_cursor_name_but_rejects_auth_token_cursor() -> None:
+    source = rest_source(FakeClient([]), pagination="cursor", cursor_param="pageToken")
+    assert source.cursor_param == "pageToken"
+
+    with pytest.raises(ConfigurationError, match="not a credential name"):
+        rest_source(FakeClient([]), pagination="cursor", cursor_param="access_token")
+
+
 @pytest.mark.asyncio
 async def test_cursor_pagination_emits_checkpoint_after_every_page() -> None:
     client = FakeClient(
@@ -148,6 +157,26 @@ async def test_cursor_pagination_emits_checkpoint_after_every_page() -> None:
     assert isinstance(messages[2], StateMessage)
     report = inspect_source_messages(source, StreamDescriptor("widgets"), messages)
     assert report.ok, report.issues
+
+
+@pytest.mark.asyncio
+async def test_page_token_cursor_pagination_is_not_mistaken_for_authentication() -> None:
+    client = FakeClient(
+        [
+            FakeResponse({"data": {"items": []}, "next": "opaque-page-token"}),
+            FakeResponse({"data": {"items": []}, "next": None}),
+        ]
+    )
+    source = rest_source(
+        client,
+        pagination="cursor",
+        next_cursor_path="next",
+        cursor_param="pageToken",
+    )
+
+    await collect(source)
+
+    assert parse_qs(urlsplit(client.requests[1][1]).query)["pageToken"] == ["opaque-page-token"]
 
 
 @pytest.mark.asyncio
@@ -332,6 +361,24 @@ async def test_link_pagination_accepts_relative_same_origin_next_link() -> None:
 
     assert [item.envelope.payload.data["id"] for item in records(messages)] == [1, 2]
     assert client.requests[1][1] == "https://api.example.test/v1/widgets?page=2"
+
+
+@pytest.mark.asyncio
+async def test_link_pagination_accepts_semantic_next_page_token() -> None:
+    client = FakeClient(
+        [
+            FakeResponse(
+                {"data": {"items": []}},
+                headers={"Link": '</v1/widgets?next_page_token=opaque>; rel="next"'},
+            ),
+            FakeResponse({"data": {"items": []}}),
+        ]
+    )
+
+    await collect(rest_source(client, pagination="link"))
+
+    assert len(client.requests) == 2
+    assert "next_page_token=opaque" in client.requests[1][1]
 
 
 @pytest.mark.asyncio
@@ -609,3 +656,29 @@ async def test_checkpoint_rejects_invalid_completed_request_hashes(
 
     with pytest.raises(ConfigurationError, match="completed_request_hashes"):
         await collect(rest_source(FakeClient([])), checkpoint)
+
+
+@pytest.mark.asyncio
+async def test_page_history_limit_fails_before_fetching_an_uncheckpointable_page() -> None:
+    first = rest_source(
+        FakeClient(
+            [
+                FakeResponse(
+                    {"data": {"items": []}},
+                    headers={"Link": '</v1/widgets?page=2>; rel="next"'},
+                )
+            ]
+        ),
+        pagination="link",
+        max_pages=1,
+    )
+    with patch.object(rest_module, "_MAX_COMPLETED_REQUEST_HASHES", 1):
+        checkpoint = states(await collect(first))[-1].state
+        resumed_client = FakeClient([])
+        with pytest.raises(ProtocolError, match="page-history limit"):
+            await collect(
+                rest_source(resumed_client, pagination="link", max_pages=1),
+                checkpoint,
+            )
+
+    assert resumed_client.requests == []
