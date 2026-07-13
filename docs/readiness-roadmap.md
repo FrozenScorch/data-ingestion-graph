@@ -1,7 +1,7 @@
 # Studio and SDK readiness roadmap
 
-Baseline: `main` after PRs #34-#35, audited 2026-07-12. PR #36 is intentionally
-excluded until merged.
+Baseline: `main` after PRs #34-#35 plus this manifest change, audited 2026-07-12.
+PR #36 is intentionally excluded until merged.
 
 ## Executive assessment
 

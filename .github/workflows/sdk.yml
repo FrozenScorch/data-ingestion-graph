@@ -34,6 +34,7 @@ jobs:
         working-directory: sdk
       - run: python -m pip install --force-reinstall dist/*.whl
       - run: python -c "import ingestion_graph; print(ingestion_graph.__version__)"
+      - run: python -c "from ingestion_graph import load_connector_manifest; assert load_connector_manifest('sources', 'discord').name == 'discord'"
       - run: python -m mypy --strict typecheck/consumer.py
         working-directory: sdk
 
