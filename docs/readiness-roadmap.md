@@ -85,8 +85,9 @@ and HTTP actions, but several displayed capabilities are incomplete:
 - Folder selection/watch, connector discovery/preview, schema mapping,
   run freshness, and schedule management need first-class UX.
 - Complete owner checks are required across every execution, WebSocket, DLQ, and lineage path.
-- LAN deployment needs non-default secrets, private service networks, TLS/reverse proxy,
-  secure headers/rate limits, LAN-aware CORS/origin, and working WebSocket proxying.
+- The single-host LAN appliance now generates non-default secrets, uses private service
+  networks, offers HTTP or private-CA TLS, enforces exact HTTP/WebSocket origins, adds
+  security headers, and gates API startup on schema migration. Edge rate limits remain.
 - File access must be confined to server-owned roots; outbound HTTP needs an SSRF policy.
 - Health reporting, Alembic migrations, backup/restore, structured metrics/tracing,
   retention, quotas, and disaster-recovery tests are incomplete.
@@ -102,8 +103,8 @@ assume connectors can use stable upstream APIs. They are planning ranges, not pr
 
 1. Fix authorization coverage for runs, controls, WebSockets, DLQ, and lineage.
 2. Done: browser upload, server-owned owner isolation, file picker, and documents template.
-3. Add production Compose profiles: generated secrets, private networks, reverse proxy/TLS,
-   WebSockets, LAN origins, health correctness, and migrations.
+3. Done: one-command Compose appliance with generated secrets, private networks,
+   reverse proxy/private TLS, WebSockets, exact LAN origins, health, and migration gate.
 4. Lock down outbound HTTP and add a scoped agent/service authentication path.
 
 Exit: a trusted user can safely upload documents and run graphs from another LAN device.

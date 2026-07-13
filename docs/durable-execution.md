@@ -41,6 +41,7 @@ one worker claims a queued row, an expired lease can be reclaimed, and a stale
 worker cannot heartbeat or finish the job. CI provides PostgreSQL through a
 service container and sets `TEST_DATABASE_URL` for that test.
 
-Database schema migrations are still a deployment-readiness item: existing
-Studio startup creates missing tables, but production upgrade/downgrade policy
-and migration gates must be completed before zero-downtime releases.
+Compose gates API startup on the one-shot `ingestion-migrate` service. Legacy
+unversioned databases are baselined once; versioned databases apply ordered
+Alembic upgrades. Zero-downtime multi-replica upgrade/downgrade policy and
+automated backup/restore validation remain enterprise-readiness items.

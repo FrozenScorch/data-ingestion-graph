@@ -1,130 +1,160 @@
-version: '3.8'
+name: ingestion-graph
+
+x-api-environment: &api-environment
+  DATABASE_URL: postgresql+asyncpg://ingestion:${POSTGRES_PASSWORD:?run scripts/init_lan_env.py first}@ingestion-postgres:5432/ingestion_db
+  DATABASE_POOL_SIZE: 10
+  DATABASE_MAX_OVERFLOW: 20
+  DATABASE_ECHO: "false"
+  REDIS_URL: redis://:${REDIS_PASSWORD:?run scripts/init_lan_env.py first}@ingestion-redis:6379/0
+  REDIS_PASSWORD: ${REDIS_PASSWORD:?run scripts/init_lan_env.py first}
+  JWT_SECRET_KEY: ${JWT_SECRET_KEY:?run scripts/init_lan_env.py first}
+  CONNECTION_ENCRYPTION_KEY: ${CONNECTION_ENCRYPTION_KEY:?run scripts/init_lan_env.py first}
+  JWT_ALGORITHM: HS256
+  JWT_ACCESS_TOKEN_EXPIRE_MINUTES: 60
+  ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
+  ADMIN_EMAIL: ${ADMIN_EMAIL:-admin@ingestion-graph.local}
+  ADMIN_PASSWORD: ${ADMIN_PASSWORD:?run scripts/init_lan_env.py first}
+  OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+  APP_NAME: enterprise-data-ingestion-graph-studio
+  APP_ENV: production
+  APP_DEBUG: "false"
+  APP_PORT: 8040
+  CORS_ORIGINS: ${STUDIO_ORIGIN:?run scripts/init_lan_env.py first}
+  UPLOAD_DIR: /app/data/uploads
+  TEMP_DIR: /app/data/temp
+  QUERY_ARTIFACT_TTL_HOURS: ${QUERY_ARTIFACT_TTL_HOURS:-168}
+  RUN_WORKER_ENABLED: "true"
+  RUN_WORKER_CONCURRENCY: ${RUN_WORKER_CONCURRENCY:-1}
+  RUN_WORKER_POLL_SECONDS: ${RUN_WORKER_POLL_SECONDS:-1}
+  RUN_WORKER_LEASE_SECONDS: ${RUN_WORKER_LEASE_SECONDS:-60}
+  RUN_WORKER_HEARTBEAT_SECONDS: ${RUN_WORKER_HEARTBEAT_SECONDS:-15}
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
+  PYTHONIOENCODING: utf-8
+  LANG: C.UTF-8
+  LC_ALL: C.UTF-8
 
 services:
-  # PostgreSQL with pgvector extension
   ingestion-postgres:
     image: pgvector/pgvector:pg16
-    container_name: ingestion-postgres
     restart: unless-stopped
     environment:
       POSTGRES_USER: ingestion
-      POSTGRES_PASSWORD: ingestion_password
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?run scripts/init_lan_env.py first}
       POSTGRES_DB: ingestion_db
       POSTGRES_ENCODING: UTF8
-      PGPORT: ${POSTGRES_PORT:-5432}
     volumes:
       - ingestion_postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ingestion -d ingestion_db -p ${POSTGRES_PORT:-5432}"]
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
       interval: 10s
       timeout: 5s
-      retries: 5
+      retries: 10
       start_period: 10s
-    network_mode: host
+    networks: [data]
 
-  # Redis cache and message broker
   ingestion-redis:
     image: redis:7-alpine
-    container_name: ingestion-redis
     restart: unless-stopped
-    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD:-redis_secret_change_me} --port ${REDIS_PORT:-6379}
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?run scripts/init_lan_env.py first}
+    command: ["redis-server", "--appendonly", "yes", "--requirepass", "${REDIS_PASSWORD:?run scripts/init_lan_env.py first}"]
     volumes:
       - ingestion_redis_data:/data
     healthcheck:
-      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-redis_secret_change_me}", "-p", "${REDIS_PORT:-6379}", "ping"]
+      test: ["CMD-SHELL", "redis-cli -a \"$$REDIS_PASSWORD\" ping 2>/dev/null | grep PONG"]
       interval: 10s
       timeout: 5s
-      retries: 5
+      retries: 10
       start_period: 10s
-    network_mode: host
+    networks: [data]
 
-  # FastAPI Backend
+  ingestion-migrate:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    restart: "no"
+    command: ["python", "-m", "app.db.migrate"]
+    environment: *api-environment
+    depends_on:
+      ingestion-postgres:
+        condition: service_healthy
+    networks: [data]
+
   ingestion-api:
     build:
       context: .
       dockerfile: backend/Dockerfile
-    container_name: ingestion-api
     restart: unless-stopped
-    environment:
-      # Database
-      DATABASE_URL: postgresql+asyncpg://ingestion:ingestion_password@localhost:${POSTGRES_PORT:-5432}/ingestion_db
-      DATABASE_POOL_SIZE: 10
-      DATABASE_MAX_OVERFLOW: 20
-      DATABASE_ECHO: "false"
-
-      # Redis
-      REDIS_URL: redis://:${REDIS_PASSWORD:-redis_secret_change_me}@localhost:${REDIS_PORT:-6379}/0
-      REDIS_PASSWORD: ${REDIS_PASSWORD:-redis_secret_change_me}
-
-      # Auth
-      JWT_SECRET_KEY: ${JWT_SECRET_KEY:-change-this-secret-in-production}
-      CONNECTION_ENCRYPTION_KEY: ${CONNECTION_ENCRYPTION_KEY:?required}
-      JWT_ALGORITHM: HS256
-      JWT_ACCESS_TOKEN_EXPIRE_MINUTES: 60
-
-      # Admin seed
-      ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
-      ADMIN_EMAIL: ${ADMIN_EMAIL:-admin@ingestion-graph.local}
-      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-admin123}
-
-      # OpenRouter
-      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
-
-      # App
-      APP_NAME: enterprise-data-ingestion-graph-studio
-      APP_ENV: ${APP_ENV:-development}
-      APP_DEBUG: ${APP_DEBUG:-true}
-      APP_PORT: 8040
-      QUERY_ARTIFACT_TTL_HOURS: ${QUERY_ARTIFACT_TTL_HOURS:-168}
-
-      # CORS
-      CORS_ORIGINS: http://localhost:3000,http://localhost:8040
-
-      # File storage
-      UPLOAD_DIR: /app/data/uploads
-      TEMP_DIR: /app/data/temp
-
-      # Logging
-      LOG_LEVEL: ${LOG_LEVEL:-INFO}
-
-      # Encoding
-      PYTHONIOENCODING: utf-8
-      LANG: C.UTF-8
-      LC_ALL: C.UTF-8
+    environment: *api-environment
     volumes:
-      - ./data/uploads:/app/data/uploads
-      - ./data/temp:/app/data/temp
+      - ingestion_uploads:/app/data/uploads
+      - ingestion_temp:/app/data/temp
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import httpx; r = httpx.get('http://localhost:8040/health'); r.raise_for_status()\""]
       interval: 30s
       timeout: 10s
-      retries: 3
+      retries: 5
       start_period: 40s
-    network_mode: host
     depends_on:
-      ingestion-postgres:
-        condition: service_healthy
+      ingestion-migrate:
+        condition: service_completed_successfully
       ingestion-redis:
         condition: service_healthy
+    networks: [data, edge]
 
-  # Frontend (SvelteKit - adapter-node)
   ingestion-frontend:
     build:
       context: ./frontend
       dockerfile: Dockerfile
-    container_name: ingestion-frontend
     restart: unless-stopped
     environment:
-      HOST: "0.0.0.0"
-      PORT: "3000"
-      ORIGIN: http://localhost:3000
-      API_HOST: http://localhost:8040
-    network_mode: host
-    profiles:
-      - frontend
+      HOST: 0.0.0.0
+      PORT: 3000
+      ORIGIN: ${STUDIO_ORIGIN:?run scripts/init_lan_env.py first}
+      API_HOST: http://ingestion-api:8040
+    depends_on:
+      ingestion-api:
+        condition: service_healthy
+    networks: [edge]
+
+  ingestion-proxy:
+    image: caddy:2.11.4-alpine
+    restart: unless-stopped
+    command: ["caddy", "run", "--config", "/etc/caddy/${CADDY_CONFIG:-Caddyfile.http}", "--adapter", "caddyfile"]
+    environment:
+      CADDY_CONFIG: ${CADDY_CONFIG:-Caddyfile.http}
+      STUDIO_HOSTNAME: ${STUDIO_HOSTNAME:?run scripts/init_lan_env.py first}
+      STUDIO_ORIGIN: ${STUDIO_ORIGIN:?run scripts/init_lan_env.py first}
+      STUDIO_HTTPS_PORT: ${STUDIO_HTTPS_PORT:-8443}
+    ports:
+      - "${STUDIO_BIND:-0.0.0.0}:${STUDIO_PORT:-8040}:8080"
+      - "${STUDIO_BIND:-0.0.0.0}:${STUDIO_HTTPS_PORT:-8443}:8443"
+    volumes:
+      - ./deploy/caddy:/etc/caddy:ro
+      - ingestion_caddy_data:/data
+      - ingestion_caddy_config:/config
+    healthcheck:
+      test: ["CMD-SHELL", "caddy validate --config /etc/caddy/$$CADDY_CONFIG --adapter caddyfile"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    depends_on:
+      ingestion-api:
+        condition: service_healthy
+      ingestion-frontend:
+        condition: service_healthy
+    networks: [edge]
+
+networks:
+  data:
+    internal: true
+  edge: {}
 
 volumes:
-  ingestion_postgres_data:
-    driver: local
-  ingestion_redis_data:
-    driver: local
+  ingestion_postgres_data: {}
+  ingestion_redis_data: {}
+  ingestion_uploads: {}
+  ingestion_temp: {}
+  ingestion_caddy_data: {}
+  ingestion_caddy_config: {}

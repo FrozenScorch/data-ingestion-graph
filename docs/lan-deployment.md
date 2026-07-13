@@ -1,0 +1,64 @@
+# Local and LAN Studio deployment
+
+The default Compose project is a single-host appliance for a trusted workstation
+or private LAN. Only Caddy publishes host ports. PostgreSQL and Redis use an
+internal bridge network; the API and Svelte frontend are reachable only through
+the same-origin edge proxy. Caddy routes REST, health, and authenticated WebSocket
+traffic to the API and all other traffic to Studio.
+
+## First start
+
+Generate an ignored `.env` with independent random database, Redis, JWT,
+connection-encryption, and initial-admin credentials. Use the hostname or IPv4
+address that browsers will actually open:
+
+```shell
+python scripts/init_lan_env.py --host 192.168.1.50
+docker compose up --build -d
+docker compose ps
+```
+
+Open the printed URL, normally `http://192.168.1.50:8040`. Store the printed
+admin password before continuing: it seeds the first account and later `.env`
+changes do not replace that account's password.
+
+The origin is exact by design. If the host name, IP address, or port changes,
+regenerate `.env` with `--force` and restart the project. Restrict the host
+firewall to your trusted LAN or set `STUDIO_BIND=127.0.0.1` for local-only use.
+
+## Private LAN TLS
+
+Caddy can issue a certificate from its private authority:
+
+```shell
+python scripts/init_lan_env.py --host ingestion.home.arpa --tls --force
+docker compose up --build -d
+docker compose cp ingestion-proxy:/data/caddy/pki/authorities/local/root.crt ./ingestion-caddy-root.crt
+```
+
+Resolve that name to the appliance through local DNS (or a hosts entry), install
+`ingestion-caddy-root.crt` as a trusted root on each client device, and open the
+printed `https://...:8443` URL. Protect the exported root certificate. Publicly
+trusted internet TLS should terminate at an organization-managed reverse proxy;
+this profile is intentionally for a private LAN.
+
+## Schema and data lifecycle
+
+`ingestion-migrate` must finish before the API can start. An existing unversioned
+Studio database is materialized to the current model once and stamped at the
+Alembic head; versioned databases run ordered `alembic upgrade head` migrations.
+Failure stops API startup instead of serving traffic against a partial schema.
+
+Uploads, PostgreSQL, Redis, and Caddy authority state use named volumes. Normal
+`docker compose down` preserves them. Do not use `down -v` unless permanent data
+deletion is intended. Back up the PostgreSQL and upload volumes before upgrades;
+automated backup/restore and disaster-recovery validation remain enterprise gaps.
+
+## Operational boundary
+
+This is a trusted-LAN, single-host deployment—not an internet-facing multi-tenant
+service. It provides production-mode secret validation, owner-scoped credentials,
+private service networking, exact browser/WebSocket origin enforcement, security
+headers, health checks, and durable workers. It does not yet provide SSO, scoped
+service accounts, HA workers, centralized audit/metrics, automated backups, or
+edge rate limiting.
