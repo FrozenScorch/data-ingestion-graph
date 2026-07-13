@@ -9,6 +9,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from app.nodes.base import BaseNode, NodeContext, NodeResult, PortDataType, PortDef
+from app.nodes.sdk_manifest import project_manifest_config_schema, serialize_connector_manifest
 from app.services.query_artifact_service import (
     artifact_expires_at,
     query_artifact_path,
@@ -27,6 +28,10 @@ class SDKQueryStoreNode(BaseNode):
     @property
     def sdk_component(self) -> str:
         return "ingestion_graph.destinations.SQLiteCollection"
+
+    @property
+    def connector_manifest(self) -> dict[str, Any]:
+        return serialize_connector_manifest(SQLiteCollection.manifest())
 
     @property
     def node_type(self) -> str:
@@ -54,9 +59,11 @@ class SDKQueryStoreNode(BaseNode):
 
     @property
     def config_schema(self) -> dict[str, Any]:
-        return {
-            "type": "object",
-            "properties": {
+        return project_manifest_config_schema(
+            SQLiteCollection.manifest(),
+            fields=(),
+            omitted={"path": "Studio derives an isolated run-scoped query artifact path"},
+            studio_properties={
                 "collection": {
                     "type": "string",
                     "default": "pipeline-output",
@@ -64,7 +71,7 @@ class SDKQueryStoreNode(BaseNode):
                     "description": "Logical collection name shown in query results",
                 }
             },
-        }
+        )
 
     async def execute(self, context: NodeContext) -> NodeResult:
         collection = str(context.config.get("collection") or "pipeline-output")
