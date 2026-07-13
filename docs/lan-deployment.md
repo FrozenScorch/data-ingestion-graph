@@ -28,6 +28,38 @@ all existing secrets and custom settings; it changes only the public endpoint/TL
 fields. Restrict the host firewall to your trusted LAN or set
 `STUDIO_BIND=127.0.0.1` for local-only use.
 
+## Outbound connector policy
+
+Studio's HTTP Request node and saved PostgreSQL/Discord connection tests apply a
+fail-closed outbound policy before creating a network client or socket. The default
+`EGRESS_POLICY_MODE=public` accepts HTTP(S) and PostgreSQL targets only when every
+resolved address is public. It rejects URL credentials, loopback, private,
+link-local, multicast, unspecified, reserved, mixed public/private DNS answers,
+and known cloud-metadata destinations. HTTP and PostgreSQL connections use the
+validated address directly; HTTPS retains the original hostname for TLS SNI and
+certificate validation. Redirects are disabled in the client and GET redirects
+are followed only after same-origin revalidation, up to `EGRESS_MAX_REDIRECTS`.
+
+Private LAN connectors require an explicit comma-separated exact-host or CIDR
+allowlist in `.env`, for example:
+
+```dotenv
+EGRESS_ALLOWED_HOSTS=warehouse.home.arpa,nas.home.arpa
+EGRESS_ALLOWED_CIDRS=10.40.0.0/24,fd12:3456:789a::/64
+```
+
+Use `EGRESS_POLICY_MODE=allowlist-only` when every outbound destination, including
+public services, must be explicitly listed. Exact host entries are normalized for
+IDNA and a trailing DNS dot. CIDRs may enable private, loopback, or link-local
+addresses intentionally, but cloud-metadata addresses and mixed public/private DNS
+answers remain blocked. Treat additions as privileged configuration and keep ranges
+as narrow as possible.
+
+The address pin covers these policy-integrated paths and removes the DNS lookup gap
+between validation and connection. It cannot make an upstream HTTP proxy trustworthy;
+the pinned client therefore ignores proxy environment variables. Other Studio-native
+connectors must adopt the same service before they can claim this protection.
+
 ## Private LAN TLS
 
 Caddy can issue a certificate from its private authority:

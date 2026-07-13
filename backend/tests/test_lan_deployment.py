@@ -412,6 +412,10 @@ def test_repository_compose_contract_has_private_data_plane_and_edge_proxy():
     assert "app.db.postgres_credentials" in compose
     assert "app.db.connection_credentials" in compose
     assert "app.db.storage_import" in compose
+    assert "EGRESS_POLICY_MODE: ${EGRESS_POLICY_MODE:-public}" in compose
+    assert "EGRESS_ALLOWED_HOSTS: ${EGRESS_ALLOWED_HOSTS:-}" in compose
+    assert "EGRESS_ALLOWED_CIDRS: ${EGRESS_ALLOWED_CIDRS:-}" in compose
+    assert "EGRESS_MAX_REDIRECTS: ${EGRESS_MAX_REDIRECTS:-3}" in compose
     assert ".legacy-import-complete" in storage_import
     assert "2>/dev/null || true" not in compose
     assert "header Origin {$STUDIO_ORIGIN}" in routes

@@ -7,20 +7,29 @@ Supports testing connections before saving.
 
 import logging
 import uuid
-from typing import Optional
-
-from sqlalchemy import select, delete
-from sqlalchemy.ext.asyncio import AsyncSession
+from collections.abc import Callable
+from contextlib import suppress
+from typing import Any
 
 from app.connection_catalog import SUPPORTED_CONNECTION_TYPES, validate_connection_config
 from app.models.graph import Connection
 from app.services.connection_crypto import (
-    decrypt_connection_config,
     encrypt_connection_config,
     is_encrypted_connection_config,
 )
+from app.services.egress_policy import (
+    EgressPolicy,
+    EgressPolicyError,
+    ValidatedTarget,
+    create_pinned_http_client,
+)
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 logger = logging.getLogger(__name__)
+
+__all__ = ["SUPPORTED_CONNECTION_TYPES"]
+
 
 async def migrate_plaintext_connection_configs(db: AsyncSession) -> int:
     """Encrypt legacy plaintext connection rows after the schema is available."""
@@ -40,7 +49,7 @@ async def create_connection(
     user_id: uuid.UUID,
     name: str,
     type: str,
-    config: Optional[dict] = None,
+    config: dict | None = None,
 ) -> Connection:
     """
     Create a new connection for a user.
@@ -73,7 +82,7 @@ async def create_connection(
 async def get_connection(
     db: AsyncSession,
     connection_id: uuid.UUID,
-) -> Optional[Connection]:
+) -> Connection | None:
     """
     Get a connection by ID.
 
@@ -91,7 +100,7 @@ async def get_connection(
 async def get_connections(
     db: AsyncSession,
     user_id: uuid.UUID,
-    type: Optional[str] = None,
+    type: str | None = None,
 ) -> list[Connection]:
     """
     List all connections for a user, optionally filtered by type.
@@ -116,9 +125,9 @@ async def update_connection(
     db: AsyncSession,
     connection_id: uuid.UUID,
     user_id: uuid.UUID,
-    name: Optional[str] = None,
-    config: Optional[dict] = None,
-) -> Optional[Connection]:
+    name: str | None = None,
+    config: dict | None = None,
+) -> Connection | None:
     """
     Update a connection.
 
@@ -181,6 +190,9 @@ async def delete_connection(
 async def test_connection(
     config: dict,
     type: str,
+    *,
+    egress_policy: EgressPolicy | None = None,
+    http_client_factory: Callable[[ValidatedTarget, float], Any] = create_pinned_http_client,
 ) -> dict:
     """
     Test if a connection works.
@@ -196,16 +208,20 @@ async def test_connection(
         ValueError: For unsupported connection types
     """
     validate_connection_config(type, config)
+    try:
+        policy = egress_policy or EgressPolicy.from_settings()
+    except EgressPolicyError as exc:
+        return {"success": False, "message": str(exc)}
 
     if type == "postgres":
-        return await _test_postgres_connection(config)
+        return await _test_postgres_connection(config, policy)
     if type == "discord":
-        return await _test_discord_connection(config)
+        return await _test_discord_connection(config, policy, http_client_factory)
 
     return {"success": False, "message": f"No test implemented for type: {type}"}
 
 
-async def _test_postgres_connection(config: dict) -> dict:
+async def _test_postgres_connection(config: dict, policy: EgressPolicy) -> dict:
     """
     Test a PostgreSQL connection by connecting and running SELECT 1.
 
@@ -223,51 +239,65 @@ async def _test_postgres_connection(config: dict) -> dict:
     username = config.get("username", config.get("user", "postgres"))
     password = config.get("password", "")
 
+    try:
+        target = await policy.validate_host(host, port)
+    except EgressPolicyError as exc:
+        return {"success": False, "message": str(exc)}
+
     conn = None
     try:
+        pinned_hosts = tuple(str(address) for address in target.addresses)
         conn = await asyncpg.connect(
-            host=host,
-            port=port,
+            host=pinned_hosts[0] if len(pinned_hosts) == 1 else pinned_hosts,
+            port=target.port,
             database=database,
             user=username,
             password=password,
             timeout=10,
         )
-        result = await conn.fetchval("SELECT 1")
+        await conn.fetchval("SELECT 1")
         return {
             "success": True,
-            "message": f"Connection successful to {host}:{port}/{database}",
+            "message": "PostgreSQL connection successful",
         }
-    except Exception as e:
+    except Exception as exc:
         return {
             "success": False,
-            "message": f"Connection failed: {e}",
+            "message": f"PostgreSQL connection failed ({type(exc).__name__})",
         }
     finally:
         if conn is not None:
-            await conn.close()
+            with suppress(Exception):
+                await conn.close()
 
 
-async def _test_discord_connection(config: dict) -> dict:
+async def _test_discord_connection(
+    config: dict,
+    policy: EgressPolicy,
+    client_factory: Callable[[ValidatedTarget, float], Any],
+) -> dict:
     """Validate an encrypted Discord bot-token connection."""
-    import httpx
-
     token = config.get("bot_token") or config.get("token")
     if not token:
         return {"success": False, "message": "Discord bot token is required"}
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        target = await policy.validate_url("https://discord.com/api/v10/users/@me")
+    except EgressPolicyError as exc:
+        return {"success": False, "message": str(exc)}
+    try:
+        async with client_factory(target, 10.0) as client:
             response = await client.get(
-                "https://discord.com/api/v10/users/@me",
+                target.url,
                 headers={"Authorization": f"Bot {token}"},
+                follow_redirects=False,
             )
         if response.status_code == 200:
             return {"success": True, "message": "Discord connection successful"}
         if response.status_code in {401, 403}:
             return {"success": False, "message": "Discord credentials are invalid"}
         return {"success": False, "message": f"Discord returned HTTP {response.status_code}"}
-    except httpx.HTTPError as exc:
+    except Exception as exc:
         return {
             "success": False,
-            "message": f"Discord connection failed: {type(exc).__name__}",
+            "message": f"Discord connection failed ({type(exc).__name__})",
         }

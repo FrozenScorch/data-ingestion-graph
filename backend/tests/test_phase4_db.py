@@ -1109,6 +1109,7 @@ class TestConnectionTest:
     async def test_test_postgres_connection_success(self):
         """Test successful PostgreSQL connection test."""
         from app.services.connection_service import test_connection
+        from app.services.egress_policy import EgressPolicy
 
         mock_conn = AsyncMock()
         mock_conn.fetchval = AsyncMock(return_value=1)
@@ -1124,7 +1125,14 @@ class TestConnectionTest:
 
         # asyncpg is imported inside the function, patch at module level
         with patch("asyncpg.connect", new_callable=AsyncMock, return_value=mock_conn):
-            result = await test_connection(config, "postgres")
+            result = await test_connection(
+                config,
+                "postgres",
+                egress_policy=EgressPolicy(
+                    allowed_hosts=("localhost",),
+                    resolver=AsyncMock(return_value=("127.0.0.1",)),
+                ),
+            )
 
         assert result["success"] is True
         assert "successful" in result["message"].lower()
@@ -1134,6 +1142,7 @@ class TestConnectionTest:
     async def test_test_postgres_connection_failure(self):
         """Test failed PostgreSQL connection test."""
         from app.services.connection_service import test_connection
+        from app.services.egress_policy import EgressPolicy
 
         config = {
             "host": "badhost",
@@ -1146,7 +1155,11 @@ class TestConnectionTest:
         with patch(
             "asyncpg.connect", new_callable=AsyncMock, side_effect=Exception("Connection refused")
         ):
-            result = await test_connection(config, "postgres")
+            result = await test_connection(
+                config,
+                "postgres",
+                egress_policy=EgressPolicy(resolver=AsyncMock(return_value=("93.184.216.34",))),
+            )
 
         assert result["success"] is False
         assert "failed" in result["message"].lower()
@@ -1163,6 +1176,7 @@ class TestConnectionTest:
     async def test_test_postgres_closes_on_error(self):
         """Test that connection is closed even on error."""
         from app.services.connection_service import test_connection
+        from app.services.egress_policy import EgressPolicy
 
         mock_conn = AsyncMock()
         mock_conn.fetchval = AsyncMock(side_effect=Exception("Auth failed"))
@@ -1177,7 +1191,14 @@ class TestConnectionTest:
         }
 
         with patch("asyncpg.connect", new_callable=AsyncMock, return_value=mock_conn):
-            result = await test_connection(config, "postgres")
+            result = await test_connection(
+                config,
+                "postgres",
+                egress_policy=EgressPolicy(
+                    allowed_hosts=("localhost",),
+                    resolver=AsyncMock(return_value=("127.0.0.1",)),
+                ),
+            )
 
         assert result["success"] is False
         mock_conn.close.assert_called_once()
