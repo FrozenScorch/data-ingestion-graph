@@ -146,11 +146,12 @@ async def finish_run_job(
     error: str | None = None,
 ) -> bool:
     """Complete a job only if the caller still owns its lease."""
+    finished_at = utc_now()
     values = {
         "status": RunJobStatus.FAILED.value if error else RunJobStatus.COMPLETED.value,
         "lease_owner": None,
         "lease_expires_at": None,
-        "heartbeat_at": utc_now(),
+        "heartbeat_at": finished_at,
         "last_error": error,
     }
     result = await db.execute(
@@ -159,6 +160,8 @@ async def finish_run_job(
             RunJob.id == job_id,
             RunJob.status == RunJobStatus.LEASED.value,
             RunJob.lease_owner == worker_id,
+            RunJob.lease_expires_at.is_not(None),
+            RunJob.lease_expires_at > finished_at,
         )
         .values(**values)
     )

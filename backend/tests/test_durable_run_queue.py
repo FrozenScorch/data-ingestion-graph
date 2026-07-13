@@ -130,6 +130,8 @@ async def test_heartbeat_and_finish_are_fenced_by_lease_owner():
     assert renewed is True
     assert finished is False
     assert db.commit.await_count == 2
+    finish_query = db.execute.await_args_list[1].args[0]
+    assert "lease_expires_at" in str(finish_query)
 
 
 @pytest.mark.asyncio

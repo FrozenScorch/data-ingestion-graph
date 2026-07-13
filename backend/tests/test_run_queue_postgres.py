@@ -239,12 +239,28 @@ async def test_postgres_claim_is_exclusive_and_expired_lease_is_reclaimed():
                 worker_id="stale-worker",
                 error="late failure",
             )
-        async with admin_engine.connect() as conn:
-            stale_status = await conn.scalar(
-                text(f'SELECT status FROM "{schema}".runs WHERE id = :run_id'),
-                {"run_id": stale_run_id},
+        async with sessions() as db:
+            assert not await finish_run_job(
+                db,
+                job_id=stale_job_id,
+                worker_id="stale-worker",
+                error="late failure",
             )
-        assert stale_status == "running"
+        async with admin_engine.connect() as conn:
+            stale_state = (
+                await conn.execute(
+                    text(
+                        f"""
+                        SELECT r.status, j.status, j.lease_owner
+                        FROM "{schema}".runs r
+                        JOIN "{schema}".run_jobs j ON j.run_id = r.id
+                        WHERE r.id = :run_id
+                        """
+                    ),
+                    {"run_id": stale_run_id},
+                )
+            ).one()
+        assert stale_state == ("running", "leased", "stale-worker")
     finally:
         await engine.dispose()
         async with admin_engine.begin() as conn:
