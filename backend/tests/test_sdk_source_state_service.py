@@ -99,7 +99,12 @@ async def test_save_stages_run_candidate_without_mutating_committed_row():
     )
     session = AsyncMock()
     session.add = MagicMock()
-    session.execute.side_effect = [_scalar_result(None), _scalar_result(committed)]
+    run = Run(id=run_id, graph_id=graph_id, status="running")
+    session.execute.side_effect = [
+        _scalar_result(run),
+        _scalar_result(None),
+        _scalar_result(committed),
+    ]
     store = StudioSDKSourceStateStore(
         session,
         run_id=run_id,
@@ -129,7 +134,27 @@ async def test_completion_cancellation_wins_before_candidate_promotion():
     assert await complete_run_with_source_state_promotion(session, run.id) is False
     session.rollback.assert_awaited_once()
     session.commit.assert_not_awaited()
-    assert session.execute.await_count == 1
+    assert session.execute.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_cancelled_run_cannot_stage_a_late_candidate():
+    run_id, owner_id, graph_id = uuid4(), uuid4(), uuid4()
+    session = AsyncMock()
+    session.execute.return_value = _scalar_result(
+        Run(id=run_id, graph_id=graph_id, status="cancelled")
+    )
+    store = StudioSDKSourceStateStore(
+        session,
+        run_id=run_id,
+        owner_id=owner_id,
+        graph_id=graph_id,
+        node_id="documents",
+    )
+
+    with pytest.raises(RuntimeError, match="inactive run"):
+        await store.save(store.pipeline_key, "local_documents", "upload-1", {"cursor": 2})
+    session.add.assert_not_called()
 
 
 @pytest.mark.asyncio

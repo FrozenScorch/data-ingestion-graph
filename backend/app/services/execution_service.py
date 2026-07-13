@@ -5,9 +5,17 @@ Execution service: run creation, management, and control.
 import logging
 from uuid import UUID
 
-from app.models.execution import Run, RunJobType, RunStatus, TriggerType
+from app.models.execution import (
+    Run,
+    RunJob,
+    RunJobStatus,
+    RunJobType,
+    RunStatus,
+    TriggerType,
+)
 from app.models.graph import Graph
-from sqlalchemy import func, select
+from app.models.sdk_source_state import SDKSourceStateCandidate
+from sqlalchemy import delete, exists, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -23,6 +31,8 @@ async def create_run(
     enqueue_job_type: str | None = None,
 ) -> Run:
     """Create a new run, optionally with an atomic durable dispatch row."""
+    if enqueue_job_type == RunJobType.FULL.value:
+        await _prune_abandoned_source_state_candidates(db, graph_id)
     run = Run(
         graph_id=graph_id,
         graph_version_id=graph_version_id,
@@ -107,7 +117,12 @@ async def update_run_status(
     new_status: str,
 ) -> Run | None:
     """Update a run's status while serializing against final acknowledgement."""
-    result = await db.execute(select(Run).where(Run.id == run_id).with_for_update())
+    result = await db.execute(
+        select(Run)
+        .where(Run.id == run_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
     run = result.scalar_one_or_none()
     if not run:
         return None
@@ -118,6 +133,8 @@ async def update_run_status(
         raise ValueError(f"Invalid status transition: {run.status} -> {new_status}")
 
     run.status = new_status
+    if new_status == RunStatus.CANCELLED.value:
+        await _delete_run_source_state_candidates(db, run)
     await db.commit()
     await db.refresh(run)
     return run
@@ -136,3 +153,41 @@ async def pause_run(db: AsyncSession, run_id: UUID) -> Run | None:
 async def resume_run(db: AsyncSession, run_id: UUID) -> Run | None:
     """Resume a paused run."""
     return await update_run_status(db, run_id, RunStatus.RUNNING.value)
+
+
+def _graph_owner_id(graph_id: UUID):
+    return select(Graph.owner_id).where(Graph.id == graph_id).scalar_subquery()
+
+
+async def _delete_run_source_state_candidates(db: AsyncSession, run: Run) -> None:
+    await db.execute(
+        delete(SDKSourceStateCandidate).where(
+            SDKSourceStateCandidate.run_id == run.id,
+            SDKSourceStateCandidate.graph_id == run.graph_id,
+            SDKSourceStateCandidate.owner_id == _graph_owner_id(run.graph_id),
+        )
+    )
+
+
+async def _prune_abandoned_source_state_candidates(
+    db: AsyncSession, graph_id: UUID
+) -> None:
+    abandoned_runs = select(Run.id).where(
+        Run.graph_id == graph_id,
+        Run.status.in_((RunStatus.FAILED.value, RunStatus.CANCELLED.value)),
+        ~exists(
+            select(RunJob.id).where(
+                RunJob.run_id == Run.id,
+                RunJob.status.in_(
+                    (RunJobStatus.QUEUED.value, RunJobStatus.LEASED.value)
+                ),
+            )
+        ),
+    )
+    await db.execute(
+        delete(SDKSourceStateCandidate).where(
+            SDKSourceStateCandidate.graph_id == graph_id,
+            SDKSourceStateCandidate.owner_id == _graph_owner_id(graph_id),
+            SDKSourceStateCandidate.run_id.in_(abandoned_runs),
+        )
+    )

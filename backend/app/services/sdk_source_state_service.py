@@ -89,6 +89,7 @@ class StudioSDKSourceStateStore(StateStore):
         state: Mapping[str, Any],
     ) -> None:
         self._require_pipeline(pipeline)
+        await self._lock_active_run()
         candidate = await self._candidate(source, stream)
         committed = await self._committed(source, stream)
         if candidate is None:
@@ -127,6 +128,7 @@ class StudioSDKSourceStateStore(StateStore):
 
     async def delete(self, pipeline: str, source: str, stream: str) -> None:
         self._require_pipeline(pipeline)
+        await self._lock_active_run()
         candidate = await self._candidate(source, stream)
         committed = await self._committed(source, stream)
         if candidate is not None:
@@ -188,13 +190,23 @@ class StudioSDKSourceStateStore(StateStore):
         )
         return result.scalar_one_or_none()
 
+    async def _lock_active_run(self) -> None:
+        result = await self.session.execute(
+            select(Run)
+            .where(Run.id == self.run_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        run = result.scalar_one_or_none()
+        if run is None or run.status != RunStatus.RUNNING.value:
+            raise RuntimeError("SDK source state cannot be staged for an inactive run")
+
     def _require_pipeline(self, pipeline: str) -> None:
         if pipeline != self.pipeline_key:
             raise ValueError("SDK source state requested outside its graph-node scope")
 
 
-async def promote_sdk_source_state_candidates(db: AsyncSession, run_id: UUID) -> int:
-    """Promote one run's candidates without committing the surrounding transaction."""
+async def _lock_candidate_scopes(db: AsyncSession, run_id: UUID) -> list[str]:
     scope_result = await db.execute(
         select(
             SDKSourceStateCandidate.owner_id,
@@ -210,6 +222,19 @@ async def promote_sdk_source_state_candidates(db: AsyncSession, run_id: UUID) ->
     )
     for pipeline_key in pipeline_keys:
         await db.execute(select(func.pg_advisory_xact_lock(_lock_id(pipeline_key))))
+    return pipeline_keys
+
+
+async def promote_sdk_source_state_candidates(
+    db: AsyncSession,
+    run_id: UUID,
+    *,
+    locked_pipeline_keys: list[str] | None = None,
+) -> int:
+    """Promote one run's candidates without committing the surrounding transaction."""
+    pipeline_keys = locked_pipeline_keys
+    if pipeline_keys is None:
+        pipeline_keys = await _lock_candidate_scopes(db, run_id)
 
     result = await db.execute(
         select(SDKSourceStateCandidate)
@@ -320,6 +345,10 @@ async def complete_run_with_source_state_promotion(
             await db.rollback()
             raise RunCompletionLeaseError("Run job lease was lost before graph completion")
 
+    # Source staging takes its scope lock before the run row. Match that order so
+    # cancellation, staging, and completion cannot form an advisory/row deadlock.
+    pipeline_keys = await _lock_candidate_scopes(db, run_id)
+
     run_result = await db.execute(
         select(Run)
         .where(Run.id == run_id)
@@ -338,7 +367,11 @@ async def complete_run_with_source_state_promotion(
         raise RuntimeError(f"Cannot complete run in {run_status!r} state")
 
     try:
-        await promote_sdk_source_state_candidates(db, run_id)
+        await promote_sdk_source_state_candidates(
+            db,
+            run_id,
+            locked_pipeline_keys=pipeline_keys,
+        )
         run.status = RunStatus.COMPLETED.value
         run.error_message = None
         await db.commit()

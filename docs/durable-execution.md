@@ -13,8 +13,11 @@ never re-executed when an expired lease is reclaimed.
 SDK source adapters stage run-scoped state candidates at source POST_EXEC. The
 worker promotes them only after all graph nodes succeed, while holding the live
 job lease and run row lock, in the same transaction that marks the run completed.
-A downstream failure or cancellation keeps candidates for same-run failed-node
-retry; a crash or lease loss cannot expose them as committed source state.
+A downstream failure keeps candidates for same-run failed-node retry; a crash or
+lease loss cannot expose them as committed source state. Cancellation atomically
+deletes its candidates because it is terminal. Paused runs retain candidates,
+while a new full run abandons and prunes candidates from prior failed or cancelled
+runs for the same owner and graph.
 
 ## Runtime settings
 

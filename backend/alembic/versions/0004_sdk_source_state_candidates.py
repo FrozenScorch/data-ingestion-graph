@@ -92,5 +92,10 @@ def downgrade() -> None:
         table_name="sdk_source_state_candidates",
     )
     op.drop_table("sdk_source_state_candidates")
+    source_states = sa.table(
+        "sdk_source_states",
+        sa.column("is_deleted", sa.Boolean()),
+    )
+    op.execute(source_states.delete().where(source_states.c.is_deleted.is_(True)))
     op.drop_column("sdk_source_states", "is_deleted")
     op.drop_column("sdk_source_states", "revision")

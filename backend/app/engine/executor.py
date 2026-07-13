@@ -71,6 +71,26 @@ class DAGExecutor:
         Returns:
             Updated Run record with final status.
         """
+        # Force-refresh the identity-mapped run under lock before acting on it.
+        # A cancellation, pause, or completion committed by another session wins.
+        run_result = await self.db.execute(
+            select(Run)
+            .where(Run.id == run.id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        locked_run = run_result.scalar_one_or_none()
+        if locked_run is None:
+            await self.db.rollback()
+            raise RuntimeError("Run no longer exists")
+        run = locked_run
+        if can_transition(run.status, RunStatus.RUNNING.value):
+            run.status = RunStatus.RUNNING.value
+        if run.status != RunStatus.RUNNING.value:
+            await self.db.commit()
+            return run
+        await self.db.commit()
+
         # Validate DAG
         errors = validate_dag(nodes_data, edges_data)
         if errors:
@@ -80,10 +100,6 @@ class DAGExecutor:
             await self._emit_event(run.id, "run_failed", {"errors": errors})
             return run
 
-        # Update run status with state machine validation
-        if can_transition(run.status, RunStatus.RUNNING.value):
-            run.status = RunStatus.RUNNING.value
-            await self.db.commit()
         await self._emit_event(run.id, "run_started", {})
 
         # Compute execution levels (topological sort)

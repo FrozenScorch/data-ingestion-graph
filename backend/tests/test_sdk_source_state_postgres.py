@@ -9,6 +9,7 @@ from uuid import UUID, uuid4
 import pytest
 from app.models.execution import Run
 from app.models.sdk_source_state import SDKSourceState, SDKSourceStateCandidate
+from app.services.execution_service import cancel_run
 from app.services.sdk_source_state_service import (
     StaleSDKSourceStateCandidateError,
     StudioSDKSourceStateStore,
@@ -172,6 +173,55 @@ def _store(
         graph_id=graph_id,
         node_id="documents",
     )
+
+
+@pytest.mark.asyncio
+async def test_stale_identity_map_cancellation_cannot_overwrite_completed_run():
+    schema = f"sdk_cancel_race_{uuid4().hex}"
+    engine = create_async_engine(
+        TEST_DATABASE_URL,
+        connect_args={"server_settings": {"search_path": schema}},
+    )
+    admin_engine = create_async_engine(TEST_DATABASE_URL)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    owner_id, graph_id, run_id, job_id = uuid4(), uuid4(), uuid4(), uuid4()
+
+    try:
+        await _create_schema(admin_engine, schema)
+        async with sessions() as seed_session:
+            await _seed_run(
+                seed_session,
+                owner_id=owner_id,
+                graph_id=graph_id,
+                run_id=run_id,
+                job_id=job_id,
+                worker="worker-1",
+            )
+
+        async with sessions() as stale_session:
+            cached_run = await stale_session.get(Run, run_id)
+            assert cached_run is not None and cached_run.status == "running"
+
+            async with sessions() as completion_session:
+                assert await complete_run_with_source_state_promotion(
+                    completion_session,
+                    run_id,
+                    job_id=job_id,
+                    lease_owner="worker-1",
+                )
+
+            with pytest.raises(ValueError, match="completed -> cancelled"):
+                await cancel_run(stale_session, run_id)
+            assert cached_run.status == "completed"
+
+        async with sessions() as verification_session:
+            run = await verification_session.get(Run, run_id)
+            assert run is not None and run.status == "completed"
+    finally:
+        await engine.dispose()
+        async with admin_engine.begin() as connection:
+            await connection.execute(text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
+        await admin_engine.dispose()
 
 
 @pytest.mark.asyncio

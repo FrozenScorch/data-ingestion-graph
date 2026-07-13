@@ -11,10 +11,17 @@ from app.engine.executor import DAGExecutor
 from app.models.execution import NodeStatus, Run, RunJob, RunNode
 
 
+def _scalar_result(value):
+    result = MagicMock()
+    result.scalar_one_or_none.return_value = value
+    return result
+
+
 @pytest.mark.asyncio
 async def test_full_run_promotes_only_after_destination_level_completes(monkeypatch):
     run = Run(id=uuid4(), graph_id=uuid4(), status="pending")
     db = AsyncMock()
+    db.execute.return_value = _scalar_result(run)
     executor = DAGExecutor(db)
     monkeypatch.setattr(executor, "_graph_owner", AsyncMock(return_value=uuid4()))
     monkeypatch.setattr(executor, "_resolve_connections", AsyncMock(return_value={}))
@@ -44,6 +51,7 @@ async def test_full_run_promotes_only_after_destination_level_completes(monkeypa
 async def test_destination_failure_never_reaches_source_state_promotion(monkeypatch):
     run = Run(id=uuid4(), graph_id=uuid4(), status="pending")
     db = AsyncMock()
+    db.execute.return_value = _scalar_result(run)
     executor = DAGExecutor(db)
     monkeypatch.setattr(executor, "_graph_owner", AsyncMock(return_value=uuid4()))
     monkeypatch.setattr(executor, "_resolve_connections", AsyncMock(return_value={}))
@@ -65,6 +73,31 @@ async def test_destination_failure_never_reaches_source_state_promotion(monkeypa
     )
 
     promote.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_executor_locked_reload_does_not_resurrect_cached_cancelled_run(monkeypatch):
+    cached_run = Run(id=uuid4(), graph_id=uuid4(), status="running")
+    db = AsyncMock()
+
+    async def locked_reload(statement):
+        assert "FOR UPDATE" in str(statement)
+        assert statement.get_execution_options()["populate_existing"] is True
+        # Faithfully model SQLAlchemy refreshing the existing identity-map object.
+        cached_run.status = "cancelled"
+        return _scalar_result(cached_run)
+
+    db.execute.side_effect = locked_reload
+    executor = DAGExecutor(db)
+    graph_owner = AsyncMock()
+    monkeypatch.setattr(executor, "_graph_owner", graph_owner)
+
+    returned = await executor.execute(cached_run, {}, [])
+
+    assert returned is cached_run
+    assert returned.status == "cancelled"
+    db.commit.assert_awaited_once()
+    graph_owner.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -105,7 +138,7 @@ async def test_failed_node_retry_restores_source_output_and_promotes_without_rer
     owner_result.scalar_one_or_none.return_value = uuid4()
     db = AsyncMock()
     db.get.return_value = version
-    db.execute.side_effect = [node_result, owner_result]
+    db.execute.side_effect = [node_result, owner_result, _scalar_result(run)]
 
     executor = MagicMock()
     executor._resolve_connections = AsyncMock(return_value={})

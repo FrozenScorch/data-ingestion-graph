@@ -9,6 +9,7 @@ from app.engine.executor import DAGExecutor
 from app.engine.graph_data import unpack_version_data
 from app.engine.runner import run_node_with_retry
 from app.engine.scheduler import topological_sort
+from app.engine.state import can_transition
 from app.models.execution import (
     CheckpointType,
     NodeStatus,
@@ -119,7 +120,22 @@ async def _execute_failed_nodes(
         "graph_id": str(run.graph_id),
     }
 
-    run.status = RunStatus.RUNNING.value
+    locked_run_result = await db.execute(
+        select(Run)
+        .where(Run.id == run.id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    locked_run = locked_run_result.scalar_one_or_none()
+    if locked_run is None:
+        await db.rollback()
+        raise RuntimeError("Run no longer exists")
+    run = locked_run
+    if can_transition(run.status, RunStatus.RUNNING.value):
+        run.status = RunStatus.RUNNING.value
+    if run.status != RunStatus.RUNNING.value:
+        await db.commit()
+        return
     run.error_message = None
     await db.commit()
 

@@ -62,10 +62,13 @@ After every graph node reports success, the durable worker fences its live job
 lease, locks the run and affected source scopes, rejects stale base revisions, and
 promotes all candidates in the same transaction that marks the run completed.
 Downstream failure, cancellation, lease loss, or a crash before that transaction
-leaves committed source state unchanged. Failed-node retry restores the source
-POST_EXEC output and promotes the same durable candidates after its downstream
-nodes succeed, without rerunning the source. Revisions and retained delete
-tombstones prevent an older concurrent run from recreating or regressing state.
+leaves committed source state unchanged. Failed runs retain candidates so
+failed-node retry can restore the source POST_EXEC output and promote them after
+its downstream nodes succeed, without rerunning the source. Cancellation is
+terminal and deletes that run's candidates atomically. Starting a new full run
+also prunes candidates from prior failed or cancelled runs for that owner/graph;
+paused runs retain candidates. Revisions and retained delete tombstones prevent
+an older concurrent run from recreating or regressing state.
 
 This makes each Document Source run an incremental delta: unchanged uploads emit
 nothing, changed files emit stable upserts and deletes, and deselecting a prior
