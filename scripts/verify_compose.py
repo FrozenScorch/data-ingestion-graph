@@ -30,7 +30,14 @@ def verify(config: dict[str, Any]) -> list[str]:
         errors.append("host networking is forbidden")
 
     networks = config.get("networks", {})
-    data_network = next((value for name, value in networks.items() if name.endswith("_data")), None)
+    data_network = networks.get("data") or next(
+        (
+            value
+            for value in networks.values()
+            if value.get("name", "").endswith("_data")
+        ),
+        None,
+    )
     if not data_network or data_network.get("internal") is not True:
         errors.append("the data network must be internal")
 

@@ -10,6 +10,7 @@ import pytest
 from app.db import migrate as migration
 
 from scripts.init_lan_env import build_environment, validate_host, write_environment
+from scripts.verify_compose import verify
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -134,3 +135,35 @@ def test_repository_compose_contract_has_private_data_plane_and_edge_proxy():
     assert "header Origin {$STUDIO_ORIGIN}" in routes
     assert "reverse_proxy ingestion-api:8040" in routes
     assert "reverse_proxy ingestion-frontend:3000" in routes
+
+
+def test_rendered_compose_verifier_accepts_logical_network_keys():
+    services = {
+        "ingestion-postgres": {},
+        "ingestion-redis": {},
+        "ingestion-migrate": {},
+        "ingestion-api": {
+            "environment": {
+                "APP_ENV": "production",
+                "APP_DEBUG": "false",
+                "DATABASE_URL": "postgresql://user:secret@ingestion-postgres:5432/db",
+                "REDIS_URL": "redis://:secret@ingestion-redis:6379/0",
+            },
+            "depends_on": {
+                "ingestion-migrate": {"condition": "service_completed_successfully"}
+            },
+        },
+        "ingestion-frontend": {
+            "environment": {"API_HOST": "http://ingestion-api:8040"}
+        },
+        "ingestion-proxy": {"ports": [{"target": 8080, "published": "8040"}]},
+    }
+    rendered = {
+        "services": services,
+        "networks": {
+            "data": {"name": "ingestion-graph_data", "internal": True},
+            "edge": {"name": "ingestion-graph_edge"},
+        },
+    }
+
+    assert verify(rendered) == []
