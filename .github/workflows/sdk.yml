@@ -65,9 +65,11 @@ jobs:
         run: >-
           python -c "from ingestion_graph import load_connector_manifest;
           from ingestion_graph.plugins import discover_plugins;
-          assert set(discover_plugins('sources')) == {'discord', 'jsonl', 'local_documents'};
-          assert set(discover_plugins('destinations')) == {'jsonl', 'sqlite'};
+          assert set(discover_plugins('sources')) == {'discord', 'jsonl', 'local_documents', 'postgres'};
+          assert set(discover_plugins('destinations')) == {'jsonl', 'postgres', 'sqlite'};
+          assert load_connector_manifest('sources', 'postgres').name == 'postgres';
           assert load_connector_manifest('destinations', 'jsonl').name == 'jsonl';
+          assert load_connector_manifest('destinations', 'postgres').name == 'postgres';
           assert load_connector_manifest('destinations', 'sqlite').name == 'sqlite'"
       - run: python -m mypy --strict typecheck/consumer.py
         working-directory: sdk
