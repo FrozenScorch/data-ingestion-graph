@@ -76,6 +76,7 @@ automated backup/restore and disaster-recovery validation remain enterprise gaps
 This is a trusted-LAN, single-host deployment—not an internet-facing multi-tenant
 service. It provides production-mode secret validation, owner-scoped credentials,
 private service networking, exact browser/WebSocket origin enforcement, security
-headers, health checks, and durable workers. It does not yet provide SSO, scoped
+headers, health checks, durable workers, owner-scoped schedules, and signed webhook
+ingress with application-level replay/rate protection. It does not yet provide SSO, scoped
 service accounts, HA workers, centralized audit/metrics, automated backups, or
 edge rate limiting.

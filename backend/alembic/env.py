@@ -17,6 +17,7 @@ from app.models import (  # noqa: F401
     DeadLetterQueue,
     ExecutionLog,
     Graph,
+    GraphTrigger,
     GraphVersion,
     Provenance,
     Run,
@@ -26,6 +27,7 @@ from app.models import (  # noqa: F401
     SDKSourceState,
     SDKSourceStateCandidate,
     User,
+    WebhookDelivery,
 )
 from app.models.base import Base
 from sqlalchemy import pool

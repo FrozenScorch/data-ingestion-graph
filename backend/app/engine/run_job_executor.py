@@ -130,6 +130,7 @@ async def _execute_failed_nodes(
         "connections": connections,
         "owner_id": str(owner_id),
         "graph_id": str(run.graph_id),
+        "trigger_payload": run.trigger_payload if run.trigger_type == "webhook" else None,
     }
 
     locked_run_result = await db.execute(
@@ -160,6 +161,14 @@ async def _execute_failed_nodes(
             node_type = node_def.get("type", node_def.get("node_type", "unknown"))
             node_config = node_configs.get(node_id, {})
             inputs, _ = executor._collect_inputs(node_id, edges, exec_state)
+            if node_type == "webhook_source" and exec_state["trigger_payload"] is not None:
+                inputs = executor._inject_webhook_payload(
+                    node_id,
+                    node_type,
+                    edges,
+                    inputs,
+                    exec_state,
+                )
             run_node = await run_node_with_retry(
                 db=db,
                 run_id=run.id,

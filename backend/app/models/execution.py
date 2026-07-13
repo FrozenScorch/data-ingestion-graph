@@ -80,6 +80,9 @@ class Run(UUIDMixin, TimestampMixin, Base):
     )
     status: Mapped[str] = mapped_column(String(50), default=RunStatus.PENDING.value, nullable=False)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    trigger_payload: Mapped[dict | None] = mapped_column(
+        JSONB(none_as_null=True), nullable=True
+    )
 
     # Relationships -- all use lazy="noload" to prevent N+1 queries.
     # Use explicit selectinload() in queries that need these.

@@ -34,8 +34,11 @@ async def create_run(
     trigger_type: str = TriggerType.MANUAL.value,
     graph_version_id: UUID | None = None,
     enqueue_job_type: str | None = None,
+    trigger_payload: dict | None = None,
+    *,
+    commit: bool = True,
 ) -> Run:
-    """Create a new run, optionally with an atomic durable dispatch row."""
+    """Create a run and optional durable job in the caller's transaction."""
     if enqueue_job_type == RunJobType.FULL.value:
         await _supersede_inactive_failed_runs(db, graph_id)
     run = Run(
@@ -44,6 +47,7 @@ async def create_run(
         trigger_type=trigger_type,
         triggered_by=triggered_by,
         status=RunStatus.PENDING.value,
+        trigger_payload=trigger_payload,
     )
     db.add(run)
     if enqueue_job_type is not None:
@@ -56,8 +60,11 @@ async def create_run(
             job_type=enqueue_job_type or RunJobType.FULL.value,
             commit=False,
         )
-    await db.commit()
-    await db.refresh(run)
+    elif not commit:
+        await db.flush()
+    if commit:
+        await db.commit()
+        await db.refresh(run)
     return run
 
 

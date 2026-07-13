@@ -376,13 +376,15 @@ async def test_unversioned_legacy_postgres_schema_upgrades_to_head():
             )
         await verification_engine.dispose()
 
-        assert revision == "0004_sdk_state_candidates"
+        assert revision == "0005_graph_triggers"
         assert "ix_runs_graph_id_status" in schema["indexes"]
         assert "uq_graph_version" in schema["constraints"]
         assert {
             "run_jobs",
             "sdk_source_states",
             "sdk_source_state_candidates",
+            "graph_triggers",
+            "webhook_deliveries",
         } <= schema["tables"]
     finally:
         await legacy_engine.dispose()

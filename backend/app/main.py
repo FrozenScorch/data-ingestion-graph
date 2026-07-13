@@ -119,6 +119,16 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         raise RuntimeError("Studio node registry failed validation") from e
 
     run_worker = None
+    trigger_scheduler = None
+    if settings.trigger_scheduler_enabled:
+        from app.services.trigger_scheduler import TriggerScheduler
+
+        trigger_scheduler = TriggerScheduler()
+        await trigger_scheduler.start()
+        _component_health["trigger_scheduler"] = "ok"
+    else:
+        _component_health["trigger_scheduler"] = "disabled"
+
     if settings.run_worker_enabled:
         from app.engine.run_worker import DurableRunWorker
 
@@ -132,6 +142,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         yield  # Application is running
     finally:
         logger.info("Shutting down Enterprise Data Ingestion Graph Studio...")
+        if trigger_scheduler is not None:
+            await trigger_scheduler.stop()
         if run_worker is not None:
             await run_worker.stop()
         await close_redis()
