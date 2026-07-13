@@ -43,10 +43,15 @@ await Pipeline(
 ).run()
 ```
 
-`LocalDocumentsSource` discovers each PDF, Word (`.docx`), Excel (`.xlsx`),
-CSV, email (`.eml`), HTML, Markdown, or text file as a stream. SHA-256 and
-element-index checkpoints resume inside unchanged documents and restart safely
-when content changes.
+`LocalDocumentsSource` treats each configured file or directory root as a
+stream and ingests PDF, Word (`.docx`), Excel (`.xlsx`), CSV, email (`.eml`),
+HTML, Markdown, and text. Immutable snapshots ensure checkpoints describe the
+exact parsed bytes. Per-file SHA-256, element counts, and parser fingerprints
+resume within unchanged documents, reprocess configuration changes, and emit
+tombstones when a document shrinks or a file disappears from a directory root.
+Use explicit `stream_names` when identities must remain stable after moving a
+root between machines. File and expanded Office-archive size limits are enabled
+by default.
 
 ## Test an ingestion pipeline
 

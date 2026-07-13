@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+from datetime import date, datetime, time, timedelta
 from email.message import EmailMessage
 from pathlib import Path
 
@@ -7,10 +9,11 @@ import pytest
 
 from ingestion_graph import ConnectorSpec
 from ingestion_graph import LocalDocumentsSource as PublicLocalDocumentsSource
-from ingestion_graph.destinations import JsonlDestination
+from ingestion_graph.destinations import JsonlDestination, SQLiteCollection
 from ingestion_graph.messages import RecordMessage, StateMessage
-from ingestion_graph.models import DocumentElement, TableBatch
+from ingestion_graph.models import DocumentElement, Operation, TableBatch
 from ingestion_graph.pipeline import Pipeline
+from ingestion_graph.query import QueryRequest
 from ingestion_graph.sources import LocalDocumentsSource, documents
 from ingestion_graph.state import MemoryStateStore
 
@@ -19,8 +22,16 @@ async def collect(source: LocalDocumentsSource, stream, state=None):
     return [message async for message in source.read(stream, state)]
 
 
+def records(messages):
+    return [message for message in messages if isinstance(message, RecordMessage)]
+
+
+def states(messages):
+    return [message for message in messages if isinstance(message, StateMessage)]
+
+
 @pytest.mark.asyncio
-async def test_discovers_supported_files_and_ignores_hidden_and_unknown(tmp_path: Path):
+async def test_discovers_one_stable_stream_per_root_and_filters_files(tmp_path: Path):
     (tmp_path / "notes.txt").write_text("hello", encoding="utf-8")
     (tmp_path / "data.csv").write_text("id,name\n1,Ada\n", encoding="utf-8")
     (tmp_path / "ignore.bin").write_bytes(b"binary")
@@ -29,83 +40,176 @@ async def test_discovers_supported_files_and_ignores_hidden_and_unknown(tmp_path
     nested.mkdir()
     (nested / "readme.md").write_text("nested", encoding="utf-8")
 
-    source = LocalDocumentsSource(tmp_path)
+    source = LocalDocumentsSource(tmp_path, stream_names=["personal-documents"])
     assert PublicLocalDocumentsSource is LocalDocumentsSource
     assert isinstance(source.spec(), ConnectorSpec)
     assert (await source.check()).ok
     streams = await source.discover()
+    assert [stream.name for stream in streams] == ["personal-documents"]
 
-    assert [stream.name for stream in streams] == ["data.csv", "nested/readme.md", "notes.txt"]
-    assert all(stream.namespace == "local.documents" for stream in streams)
-    assert source.spec().capabilities.incremental is True
+    messages = await collect(source, streams[0])
+    filenames = {message.envelope.metadata["filename"] for message in records(messages)}
+    assert filenames == {"data.csv", "readme.md", "notes.txt"}
+    assert source.spec().capabilities.deletes is True
 
 
 @pytest.mark.asyncio
-async def test_text_resume_and_content_change_are_checkpoint_safe(tmp_path: Path):
+async def test_text_resume_and_parser_config_are_checkpoint_safe(tmp_path: Path):
     path = tmp_path / "long.txt"
     path.write_text(("first section " * 30) + "\n" + ("second section " * 30), encoding="utf-8")
-    source = LocalDocumentsSource(path, checkpoint_interval=1, text_chunk_chars=256)
+    source = LocalDocumentsSource(
+        path,
+        stream_names=["notes"],
+        checkpoint_interval=1,
+        text_chunk_chars=256,
+    )
     stream = (await source.discover())[0]
 
     first = await collect(source, stream)
-    records = [message for message in first if isinstance(message, RecordMessage)]
-    states = [message for message in first if isinstance(message, StateMessage)]
-    assert len(records) >= 2
-    assert states[0].state["complete"] is False
-    assert states[-1].state["complete"] is True
+    first_records = records(first)
+    first_states = states(first)
+    partial = next(state.state for state in first_states if "in_progress" in state.state)
+    final = first_states[-1].state
+    assert len(first_records) >= 2
 
-    resumed = await collect(source, stream, states[0].state)
-    resumed_records = [message for message in resumed if isinstance(message, RecordMessage)]
-    assert [item.envelope.id for item in resumed_records] == [
-        item.envelope.id for item in records[1:]
+    resumed = await collect(source, stream, partial)
+    assert [item.envelope.id for item in records(resumed)] == [
+        item.envelope.id for item in first_records[1:]
     ]
+    assert not records(await collect(source, stream, final))
 
-    complete = await collect(source, stream, states[-1].state)
-    assert not any(isinstance(message, RecordMessage) for message in complete)
-
-    path.write_text("replacement content", encoding="utf-8")
-    changed = await collect(source, stream, states[-1].state)
-    changed_records = [message for message in changed if isinstance(message, RecordMessage)]
-    assert len(changed_records) == 1
-    assert changed_records[0].envelope.checksum != records[0].envelope.checksum
+    rechunked = LocalDocumentsSource(path, stream_names=["notes"], text_chunk_chars=12_000)
+    rechunked_stream = (await rechunked.discover())[0]
+    changed = await collect(rechunked, rechunked_stream, final)
+    assert any(item.envelope.operation is Operation.UPSERT for item in records(changed))
+    assert any(item.envelope.operation is Operation.DELETE for item in records(changed))
+    assert states(changed)[-1].state["parser_fingerprint"] != final["parser_fingerprint"]
 
 
 @pytest.mark.asyncio
-async def test_csv_and_excel_emit_table_batches(tmp_path: Path):
-    csv_path = tmp_path / "people.csv"
-    csv_path.write_text("id,name\n1,Ada\n2,Grace\n", encoding="utf-8")
+async def test_snapshot_hash_always_matches_bytes_that_are_parsed(tmp_path: Path, monkeypatch):
+    path = tmp_path / "race.txt"
+    path.write_text("old bytes", encoding="utf-8")
+    real_fingerprint = documents._fingerprint
 
+    def mutate_after_quick_hash(candidate: Path) -> str:
+        fingerprint = real_fingerprint(candidate)
+        path.write_text("new bytes", encoding="utf-8")
+        return fingerprint
+
+    monkeypatch.setattr(documents, "_fingerprint", mutate_after_quick_hash)
+    source = LocalDocumentsSource(path, stream_names=["race"])
+    stream = (await source.discover())[0]
+    messages = await collect(source, stream)
+
+    assert records(messages)[0].envelope.payload.text == "new bytes"
+    expected = hashlib.sha256(b"new bytes").hexdigest()
+    assert states(messages)[-1].state["files"]["race.txt"]["sha256"] == expected
+
+
+@pytest.mark.asyncio
+async def test_shrink_and_deleted_files_remove_stale_current_view_records(tmp_path: Path):
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    path = source_dir / "notes.txt"
+    path.write_text("many words " * 300, encoding="utf-8")
+    state = MemoryStateStore()
+    database = tmp_path / "documents.db"
+
+    async def sync() -> None:
+        await Pipeline(
+            "documents",
+            LocalDocumentsSource(
+                source_dir,
+                stream_names=["documents"],
+                text_chunk_chars=256,
+            ),
+            SQLiteCollection(database),
+            state_store=state,
+        ).run()
+
+    async def current_count() -> int:
+        store = SQLiteCollection(database)
+        try:
+            return len(await store.query(QueryRequest(limit=1000)))
+        finally:
+            await store.close()
+
+    await sync()
+    assert await current_count() > 1
+    path.write_text("one short record", encoding="utf-8")
+    await sync()
+    assert await current_count() == 1
+    path.unlink()
+    await sync()
+    assert await current_count() == 0
+
+
+@pytest.mark.asyncio
+async def test_deleted_in_progress_file_emits_tombstones(tmp_path: Path):
+    source = LocalDocumentsSource(tmp_path, stream_names=["documents"])
+    stream = (await source.discover())[0]
+    state = {
+        "parser_fingerprint": "prior-parser",
+        "files": {},
+        "in_progress": {
+            "relative_path": "removed.txt",
+            "sha256": "a" * 64,
+            "next_index": 2,
+        },
+    }
+
+    messages = await collect(source, stream, state)
+
+    deleted = records(messages)
+    assert len(deleted) == 2
+    assert all(item.envelope.operation is Operation.DELETE for item in deleted)
+
+
+@pytest.mark.asyncio
+async def test_csv_duplicate_headers_and_excel_temporal_values_are_json_safe(tmp_path: Path):
+    (tmp_path / "people.csv").write_text("name,name\nAda,Grace\n", encoding="utf-8")
     if documents.load_workbook is None:
         pytest.skip("openpyxl is not installed")
     from openpyxl import Workbook
 
     workbook = Workbook()
     sheet = workbook.active
-    sheet.title = "Orders"
-    sheet.append(["id", "total"])
-    sheet.append([1, 10.5])
-    sheet.append([2, 20.0])
-    xlsx_path = tmp_path / "orders.xlsx"
-    workbook.save(xlsx_path)
+    sheet.title = "Events"
+    sheet.append(["day", "time", "duration", "created_at"])
+    sheet.append(
+        [date(2026, 7, 12), time(8, 30), timedelta(minutes=5), datetime(2026, 7, 12, 8, 30)]
+    )
+    workbook.save(tmp_path / "events.xlsx")
 
-    source = LocalDocumentsSource(tmp_path, table_batch_rows=1)
-    streams = {stream.name: stream for stream in await source.discover()}
-    csv_messages = await collect(source, streams["people.csv"])
-    xlsx_messages = await collect(source, streams["orders.xlsx"])
-    csv_payloads = [
-        message.envelope.payload for message in csv_messages if isinstance(message, RecordMessage)
-    ]
-    xlsx_payloads = [
-        message.envelope.payload for message in xlsx_messages if isinstance(message, RecordMessage)
-    ]
+    source = LocalDocumentsSource(tmp_path, stream_names=["tables"], table_batch_rows=1)
+    stream = (await source.discover())[0]
+    table_records = records(await collect(source, stream))
+    payloads = {item.envelope.metadata["filename"]: item.envelope.payload for item in table_records}
+    csv_payload = payloads["people.csv"]
+    excel_payload = payloads["events.xlsx"]
+    assert isinstance(csv_payload, TableBatch)
+    assert csv_payload.rows[0] == {"name": "Ada", "name_2": "Grace"}
+    assert isinstance(excel_payload, TableBatch)
+    assert excel_payload.rows[0] == {
+        "day": "2026-07-12T00:00:00",
+        "time": "08:30:00",
+        "duration": 300.0,
+        "created_at": "2026-07-12T08:30:00",
+    }
 
-    assert all(isinstance(payload, TableBatch) for payload in csv_payloads + xlsx_payloads)
-    assert [payload.rows[0]["name"] for payload in csv_payloads] == ["Ada", "Grace"]
-    assert [payload.rows[0]["total"] for payload in xlsx_payloads] == [10.5, 20]
+    destination = tmp_path / "temporal.jsonl"
+    await Pipeline(
+        "temporal",
+        LocalDocumentsSource(tmp_path / "events.xlsx", stream_names=["events"]),
+        JsonlDestination(destination),
+        state_store=MemoryStateStore(),
+    ).run()
+    assert destination.read_text(encoding="utf-8")
 
 
 @pytest.mark.asyncio
-async def test_word_email_html_and_pdf_emit_document_elements(tmp_path: Path, monkeypatch):
+async def test_word_email_html_and_pdf_emit_bounded_elements(tmp_path: Path, monkeypatch):
     if documents.WordDocument is None:
         pytest.skip("python-docx is not installed")
     from docx import Document
@@ -113,20 +217,21 @@ async def test_word_email_html_and_pdf_emit_document_elements(tmp_path: Path, mo
     word = Document()
     word.add_heading("Quarterly report")
     word.add_paragraph("Revenue increased.")
-    table = word.add_table(rows=2, cols=2)
+    table = word.add_table(rows=4, cols=2)
     table.rows[0].cells[0].text = "metric"
     table.rows[0].cells[1].text = "value"
-    table.rows[1].cells[0].text = "revenue"
-    table.rows[1].cells[1].text = "42"
+    for index in range(1, 4):
+        table.rows[index].cells[0].text = f"metric-{index}"
+        table.rows[index].cells[1].text = str(index)
     word.save(tmp_path / "report.docx")
 
     message = EmailMessage()
     message["Subject"] = "Status"
-    message["From"] = "sender@example.com"
-    message["To"] = "team@example.com"
     message.set_content("Everything is green.")
     (tmp_path / "status.eml").write_bytes(message.as_bytes())
-    (tmp_path / "page.html").write_text("<h1>Hello</h1><p>from HTML</p>", encoding="utf-8")
+    (tmp_path / "page.html").write_text(
+        "<style>hidden</style><h1>Hello</h1><p>from HTML</p>", encoding="utf-8"
+    )
 
     class FakePage:
         def extract_text(self):
@@ -139,29 +244,54 @@ async def test_word_email_html_and_pdf_emit_document_elements(tmp_path: Path, mo
     monkeypatch.setattr(documents, "PdfReader", FakeReader)
     (tmp_path / "paper.pdf").write_bytes(b"fake-pdf")
 
-    source = LocalDocumentsSource(tmp_path)
-    streams = {stream.name: stream for stream in await source.discover()}
-    payloads = {}
-    for name in ("report.docx", "status.eml", "page.html", "paper.pdf"):
-        messages = await collect(source, streams[name])
-        payloads[name] = [
-            message.envelope.payload for message in messages if isinstance(message, RecordMessage)
-        ]
+    source = LocalDocumentsSource(
+        tmp_path,
+        stream_names=["mixed"],
+        table_batch_rows=1,
+    )
+    stream = (await source.discover())[0]
+    grouped: dict[str, list] = {}
+    for message in records(await collect(source, stream)):
+        grouped.setdefault(str(message.envelope.metadata["filename"]), []).append(
+            message.envelope.payload
+        )
 
-    assert any(isinstance(item, DocumentElement) for item in payloads["report.docx"])
-    assert any(isinstance(item, TableBatch) for item in payloads["report.docx"])
-    assert payloads["status.eml"][0].text == "Everything is green."
-    assert payloads["page.html"][0].text == "Hello\nfrom HTML"
-    assert payloads["paper.pdf"][0].page_number == 1
+    word_tables = [item for item in grouped["report.docx"] if isinstance(item, TableBatch)]
+    assert len(word_tables) == 3
+    assert all(len(item.rows) == 1 for item in word_tables)
+    assert grouped["status.eml"][0].text == "Everything is green."
+    assert grouped["page.html"][0].text == "Hello\nfrom HTML"
+    assert grouped["paper.pdf"][0].page_number == 1
+    assert any(isinstance(item, DocumentElement) for item in grouped["report.docx"])
+
+
+@pytest.mark.asyncio
+async def test_symlink_root_is_rejected_when_following_is_disabled(tmp_path: Path, monkeypatch):
+    root = tmp_path / "documents"
+    root.mkdir()
+    source = LocalDocumentsSource(root)
+    original = Path.is_symlink
+    monkeypatch.setattr(Path, "is_symlink", lambda value: value == root or original(value))
+
+    result = await source.check()
+
+    assert result.ok is False
+    assert "must not be symlinks" in result.message
+
+
+@pytest.mark.asyncio
+async def test_file_size_limit_is_enforced_during_check(tmp_path: Path):
+    (tmp_path / "large.txt").write_text("too large", encoding="utf-8")
+    result = await LocalDocumentsSource(tmp_path, max_file_size_bytes=3).check()
+    assert result.ok is False
+    assert "size limit" in result.message
 
 
 @pytest.mark.asyncio
 async def test_missing_optional_parser_is_reported_by_check(tmp_path: Path, monkeypatch):
     (tmp_path / "paper.pdf").write_bytes(b"pdf")
     monkeypatch.setattr(documents, "PdfReader", None)
-
     result = await LocalDocumentsSource(tmp_path).check()
-
     assert result.ok is False
     assert "ingestion-graph[documents]" in result.message
 
@@ -172,15 +302,11 @@ async def test_document_source_runs_in_embedded_pipeline(tmp_path: Path):
     source_path.mkdir()
     (source_path / "notes.md").write_text("Reusable SDK ingestion", encoding="utf-8")
     destination_path = tmp_path / "records.jsonl"
-    state = MemoryStateStore()
-
     result = await Pipeline(
         "documents",
-        LocalDocumentsSource(source_path),
+        LocalDocumentsSource(source_path, stream_names=["documents"]),
         JsonlDestination(destination_path),
-        state_store=state,
+        state_store=MemoryStateStore(),
     ).run()
-
     assert result.records_written == 1
-    assert result.checkpoints_committed == 1
     assert "Reusable SDK ingestion" in destination_path.read_text(encoding="utf-8")
