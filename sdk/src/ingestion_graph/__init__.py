@@ -1,6 +1,21 @@
 """Public API for the headless ingestion-graph SDK."""
 
-from ingestion_graph.artifacts import LocalArtifactStore
+from ingestion_graph.artifacts import ArtifactStore, LocalArtifactStore
+from ingestion_graph.connectors.base import (
+    CheckResult,
+    ConnectorCapabilities,
+    ConnectorSpec,
+    Destination,
+    Source,
+    StreamDescriptor,
+)
+from ingestion_graph.messages import (
+    LogMessage,
+    RecordMessage,
+    SchemaMessage,
+    SourceMessage,
+    StateMessage,
+)
 from ingestion_graph.models import (
     BlobRef,
     DocumentElement,
@@ -13,16 +28,24 @@ from ingestion_graph.models import (
 )
 from ingestion_graph.pipeline import Pipeline, PipelineResult
 from ingestion_graph.query import Query, QueryHit, QueryRequest, QueryResult, QueryStore
-from ingestion_graph.secrets import EnvSecretProvider, SecretRef, SecretValue
+from ingestion_graph.secrets import EnvSecretProvider, SecretProvider, SecretRef, SecretValue
+from ingestion_graph.sources import LocalDocumentsSource
 from ingestion_graph.state import MemoryStateStore, SQLiteStateStore
 from ingestion_graph.transforms import Transform
 
 __all__ = [
+    "ArtifactStore",
     "BlobRef",
+    "CheckResult",
+    "ConnectorCapabilities",
+    "ConnectorSpec",
+    "Destination",
     "DocumentElement",
     "Envelope",
     "EnvSecretProvider",
     "LocalArtifactStore",
+    "LocalDocumentsSource",
+    "LogMessage",
     "MemoryStateStore",
     "Operation",
     "Pipeline",
@@ -33,13 +56,20 @@ __all__ = [
     "QueryResult",
     "QueryStore",
     "RecordPayload",
+    "RecordMessage",
+    "SchemaMessage",
+    "SecretProvider",
     "SQLiteStateStore",
     "SecretRef",
     "SecretValue",
+    "Source",
+    "SourceMessage",
+    "StateMessage",
+    "StreamDescriptor",
     "TableBatch",
     "Tombstone",
     "Transform",
     "stable_record_id",
 ]
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"

@@ -26,6 +26,35 @@ monorepo:
 python -m pip install -e "./sdk[discord]"
 ```
 
+For PDF, Word, and Excel parsing, install the document extra:
+
+```shell
+python -m pip install "ingestion-graph[documents] @ git+https://github.com/FrozenScorch/data-ingestion-graph.git@main#subdirectory=sdk"
+```
+
+```python
+from ingestion_graph import LocalDocumentsSource, Pipeline
+from ingestion_graph.destinations import SQLiteCollection
+
+await Pipeline(
+    "my-documents",
+    LocalDocumentsSource(["~/Documents", "./mail"], recursive=True),
+    SQLiteCollection("./data/documents.db"),
+).run()
+```
+
+`LocalDocumentsSource` treats each configured file or directory root as a
+stream and ingests PDF, Word (`.docx`), Excel (`.xlsx`), CSV, email (`.eml`),
+HTML, Markdown, and text. Immutable snapshots ensure checkpoints describe the
+exact parsed bytes. Per-file SHA-256, element counts, and parser fingerprints
+resume within unchanged documents, reprocess configuration changes, and emit
+tombstones when a document shrinks or a configured file or directory child
+disappears. With symlink following disabled (the default), snapshots use
+root-anchored safe opens and reject path/reparse changes; followed directory
+cycles are deduplicated. Use explicit `stream_names` when identities must remain
+stable after moving a root between machines. File and expanded Office-archive
+size limits are enforced while copying and parsing.
+
 ## Test an ingestion pipeline
 
 ```shell

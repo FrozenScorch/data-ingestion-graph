@@ -1,6 +1,6 @@
 # Studio and SDK readiness roadmap
 
-Baseline: `main` after PR #31 (`43678c3`), audited 2026-07-11.
+Baseline: document-source branch after PR #33, audited 2026-07-12.
 
 ## Executive assessment
 
@@ -10,7 +10,7 @@ a continuous anything-to-anything synchronization platform.
 
 | Outcome | Readiness | Current reality |
 | --- | ---: | --- |
-| Reusable Python SDK | 70% | Installable, typed, resumable core with real Discord/JSONL sources and JSONL/SQLite destinations |
+| Reusable Python SDK | 78% | Installable, typed, resumable core with Discord, JSONL, and local document sources plus JSONL/SQLite destinations |
 | Local single-user visual ingestion | 60% | Manual batch graphs, transforms, PostgreSQL, server files, Discord preview, query inspection |
 | Trusted-LAN Studio | 25–30% | Experimental deployment only; upload, networking, auth coverage, and worker durability are incomplete |
 | Enterprise multi-user Studio | 10–15% | Tenant isolation, service auth, SSO, durable workers, HA, backups, and observability are release gates |
@@ -25,7 +25,9 @@ These percentages measure delivered capability, not code volume.
 - Independent `sdk/pyproject.toml`, no Studio dependency, Python 3.11–3.13.
 - Canonical UPSERT/DELETE envelopes, stable identities, secret and artifact references.
 - Flush-before-checkpoint pipeline semantics and SQLite-backed durable source state.
-- Real resumable `JsonlSource` and paginated/incremental `DiscordSource`.
+- Real resumable `JsonlSource`, paginated/incremental `DiscordSource`, and
+  checkpoint-safe `LocalDocumentsSource` for PDF, Word, Excel/CSV, email, HTML,
+  Markdown, and text.
 - Idempotent JSONL changelog and transactional SQLite FTS5 current-view destinations.
 - Plugin discovery, CLI ingestion/query commands, strict typing, wheel build, and CI.
 - Verified installation from GitHub's `sdk/` subdirectory in a fresh virtual environment.
@@ -43,13 +45,14 @@ These percentages measure delivered capability, not code volume.
 
 ### Sources and destinations
 
-Real SDK coverage is currently two sources and two local destinations. Studio
+Real SDK coverage is currently three source families and two local destinations. Studio
 adds PostgreSQL, server-side files, SEC EDGAR, transforms, PostgreSQL/pgvector,
 and HTTP actions, but several displayed capabilities are incomplete:
 
 - Browser uploads and File Source selection are owner-scoped and usable; folder watch,
   object storage, quotas, malware scanning, and multi-replica shared storage remain.
-- No Excel/XLSX parser, OCR implementation, email, Slack/Teams, Drive/SharePoint/S3,
+- Local Excel/XLSX and RFC email-file ingestion are now supported by the SDK;
+  OCR, mailbox APIs, Slack/Teams, Drive/SharePoint/S3,
   SQL Server/MySQL/Oracle/MongoDB, queues, generic paginated REST, or database CDC.
 - GitHub Source is a stub; Webhook Source has no receiver route.
 - The generic HTTP node does not yet stream upstream records as a destination.
@@ -64,7 +67,8 @@ and HTTP actions, but several displayed capabilities are incomplete:
   explicit license terms. A deliberate licensing decision is required before third-party distribution.
 - Installed-wheel typing tests cover the core consumer path but not custom connectors,
   secret providers, plugin loading, or every public submodule.
-- A transform plugin group is named in discovery code without a corresponding transform contract.
+- The transform plugin contract and ordered, checkpoint-safe transform chain are implemented;
+  plugin conformance and versioned transform-state migration remain.
 
 ### Sync semantics
 
@@ -141,8 +145,9 @@ Exit: multiple teams can operate audited, recoverable syncs on a LAN or private 
 
 ## Highest-leverage next features
 
-1. Close the remaining tenant-read authorization gaps in DLQ and lineage APIs.
-2. Add a first-class SDK transform contract and ordered transform chain so mapping,
-   normalization, filtering, and chunking are reusable outside Studio.
-3. Add a database-backed durable run queue with leases, heartbeat, and restart recovery,
-   then persist SDK source state per graph/node only after downstream writes are durable.
+1. Generate a safe Studio adapter for `LocalDocumentsSource`, using owner-scoped
+   uploads and LAN folder roots without exposing arbitrary server paths.
+2. Add database and object-storage source/destination packs plus connector
+   conformance tests shared by SDK and Studio.
+3. Merge the reviewed durable-run worker, then persist SDK source state per
+   graph/node only after downstream writes are durable.
