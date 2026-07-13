@@ -231,7 +231,7 @@ async def _test_postgres_connection(config: dict, policy: EgressPolicy) -> dict:
     Returns:
         Dict with "success" bool and "message" string
     """
-    import asyncpg
+    import psycopg
 
     host = config.get("host", "localhost")
     port = config.get("port", 5432)
@@ -246,16 +246,20 @@ async def _test_postgres_connection(config: dict, policy: EgressPolicy) -> dict:
 
     conn = None
     try:
-        pinned_hosts = tuple(str(address) for address in target.addresses)
-        conn = await asyncpg.connect(
-            host=pinned_hosts[0] if len(pinned_hosts) == 1 else pinned_hosts,
+        pinned_addresses = tuple(str(address) for address in target.addresses)
+        # libpq's hostaddr separates the validated dial address from the host
+        # used for TLS SNI, certificate verification, and password matching.
+        tls_hosts = ",".join(target.host for _address in pinned_addresses)
+        conn = await psycopg.AsyncConnection.connect(
+            host=tls_hosts,
+            hostaddr=",".join(pinned_addresses),
             port=target.port,
-            database=database,
+            dbname=database,
             user=username,
             password=password,
-            timeout=10,
+            connect_timeout=10,
         )
-        await conn.fetchval("SELECT 1")
+        await conn.execute("SELECT 1")
         return {
             "success": True,
             "message": "PostgreSQL connection successful",

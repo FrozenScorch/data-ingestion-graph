@@ -1112,7 +1112,7 @@ class TestConnectionTest:
         from app.services.egress_policy import EgressPolicy
 
         mock_conn = AsyncMock()
-        mock_conn.fetchval = AsyncMock(return_value=1)
+        mock_conn.execute = AsyncMock(return_value=None)
         mock_conn.close = AsyncMock()
 
         config = {
@@ -1123,8 +1123,10 @@ class TestConnectionTest:
             "password": "testpass",
         }
 
-        # asyncpg is imported inside the function, patch at module level
-        with patch("asyncpg.connect", new_callable=AsyncMock, return_value=mock_conn):
+        # psycopg is imported inside the function, patch at module level
+        with patch(
+            "psycopg.AsyncConnection.connect", new_callable=AsyncMock, return_value=mock_conn
+        ):
             result = await test_connection(
                 config,
                 "postgres",
@@ -1153,7 +1155,9 @@ class TestConnectionTest:
         }
 
         with patch(
-            "asyncpg.connect", new_callable=AsyncMock, side_effect=Exception("Connection refused")
+            "psycopg.AsyncConnection.connect",
+            new_callable=AsyncMock,
+            side_effect=Exception("Connection refused"),
         ):
             result = await test_connection(
                 config,
@@ -1179,7 +1183,7 @@ class TestConnectionTest:
         from app.services.egress_policy import EgressPolicy
 
         mock_conn = AsyncMock()
-        mock_conn.fetchval = AsyncMock(side_effect=Exception("Auth failed"))
+        mock_conn.execute = AsyncMock(side_effect=Exception("Auth failed"))
         mock_conn.close = AsyncMock()
 
         config = {
@@ -1190,7 +1194,9 @@ class TestConnectionTest:
             "password": "p",
         }
 
-        with patch("asyncpg.connect", new_callable=AsyncMock, return_value=mock_conn):
+        with patch(
+            "psycopg.AsyncConnection.connect", new_callable=AsyncMock, return_value=mock_conn
+        ):
             result = await test_connection(
                 config,
                 "postgres",

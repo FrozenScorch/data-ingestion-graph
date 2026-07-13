@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import ipaddress
+import logging
 from collections import deque
 from collections.abc import Mapping, Sequence
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
+import httpcore
 import httpx
 import pytest
 from app.config import Settings
@@ -17,6 +19,7 @@ from app.services.egress_policy import (
     EgressPolicyError,
     ValidatedTarget,
     _PinnedNetworkBackend,
+    _PinnedResponseStream,
 )
 
 
@@ -136,6 +139,7 @@ async def test_public_ipv4_and_ipv6_literals_are_normalized_without_dns() -> Non
         "100.64.0.1",
         "::1",
         "fe80::1",
+        "fec0::1",
         "ff02::1",
         "::",
     ],
@@ -159,12 +163,48 @@ async def test_mapped_ipv6_is_checked_as_ipv4_and_metadata_is_always_blocked() -
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "address",
+    [
+        "169.254.170.23",
+        "168.63.129.16",
+        "fd00:ec2::23",
+        "fd20:ce::254",
+    ],
+)
+async def test_additional_cloud_identity_endpoints_cannot_be_allowlisted(address: str) -> None:
+    rendered = f"[{address}]" if ":" in address else address
+    policy = EgressPolicy(allowed_cidrs=(f"{address}/128" if ":" in address else f"{address}/32",))
+
+    with pytest.raises(EgressPolicyError, match="metadata"):
+        await policy.validate_url(f"http://{rendered}/")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("host", ["metadata", "metadata.goog"])
+async def test_cloud_metadata_aliases_are_blocked_before_dns(host: str) -> None:
+    resolver = Resolver({host: ("93.184.216.34",)})
+
+    with pytest.raises(EgressPolicyError, match="metadata"):
+        await EgressPolicy(allowed_hosts=(host,), resolver=resolver).validate_url(f"http://{host}/")
+    assert resolver.calls == []
+
+
+@pytest.mark.asyncio
 async def test_mixed_public_private_dns_is_blocked_even_for_allowlisted_host() -> None:
     resolver = Resolver({"mixed.example": ("93.184.216.34", "10.1.2.3")})
     policy = EgressPolicy(allowed_hosts=("mixed.example",), resolver=resolver)
 
     with pytest.raises(EgressPolicyError, match="Mixed public and restricted"):
         await policy.validate_url("https://mixed.example/data")
+
+
+@pytest.mark.asyncio
+async def test_mixed_public_and_site_local_ipv6_dns_is_blocked() -> None:
+    resolver = Resolver({"mixed.example": ("2606:4700:4700::1111", "fec0::1")})
+
+    with pytest.raises(EgressPolicyError, match="Mixed public and restricted"):
+        await EgressPolicy(resolver=resolver).validate_url("https://mixed.example/data")
 
 
 @pytest.mark.asyncio
@@ -361,6 +401,52 @@ async def test_http_node_redacts_credentials_and_upstream_error_body(caplog) -> 
 
 
 @pytest.mark.asyncio
+async def test_real_httpx_info_log_cannot_emit_query_secrets(caplog) -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"ok": True},
+            headers={"content-type": "application/json"},
+            request=request,
+        )
+
+    def factory(_target: ValidatedTarget, timeout: float) -> httpx.AsyncClient:
+        return httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            timeout=timeout,
+            follow_redirects=False,
+        )
+
+    caplog.set_level(logging.INFO)
+    node = HttpRequestNode(egress_policy=EgressPolicy(), client_factory=factory)
+
+    result = await node.execute(context("https://93.184.216.34/data?token=top-secret"))
+
+    assert result.success is True
+    assert "top-secret" not in caplog.text
+    assert logging.getLogger("httpx").getEffectiveLevel() >= logging.WARNING
+
+
+@pytest.mark.asyncio
+async def test_pinned_response_stream_maps_httpcore_timeout_to_httpx() -> None:
+    class TimeoutStream:
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            raise httpcore.ReadTimeout
+
+        async def aclose(self) -> None:
+            return None
+
+    request = httpx.Request("GET", "https://redacted.invalid/")
+    stream = _PinnedResponseStream(TimeoutStream(), request)
+
+    with pytest.raises(httpx.TimeoutException):
+        await anext(stream.__aiter__())
+
+
+@pytest.mark.asyncio
 async def test_postgres_connection_test_pins_ip_and_redacts_driver_errors() -> None:
     resolver = Resolver({"db.lan": ("10.20.30.40",)})
     policy = EgressPolicy(allowed_hosts=("db.lan",), resolver=resolver)
@@ -372,17 +458,20 @@ async def test_postgres_connection_test_pins_ip_and_redacts_driver_errors() -> N
         "password": "top-secret",
     }
     connection = AsyncMock()
-    connection.fetchval.return_value = 1
+    connection.execute.return_value = None
 
-    with patch("asyncpg.connect", new_callable=AsyncMock, return_value=connection) as connect:
+    with patch(
+        "psycopg.AsyncConnection.connect", new_callable=AsyncMock, return_value=connection
+    ) as connect:
         result = await check_connection(config, "postgres", egress_policy=policy)
 
     assert result["success"] is True
-    assert connect.await_args.kwargs["host"] == "10.20.30.40"
+    assert connect.await_args.kwargs["host"] == "db.lan"
+    assert connect.await_args.kwargs["hostaddr"] == "10.20.30.40"
     connection.close.assert_awaited_once()
 
     with patch(
-        "asyncpg.connect",
+        "psycopg.AsyncConnection.connect",
         new_callable=AsyncMock,
         side_effect=RuntimeError("top-secret at postgresql://user:top-secret@db.lan"),
     ):
@@ -405,16 +494,16 @@ async def test_postgres_connection_test_passes_every_validated_ip_to_driver() ->
         "password": "top-secret",
     }
     connection = AsyncMock()
-    connection.fetchval.return_value = 1
+    connection.execute.return_value = None
 
-    with patch("asyncpg.connect", new_callable=AsyncMock, return_value=connection) as connect:
+    with patch(
+        "psycopg.AsyncConnection.connect", new_callable=AsyncMock, return_value=connection
+    ) as connect:
         result = await check_connection(config, "postgres", egress_policy=policy)
 
     assert result["success"] is True
-    assert connect.await_args.kwargs["host"] == (
-        "93.184.216.34",
-        "2606:4700:4700::1111",
-    )
+    assert connect.await_args.kwargs["host"] == "db.example,db.example"
+    assert connect.await_args.kwargs["hostaddr"] == "93.184.216.34,2606:4700:4700::1111"
 
 
 @pytest.mark.asyncio
@@ -443,7 +532,7 @@ async def test_blocked_postgres_and_discord_tests_never_create_clients() -> None
         "username": "user",
         "password": "secret",
     }
-    with patch("asyncpg.connect", new_callable=AsyncMock) as connect:
+    with patch("psycopg.AsyncConnection.connect", new_callable=AsyncMock) as connect:
         result = await check_connection(postgres_config, "postgres", egress_policy=EgressPolicy())
     assert result["success"] is False
     connect.assert_not_awaited()

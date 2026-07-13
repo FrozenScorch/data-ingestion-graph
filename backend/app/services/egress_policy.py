@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import ipaddress
+import logging
 import re
 import socket
 import ssl
@@ -21,9 +22,16 @@ IPNetwork: TypeAlias = ipaddress.IPv4Network | ipaddress.IPv6Network
 Resolver: TypeAlias = Callable[[str, int], Awaitable[Sequence[str]]]
 PolicyMode: TypeAlias = Literal["public", "allowlist-only"]
 
+# HTTPX's INFO request log includes the complete URL, including sensitive query
+# values. Every process importing the centralized policy must suppress it.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+
 _HOST_LABEL = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 _METADATA_HOSTS = frozenset(
     {
+        "metadata",
+        "metadata.goog",
         "metadata.google.internal",
         "metadata.google.com",
         "metadata.azure.internal",
@@ -33,8 +41,12 @@ _METADATA_ADDRESSES = frozenset(
     {
         ipaddress.ip_address("169.254.169.254"),
         ipaddress.ip_address("169.254.170.2"),
+        ipaddress.ip_address("169.254.170.23"),
         ipaddress.ip_address("100.100.100.200"),
+        ipaddress.ip_address("168.63.129.16"),
+        ipaddress.ip_address("fd00:ec2::23"),
         ipaddress.ip_address("fd00:ec2::254"),
+        ipaddress.ip_address("fd20:ce::254"),
     }
 )
 
@@ -269,6 +281,7 @@ def _is_restricted(address: IPAddress) -> bool:
             address.is_loopback,
             address.is_private,
             address.is_link_local,
+            isinstance(address, ipaddress.IPv6Address) and address.is_site_local,
             address.is_multicast,
             address.is_unspecified,
             address.is_reserved,
@@ -331,12 +344,22 @@ class _PinnedNetworkBackend(httpcore.AsyncNetworkBackend):
 
 
 class _PinnedResponseStream(httpx.AsyncByteStream):
-    def __init__(self, stream: Any) -> None:
+    def __init__(self, stream: Any, request: httpx.Request) -> None:
         self._stream = stream
+        self._request = request
 
     async def __aiter__(self):
-        async for chunk in self._stream:
-            yield chunk
+        try:
+            async for chunk in self._stream:
+                yield chunk
+        except httpcore.TimeoutException:
+            raise httpx.TimeoutException(
+                "Pinned outbound response timed out", request=self._request
+            ) from None
+        except httpcore.HTTPError:
+            raise httpx.RequestError(
+                "Pinned outbound response failed", request=self._request
+            ) from None
 
     async def aclose(self) -> None:
         await self._stream.aclose()
@@ -370,12 +393,16 @@ class PinnedAsyncHTTPTransport(httpx.AsyncBaseTransport):
         )
         try:
             response = await self._pool.handle_async_request(core_request)
-        except Exception:
+        except httpcore.TimeoutException:
+            raise httpx.TimeoutException(
+                "Pinned outbound request timed out", request=request
+            ) from None
+        except httpcore.HTTPError:
             raise httpx.RequestError("Pinned outbound request failed", request=request) from None
         return httpx.Response(
             status_code=response.status,
             headers=response.headers,
-            stream=_PinnedResponseStream(response.stream),
+            stream=_PinnedResponseStream(response.stream, request),
             extensions=response.extensions,
         )
 
