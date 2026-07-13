@@ -7,8 +7,10 @@
   import GraphToolbar from '$lib/components/graph/GraphToolbar.svelte';
   import NodeConfigPanel from '$lib/components/ui/NodeConfigPanel.svelte';
   import RunPanel from '$lib/components/ui/RunPanel.svelte';
+  import TriggerCenter from '$lib/components/ui/TriggerCenter.svelte';
 
   let showConfigPanel = $state(false);
+  let showTriggerCenter = $state(false);
   let graphId = $derived($page.params.id ?? '');
 
   onMount(() => {
@@ -41,6 +43,8 @@
 
   // Keyboard shortcut for save and delete
   function handleKeydown(e: KeyboardEvent) {
+    if (showTriggerCenter) return;
+
     // Don't handle shortcuts when typing in an input/textarea/select
     const tag = (e.target as HTMLElement).tagName;
     if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
@@ -66,7 +70,7 @@
 {:else if graph.currentGraph}
   <div class="h-full flex flex-col">
     <!-- Toolbar -->
-    <GraphToolbar {graphId} />
+    <GraphToolbar {graphId} onManageTriggers={() => showTriggerCenter = true} />
 
     <!-- Main content area -->
     <div class="flex-1 flex overflow-hidden">
@@ -86,6 +90,15 @@
 
     <!-- Run Panel (bottom) -->
     <RunPanel />
+
+    {#if showTriggerCenter}
+      <TriggerCenter
+        {graphId}
+        currentVersionId={graph.currentGraph.latest_version?.id ?? null}
+        currentVersionNumber={graph.currentGraph.latest_version?.version_number ?? null}
+        onClose={() => showTriggerCenter = false}
+      />
+    {/if}
   </div>
 {:else}
   <div class="flex items-center justify-center h-full">

@@ -2,7 +2,11 @@
   import { graph, execution } from '$lib/stores';
 
   let {
-    graphId = ''
+    graphId = '',
+    onManageTriggers
+  }: {
+    graphId?: string;
+    onManageTriggers: () => void;
   } = $props();
 
   async function handleSave() {
@@ -102,6 +106,19 @@
 
   <!-- Run History -->
   {#if graphId}
+    <button
+      type="button"
+      onclick={onManageTriggers}
+      class="flex items-center gap-1.5 px-2.5 py-1 text-xs rounded-md border border-gray-700 bg-gray-800 text-gray-400 hover:bg-gray-700 hover:text-gray-200 transition-colors"
+      aria-label="Manage schedules and webhooks"
+      title="Manage schedules and webhooks"
+    >
+      <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+        <circle cx="12" cy="12" r="3"/>
+        <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4"/>
+      </svg>
+      <span class="hidden sm:inline">Triggers</span>
+    </button>
     <a
       href="/graphs/{graphId}/runs"
       class="flex items-center gap-1.5 px-2.5 py-1 text-xs rounded-md border border-gray-700 bg-gray-800 text-gray-400 hover:bg-gray-700 hover:text-gray-200 transition-colors"
