@@ -154,7 +154,10 @@ async def run_node_with_retry(
         )
         db.add(log)
 
-    await db.commit()
+    if defer_completion_commit:
+        await db.flush()
+    else:
+        await db.commit()
     await db.refresh(run_node)
     return run_node
 

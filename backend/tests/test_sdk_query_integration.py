@@ -259,5 +259,27 @@ async def test_runner_can_defer_completion_commit_until_checkpoint(tmp_path):
         )
 
     assert result.status == "completed"
-    assert db.commit.await_count == 1  # Initial RUNNING record only.
-    db.flush.assert_awaited_once()
+    db.commit.assert_not_awaited()
+    assert db.flush.await_count == 2  # Initial RUNNING row and completed output/state.
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_failure_rolls_back_deferred_acknowledgement_unit():
+    from app.engine.checkpoint import save_checkpoint
+    from app.models.execution import CheckpointType
+
+    db = AsyncMock()
+    db.add = MagicMock()
+    db.commit.side_effect = RuntimeError("checkpoint commit failed")
+
+    with pytest.raises(RuntimeError, match="checkpoint commit failed"):
+        await save_checkpoint(
+            db,
+            uuid4(),
+            "source",
+            CheckpointType.POST_EXEC.value,
+            node_output={"items": [{"id": "one"}]},
+        )
+
+    db.rollback.assert_awaited_once()
+    db.refresh.assert_not_awaited()
