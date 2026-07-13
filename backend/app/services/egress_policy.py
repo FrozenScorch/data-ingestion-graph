@@ -1,0 +1,495 @@
+"""Centralized outbound egress and SSRF policy for Studio."""
+
+from __future__ import annotations
+
+import asyncio
+import ipaddress
+import logging
+import math
+import re
+import socket
+import ssl
+import threading
+from collections.abc import Awaitable, Callable, Iterable, Sequence
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
+from typing import Any, Literal, TypeAlias
+from urllib.parse import SplitResult, urlsplit, urlunsplit
+
+import httpcore
+import httpx
+from app.config import Settings, settings
+
+IPAddress: TypeAlias = ipaddress.IPv4Address | ipaddress.IPv6Address
+IPNetwork: TypeAlias = ipaddress.IPv4Network | ipaddress.IPv6Network
+Resolver: TypeAlias = Callable[[str, int], Awaitable[Sequence[str]]]
+PolicyMode: TypeAlias = Literal["public", "allowlist-only"]
+
+# HTTPX's INFO request log includes the complete URL, including sensitive query
+# values. Every process importing the centralized policy must suppress it.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+
+_HOST_LABEL = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
+_METADATA_HOSTS = frozenset(
+    {
+        "metadata",
+        "metadata.goog",
+        "metadata.google.internal",
+        "metadata.google.com",
+        "metadata.azure.internal",
+    }
+)
+_METADATA_ADDRESSES = frozenset(
+    {
+        ipaddress.ip_address("169.254.169.254"),
+        ipaddress.ip_address("169.254.170.2"),
+        ipaddress.ip_address("169.254.170.23"),
+        ipaddress.ip_address("100.100.100.200"),
+        ipaddress.ip_address("168.63.129.16"),
+        ipaddress.ip_address("fd00:ec2::23"),
+        ipaddress.ip_address("fd00:ec2::254"),
+        ipaddress.ip_address("fd20:ce::254"),
+    }
+)
+_DNS_WORKERS = 4
+_DNS_EXECUTOR = ThreadPoolExecutor(max_workers=_DNS_WORKERS, thread_name_prefix="egress-dns")
+_DNS_CAPACITY = threading.BoundedSemaphore(_DNS_WORKERS)
+
+
+def _consume_future_exception(future: asyncio.Future[Any]) -> None:
+    if future.cancelled():
+        return
+    try:
+        future.exception()
+    except Exception:
+        return
+
+
+class EgressPolicyError(ValueError):
+    """A safe, credential-free outbound-policy failure."""
+
+
+@dataclass(frozen=True, slots=True)
+class ValidatedTarget:
+    """Canonical target plus the complete validated address set."""
+
+    url: str
+    scheme: str
+    host: str
+    port: int
+    addresses: tuple[IPAddress, ...]
+    host_was_name: bool
+
+    @property
+    def safe_origin(self) -> str:
+        """Credential/query-free origin suitable for result metadata."""
+        host = f"[{self.host}]" if ":" in self.host else self.host
+        default_port = 443 if self.scheme == "https" else 80
+        suffix = "" if self.port == default_port else f":{self.port}"
+        return f"{self.scheme}://{host}{suffix}"
+
+
+class EgressPolicy:
+    """Resolve once, validate every answer, and return addresses for pinning."""
+
+    def __init__(
+        self,
+        *,
+        mode: PolicyMode = "public",
+        allowed_hosts: Iterable[str] = (),
+        allowed_cidrs: Iterable[str] = (),
+        resolver: Resolver | None = None,
+        resolution_timeout: float = 10.0,
+    ) -> None:
+        if mode not in {"public", "allowlist-only"}:
+            raise EgressPolicyError("Outbound policy mode is invalid")
+        self.mode: PolicyMode = mode
+        self.allowed_hosts = frozenset(_normalize_hostname(host) for host in allowed_hosts)
+        self.allowed_networks = tuple(_normalize_network(cidr) for cidr in allowed_cidrs)
+        self._resolver = resolver or resolve_all_addresses
+        if (
+            isinstance(resolution_timeout, bool)
+            or not isinstance(resolution_timeout, (int, float))
+            or not math.isfinite(float(resolution_timeout))
+            or resolution_timeout <= 0
+        ):
+            raise EgressPolicyError("Outbound resolution timeout is invalid")
+        self.resolution_timeout = float(resolution_timeout)
+
+    @classmethod
+    def from_settings(cls, configured: Settings = settings) -> EgressPolicy:
+        return cls(
+            mode=configured.egress_policy_mode,  # type: ignore[arg-type]
+            allowed_hosts=configured.egress_allowed_hosts_list,
+            allowed_cidrs=configured.egress_allowed_cidrs_list,
+        )
+
+    async def validate_url(self, value: Any, *, timeout: float | None = None) -> ValidatedTarget:
+        parsed = _parse_url(value)
+        scheme = parsed.scheme.lower()
+        port = _url_port(parsed, scheme)
+        host = _normalize_host(parsed.hostname or "")
+        addresses, was_name = await self._resolve_and_validate(host, port, timeout=timeout)
+        canonical = _canonical_url(parsed, scheme=scheme, host=host, port=port)
+        return ValidatedTarget(canonical, scheme, host, port, addresses, was_name)
+
+    async def validate_host(
+        self, host: Any, port: Any, *, timeout: float | None = None
+    ) -> ValidatedTarget:
+        normalized_port = _validate_port(port)
+        normalized_host = _normalize_host_value(host)
+        addresses, was_name = await self._resolve_and_validate(
+            normalized_host, normalized_port, timeout=timeout
+        )
+        literal = f"[{normalized_host}]" if ":" in normalized_host else normalized_host
+        url = f"tcp://{literal}:{normalized_port}"
+        return ValidatedTarget(url, "tcp", normalized_host, normalized_port, addresses, was_name)
+
+    async def _resolve_and_validate(
+        self, host: str, port: int, *, timeout: float | None
+    ) -> tuple[tuple[IPAddress, ...], bool]:
+        if host in _METADATA_HOSTS:
+            raise EgressPolicyError("Cloud metadata destinations are blocked")
+        literal = _parse_ip(host)
+        host_was_name = literal is None
+        if literal is None:
+            resolution_timeout = self.resolution_timeout
+            if timeout is not None:
+                if not math.isfinite(timeout) or timeout <= 0:
+                    raise EgressPolicyError("Outbound resolution timeout is invalid")
+                resolution_timeout = min(resolution_timeout, timeout)
+            try:
+                answers = await asyncio.wait_for(
+                    self._resolver(host, port), timeout=resolution_timeout
+                )
+            except TimeoutError:
+                raise EgressPolicyError("Outbound hostname resolution timed out") from None
+            except EgressPolicyError:
+                raise
+            except Exception:
+                raise EgressPolicyError("Outbound hostname resolution failed") from None
+            if not answers:
+                raise EgressPolicyError("Outbound hostname did not resolve")
+            resolved: list[IPAddress] = []
+            try:
+                for answer in answers:
+                    address = _normalize_address(ipaddress.ip_address(answer))
+                    if address not in resolved:
+                        resolved.append(address)
+            except (TypeError, ValueError):
+                raise EgressPolicyError("Outbound hostname returned an invalid address") from None
+        else:
+            resolved = [literal]
+
+        if any(address in _METADATA_ADDRESSES for address in resolved):
+            raise EgressPolicyError("Cloud metadata destinations are blocked")
+
+        restricted = [address for address in resolved if _is_restricted(address)]
+        public = [address for address in resolved if not _is_restricted(address)]
+        if restricted and public:
+            raise EgressPolicyError("Mixed public and restricted DNS answers are blocked")
+
+        host_allowed = host in self.allowed_hosts
+        for address in resolved:
+            address_allowed = any(address in network for network in self.allowed_networks)
+            if _is_restricted(address) and not (host_allowed or address_allowed):
+                raise EgressPolicyError("Outbound destination address is blocked")
+            if self.mode == "allowlist-only" and not (host_allowed or address_allowed):
+                raise EgressPolicyError("Outbound destination is not allowlisted")
+        return tuple(resolved), host_was_name
+
+
+async def resolve_all_addresses(host: str, port: int) -> Sequence[str]:
+    """Resolve every address in an isolated, capacity-limited native resolver pool."""
+    loop = asyncio.get_running_loop()
+    if not _DNS_CAPACITY.acquire(blocking=False):
+        raise EgressPolicyError("Outbound hostname resolution capacity is exhausted")
+    try:
+        future = _DNS_EXECUTOR.submit(
+            socket.getaddrinfo,
+            host,
+            port,
+            socket.AF_UNSPEC,
+            socket.SOCK_STREAM,
+            socket.IPPROTO_TCP,
+        )
+    except Exception:
+        _DNS_CAPACITY.release()
+        raise EgressPolicyError("Outbound hostname resolution failed") from None
+    future.add_done_callback(lambda _finished: _DNS_CAPACITY.release())
+    wrapped = asyncio.wrap_future(future, loop=loop)
+    wrapped.add_done_callback(_consume_future_exception)
+    try:
+        answers = await asyncio.shield(wrapped)
+    except OSError:
+        raise EgressPolicyError("Outbound hostname resolution failed") from None
+    return tuple(str(answer[4][0]) for answer in answers)
+
+
+def _parse_url(value: Any) -> SplitResult:
+    if not isinstance(value, str) or not value or any(ord(char) < 32 for char in value):
+        raise EgressPolicyError("Outbound URL is invalid")
+    try:
+        parsed = urlsplit(value)
+    except ValueError:
+        raise EgressPolicyError("Outbound URL is invalid") from None
+    if parsed.scheme.lower() not in {"http", "https"}:
+        raise EgressPolicyError("Outbound URL scheme must be HTTP or HTTPS")
+    if not parsed.hostname:
+        raise EgressPolicyError("Outbound URL host is required")
+    if parsed.username is not None or parsed.password is not None:
+        raise EgressPolicyError("Outbound URL credentials are not allowed")
+    if parsed.fragment:
+        raise EgressPolicyError("Outbound URL fragments are not allowed")
+    return parsed
+
+
+def _url_port(parsed: SplitResult, scheme: str) -> int:
+    try:
+        port = parsed.port
+    except ValueError:
+        raise EgressPolicyError("Outbound URL port is invalid") from None
+    return _validate_port(port if port is not None else (443 if scheme == "https" else 80))
+
+
+def _validate_port(value: Any) -> int:
+    if isinstance(value, bool):
+        raise EgressPolicyError("Outbound port is invalid")
+    try:
+        port = int(value)
+    except (TypeError, ValueError, OverflowError):
+        raise EgressPolicyError("Outbound port is invalid") from None
+    if isinstance(value, float) and not value.is_integer():
+        raise EgressPolicyError("Outbound port is invalid")
+    if not 1 <= port <= 65535:
+        raise EgressPolicyError("Outbound port is invalid")
+    return port
+
+
+def _normalize_host_value(value: Any) -> str:
+    if not isinstance(value, str) or not value or any(ord(char) < 32 for char in value):
+        raise EgressPolicyError("Outbound host is invalid")
+    candidate = value[1:-1] if value.startswith("[") and value.endswith("]") else value
+    if "/" in candidate or "@" in candidate:
+        raise EgressPolicyError("Outbound host is invalid")
+    return _normalize_host(candidate)
+
+
+def _normalize_host(value: str) -> str:
+    if "%" in value:
+        raise EgressPolicyError("Scoped outbound IP addresses are not allowed")
+    literal = _parse_ip(value)
+    return str(literal) if literal is not None else _normalize_hostname(value)
+
+
+def _normalize_hostname(value: str) -> str:
+    candidate = value.rstrip(".").lower()
+    if not candidate:
+        raise EgressPolicyError("Outbound host is invalid")
+    try:
+        ascii_name = candidate.encode("idna").decode("ascii")
+    except UnicodeError:
+        raise EgressPolicyError("Outbound host is invalid") from None
+    labels = ascii_name.split(".")
+    if len(ascii_name) > 253 or any(not _HOST_LABEL.fullmatch(label) for label in labels):
+        raise EgressPolicyError("Outbound host is invalid")
+    return ascii_name
+
+
+def _parse_ip(value: str) -> IPAddress | None:
+    try:
+        return _normalize_address(ipaddress.ip_address(value))
+    except ValueError:
+        return None
+
+
+def _normalize_address(value: IPAddress) -> IPAddress:
+    if isinstance(value, ipaddress.IPv6Address) and value.ipv4_mapped is not None:
+        return value.ipv4_mapped
+    return value
+
+
+def _normalize_network(value: str) -> IPNetwork:
+    try:
+        network = ipaddress.ip_network(value, strict=False)
+    except (TypeError, ValueError):
+        raise EgressPolicyError("Outbound CIDR allowlist contains an invalid entry") from None
+    if isinstance(network, ipaddress.IPv6Network) and network.network_address.ipv4_mapped:
+        if network.prefixlen < 96:
+            raise EgressPolicyError("IPv4-mapped CIDR prefixes shorter than /96 are invalid")
+        return ipaddress.IPv4Network(
+            (int(network.network_address.ipv4_mapped), network.prefixlen - 96)
+        )
+    return network
+
+
+def _is_restricted(address: IPAddress) -> bool:
+    return any(
+        (
+            not address.is_global,
+            address.is_loopback,
+            address.is_private,
+            address.is_link_local,
+            isinstance(address, ipaddress.IPv6Address) and address.is_site_local,
+            address.is_multicast,
+            address.is_unspecified,
+            address.is_reserved,
+        )
+    )
+
+
+def _canonical_url(parsed: SplitResult, *, scheme: str, host: str, port: int) -> str:
+    rendered_host = f"[{host}]" if ":" in host else host
+    default_port = 443 if scheme == "https" else 80
+    netloc = rendered_host if port == default_port else f"{rendered_host}:{port}"
+    return urlunsplit((scheme, netloc, parsed.path or "/", parsed.query, ""))
+
+
+class _PinnedNetworkBackend(httpcore.AsyncNetworkBackend):
+    """Delegate socket creation only to addresses returned by the policy."""
+
+    def __init__(self, target: ValidatedTarget) -> None:
+        self._target = target
+        self._backend = httpcore.AnyIOBackend()
+
+    async def connect_tcp(
+        self,
+        host: str,
+        port: int,
+        timeout: float | None = None,
+        local_address: str | None = None,
+        socket_options: Iterable[tuple[int, int, Any]] | None = None,
+    ) -> httpcore.AsyncNetworkStream:
+        try:
+            requested_host = _normalize_host(host)
+        except EgressPolicyError:
+            raise httpcore.ConnectError("Pinned outbound host changed") from None
+        if requested_host != self._target.host or port != self._target.port:
+            raise httpcore.ConnectError("Pinned outbound destination changed")
+        loop = asyncio.get_running_loop()
+        deadline = None if timeout is None else loop.time() + max(timeout, 0.0)
+        timed_out = False
+        for address in self._target.addresses:
+            remaining = None if deadline is None else deadline - loop.time()
+            if remaining is not None and remaining <= 0:
+                timed_out = True
+                break
+            try:
+                return await self._backend.connect_tcp(
+                    str(address),
+                    port,
+                    timeout=remaining,
+                    local_address=local_address,
+                    socket_options=socket_options,
+                )
+            except httpcore.TimeoutException:
+                timed_out = True
+                continue
+            except (httpcore.NetworkError, httpcore.ProtocolError):
+                continue
+        if timed_out:
+            raise httpcore.ConnectTimeout("Pinned outbound connection timed out") from None
+        raise httpcore.ConnectError("Pinned outbound connection failed") from None
+
+    async def connect_unix_socket(
+        self,
+        path: str,
+        timeout: float | None = None,
+        socket_options: Iterable[tuple[int, int, Any]] | None = None,
+    ) -> httpcore.AsyncNetworkStream:
+        del path, timeout, socket_options
+        raise httpcore.ConnectError("Unix sockets are disabled for outbound requests")
+
+    async def sleep(self, seconds: float) -> None:
+        await self._backend.sleep(seconds)
+
+
+class _PinnedResponseStream(httpx.AsyncByteStream):
+    def __init__(self, stream: Any, request: httpx.Request, max_bytes: int) -> None:
+        self._stream = stream
+        self._request = request
+        self._max_bytes = max_bytes
+
+    async def __aiter__(self):
+        received = 0
+        try:
+            async for chunk in self._stream:
+                received += len(chunk)
+                if received > self._max_bytes:
+                    raise httpx.RequestError(
+                        "Pinned outbound response exceeded the size limit",
+                        request=self._request,
+                    )
+                yield chunk
+        except httpcore.TimeoutException:
+            raise httpx.TimeoutException(
+                "Pinned outbound response timed out", request=self._request
+            ) from None
+        except (httpcore.NetworkError, httpcore.ProtocolError):
+            raise httpx.RequestError(
+                "Pinned outbound response failed", request=self._request
+            ) from None
+
+    async def aclose(self) -> None:
+        await self._stream.aclose()
+
+
+class PinnedAsyncHTTPTransport(httpx.AsyncBaseTransport):
+    """HTTPX transport that preserves TLS SNI while pinning the TCP address."""
+
+    def __init__(self, target: ValidatedTarget, *, max_response_bytes: int) -> None:
+        self._max_response_bytes = max_response_bytes
+        self._pool = httpcore.AsyncConnectionPool(
+            ssl_context=ssl.create_default_context(),
+            network_backend=_PinnedNetworkBackend(target),
+            max_connections=2,
+            max_keepalive_connections=0,
+            http1=True,
+            http2=False,
+        )
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        core_request = httpcore.Request(
+            method=request.method,
+            url=httpcore.URL(
+                scheme=request.url.raw_scheme,
+                host=request.url.raw_host,
+                port=request.url.port,
+                target=request.url.raw_path,
+            ),
+            headers=request.headers.raw,
+            content=request.stream,
+            extensions=request.extensions,
+        )
+        try:
+            response = await self._pool.handle_async_request(core_request)
+        except httpcore.TimeoutException:
+            raise httpx.TimeoutException(
+                "Pinned outbound request timed out", request=request
+            ) from None
+        except (httpcore.NetworkError, httpcore.ProtocolError):
+            raise httpx.RequestError("Pinned outbound request failed", request=request) from None
+        return httpx.Response(
+            status_code=response.status,
+            headers=response.headers,
+            stream=_PinnedResponseStream(
+                response.stream, request, max_bytes=self._max_response_bytes
+            ),
+            extensions=response.extensions,
+        )
+
+    async def aclose(self) -> None:
+        await self._pool.aclose()
+
+
+def create_pinned_http_client(target: ValidatedTarget, timeout: float) -> httpx.AsyncClient:
+    """Create a no-proxy, no-redirect HTTP client pinned to one policy decision."""
+    return httpx.AsyncClient(
+        transport=PinnedAsyncHTTPTransport(
+            target, max_response_bytes=settings.egress_max_response_bytes
+        ),
+        timeout=timeout,
+        follow_redirects=False,
+        trust_env=False,
+    )

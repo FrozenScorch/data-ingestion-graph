@@ -89,10 +89,19 @@ class Settings(BaseSettings):
     webhook_delivery_retention_hours: int = Field(default=168, ge=1, le=8760)
     webhook_prune_interval_seconds: int = Field(default=3600, ge=60, le=86400)
 
+    # Outbound egress / SSRF policy
+    egress_policy_mode: str = "public"
+    egress_allowed_hosts: str = ""
+    egress_allowed_cidrs: str = ""
+    egress_max_redirects: int = Field(default=3, ge=0, le=5)
+    egress_max_response_bytes: int = Field(default=10 * 1024 * 1024, ge=1024, le=100 * 1024 * 1024)
+
     @model_validator(mode="after")
     def validate_worker_lease(self) -> "Settings":
         if self.run_worker_heartbeat_seconds * 2 >= self.run_worker_lease_seconds:
             raise ValueError("run worker heartbeat must be less than half the lease duration")
+        if self.egress_policy_mode not in {"public", "allowlist-only"}:
+            raise ValueError("egress_policy_mode must be 'public' or 'allowlist-only'")
         return self
 
     # Logging
@@ -107,6 +116,16 @@ class Settings(BaseSettings):
     def free_models_list(self) -> list[str]:
         """Parse free models string into list."""
         return [model.strip() for model in self.openrouter_free_models.split(",") if model.strip()]
+
+    @property
+    def egress_allowed_hosts_list(self) -> list[str]:
+        """Return exact outbound host allowlist entries."""
+        return [host.strip() for host in self.egress_allowed_hosts.split(",") if host.strip()]
+
+    @property
+    def egress_allowed_cidrs_list(self) -> list[str]:
+        """Return outbound network allowlist entries."""
+        return [cidr.strip() for cidr in self.egress_allowed_cidrs.split(",") if cidr.strip()]
 
     @property
     def sync_database_url(self) -> str:
