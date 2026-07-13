@@ -16,7 +16,7 @@ from app.engine.run_job_executor import execute_run_job
 from app.models.execution import Run, RunJobStatus, RunStatus
 from app.services.run_queue_service import (
     claim_run_job,
-    finish_run_job,
+    finalize_run_job,
     heartbeat_run_job,
     mark_run_failed_if_owned,
     recover_orphaned_runs,
@@ -129,13 +129,16 @@ class DurableRunWorker:
                 await heartbeat_task
 
         async with AsyncSessionLocal() as db:
-            finished = await finish_run_job(
+            finalization = await finalize_run_job(
                 db,
                 job_id=job_id,
+                run_id=run_id,
                 worker_id=worker_id,
                 error=error,
             )
-        if not finished:
+        if finalization == "requeued":
+            logger.info("Run job %s returned to the queue while its run is paused", job_id)
+        elif finalization == "lost":
             logger.warning("Run job %s lost its lease before completion", job_id)
 
     async def _heartbeat_loop(

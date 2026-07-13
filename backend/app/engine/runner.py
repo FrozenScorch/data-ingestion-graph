@@ -3,21 +3,31 @@ Node runner: executes a single node and records results.
 Includes retry integration via the retry handler.
 """
 
-import time
 import logging
+import time
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy.ext.asyncio import AsyncSession
-
 from app.config import settings
-from app.models.execution import RunNode, NodeStatus, ExecutionLog, LogLevel
-from app.nodes.base import BaseNode, NodeContext, NodeResult
-from app.nodes.registry import get_node as registry_get_node
 from app.engine.retry import RetryConfig, retry_async
 from app.engine.state import can_node_transition
+from app.models.execution import (
+    ExecutionLog,
+    LogLevel,
+    NodeStatus,
+    Run,
+    RunNode,
+    RunStatus,
+)
+from app.nodes.base import NodeContext, NodeResult
+from app.nodes.registry import get_node as registry_get_node
+from app.services.sdk_source_state_service import SDKSourceStateLeaseError
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 logger = logging.getLogger(__name__)
+
+_CONTROL_STATUS_KEY = "_run_control_status"
 
 
 async def run_node_with_retry(
@@ -32,6 +42,8 @@ async def run_node_with_retry(
     max_retries: int = 3,
     retry_config: RetryConfig | None = None,
     defer_completion_commit: bool = False,
+    job_id: UUID | None = None,
+    lease_owner: str | None = None,
 ) -> RunNode:
     """
     Execute a single node with retry support.
@@ -78,6 +90,8 @@ async def run_node_with_retry(
         state=state,
         working_dir=working_dir or settings.temp_dir,
         db_session=db,
+        job_id=str(job_id) if job_id is not None else None,
+        lease_owner=lease_owner,
     )
 
     # Build retry config from parameters
@@ -91,7 +105,20 @@ async def run_node_with_retry(
 
     async def _execute_attempt() -> NodeResult:
         """Execute the node once. Raises on failure so retry_async can catch it."""
-        return await node_impl.execute(context)
+        control_status = await _stopped_run_status(db, run_id)
+        if control_status is not None:
+            return NodeResult(success=True, metadata={_CONTROL_STATUS_KEY: control_status})
+        try:
+            result = await node_impl.execute(context)
+        except Exception:
+            control_status = await _stopped_run_status(db, run_id)
+            if control_status is not None:
+                return NodeResult(success=True, metadata={_CONTROL_STATUS_KEY: control_status})
+            raise
+        control_status = await _stopped_run_status(db, run_id)
+        if control_status is not None:
+            return NodeResult(success=True, metadata={_CONTROL_STATUS_KEY: control_status})
+        return result
 
     start_time = time.monotonic()
 
@@ -102,7 +129,11 @@ async def run_node_with_retry(
         )
         elapsed_ms = int((time.monotonic() - start_time) * 1000)
 
-        new_status = NodeStatus.COMPLETED.value if result.success else NodeStatus.FAILED.value
+        control_status = result.metadata.get(_CONTROL_STATUS_KEY)
+        if control_status is not None:
+            new_status = NodeStatus.SKIPPED.value
+        else:
+            new_status = NodeStatus.COMPLETED.value if result.success else NodeStatus.FAILED.value
         if can_node_transition(run_node.status, new_status):
             run_node.status = new_status
         else:
@@ -110,10 +141,10 @@ async def run_node_with_retry(
                 f"Invalid node transition: {run_node.status} -> {new_status} "
                 f"for node {node_id}. Skipping status update."
             )
-        run_node.output_data = result.output_data
-        run_node.items_processed = result.items_processed
+        run_node.output_data = {} if control_status is not None else result.output_data
+        run_node.items_processed = 0 if control_status is not None else result.items_processed
         run_node.duration_ms = elapsed_ms
-        run_node.error_message = result.error_message
+        run_node.error_message = None if control_status is not None else result.error_message
         run_node.attempt_count = (
             retry_config.max_retries
         )  # we don't track per-attempt, but set to max
@@ -124,11 +155,18 @@ async def run_node_with_retry(
             run_node_id=run_node.id,
             node_id=node_id,
             level=LogLevel.INFO.value,
-            message=f"Node {node_type} completed in {elapsed_ms}ms",
-            structured_data={"items_processed": result.items_processed},
+            message=(
+                f"Node {node_type} stopped because run is {control_status}"
+                if control_status is not None
+                else f"Node {node_type} completed in {elapsed_ms}ms"
+            ),
+            structured_data={"items_processed": run_node.items_processed},
         )
         db.add(log)
 
+    except SDKSourceStateLeaseError:
+        await db.rollback()
+        raise
     except Exception as e:
         elapsed_ms = int((time.monotonic() - start_time) * 1000)
         new_status = NodeStatus.FAILED.value
@@ -160,6 +198,14 @@ async def run_node_with_retry(
         await db.commit()
     await db.refresh(run_node)
     return run_node
+
+
+async def _stopped_run_status(db: AsyncSession, run_id: UUID) -> str | None:
+    result = await db.execute(select(Run.status).where(Run.id == run_id))
+    status = result.scalar_one_or_none()
+    if status in (RunStatus.PAUSED.value, RunStatus.CANCELLED.value):
+        return status
+    return None
 
 
 # Keep backward-compatible alias

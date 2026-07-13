@@ -18,7 +18,11 @@ from app.models.execution import CheckpointType, Run, RunStatus
 from app.models.graph import Connection, Graph
 from app.services.connection_crypto import decrypt_connection_config
 from app.services.execution_service import fail_run_if_running
-from app.services.sdk_source_state_service import complete_run_with_source_state_promotion
+from app.services.sdk_source_state_service import (
+    SDKSourceStateLeaseError,
+    complete_run_with_source_state_promotion,
+    revalidate_source_state_staging_lease,
+)
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -85,7 +89,7 @@ class DAGExecutor:
             await self.db.rollback()
             raise RuntimeError("Run no longer exists")
         run = locked_run
-        if can_transition(run.status, RunStatus.RUNNING.value):
+        if run.status == RunStatus.PENDING.value:
             run.status = RunStatus.RUNNING.value
         if run.status != RunStatus.RUNNING.value:
             await self.db.commit()
@@ -131,8 +135,8 @@ class DAGExecutor:
         for level_idx, level_nodes in enumerate(levels):
             # Check if run is still running (could have been cancelled)
             await self.db.refresh(run)
-            if run.status == RunStatus.CANCELLED.value:
-                break
+            if run.status in (RunStatus.PAUSED.value, RunStatus.CANCELLED.value):
+                return run
 
             logger.info(f"Executing level {level_idx} with {len(level_nodes)} nodes")
 
@@ -147,6 +151,9 @@ class DAGExecutor:
                     node_configs,
                     exec_state,
                 )
+                await self.db.refresh(run)
+                if run.status in (RunStatus.PAUSED.value, RunStatus.CANCELLED.value):
+                    return run
                 # Check for failures in parallel results
                 for node_id, run_node in results.items():
                     if run_node.status == "failed":
@@ -173,6 +180,7 @@ class DAGExecutor:
                 if result is not None:
                     return result  # A failure occurred
 
+        await self.db.refresh(run)
         # Mark run as completed if no failures (with state machine validation)
         if run.status == RunStatus.RUNNING.value and can_transition(
             run.status, RunStatus.COMPLETED.value
@@ -289,7 +297,10 @@ class DAGExecutor:
                     from app.models.execution import Run
 
                     node_run = await node_db.get(Run, run.id)
-                    if node_run and node_run.status == RunStatus.CANCELLED.value:
+                    if node_run and node_run.status in (
+                        RunStatus.PAUSED.value,
+                        RunStatus.CANCELLED.value,
+                    ):
                         from app.models.execution import NodeStatus
                         from app.models.execution import RunNode as RN
 
@@ -327,7 +338,11 @@ class DAGExecutor:
                         input_data=input_data,
                         state=self._state_for_node(node_id, node_configs, exec_state),
                         defer_completion_commit=True,
+                        job_id=self.completion_job_id,
+                        lease_owner=self.completion_lease_owner,
                     )
+                    if run_node.status == "skipped":
+                        return node_id, run_node
 
                     # Store output in execution state (only on success)
                     if run_node.output_data and run_node.status == "completed":
@@ -346,6 +361,13 @@ class DAGExecutor:
                             )
 
                     # Save post-execution checkpoint
+                    if node_type == "sdk_document_source":
+                        await revalidate_source_state_staging_lease(
+                            node_db,
+                            run.id,
+                            job_id=self.completion_job_id,
+                            lease_owner=self.completion_lease_owner,
+                        )
                     await save_checkpoint(
                         db=node_db,
                         run_id=run.id,
@@ -392,6 +414,8 @@ class DAGExecutor:
                         )
 
                     return node_id, run_node
+                except SDKSourceStateLeaseError:
+                    raise
                 except Exception:
                     logger.exception(f"Unexpected error in parallel node {node_id}")
                     from app.models.execution import NodeStatus
@@ -430,8 +454,8 @@ class DAGExecutor:
         """
         for node_id in level_nodes:
             await self.db.refresh(run)
-            if run.status == RunStatus.CANCELLED.value:
-                return None
+            if run.status in (RunStatus.PAUSED.value, RunStatus.CANCELLED.value):
+                return run
 
             node_def = nodes_data[node_id]
             node_type = node_def.get("type", node_def.get("node_type", "unknown"))
@@ -459,7 +483,12 @@ class DAGExecutor:
                 input_data=input_data,
                 state=self._state_for_node(node_id, node_configs, exec_state),
                 defer_completion_commit=True,
+                job_id=self.completion_job_id,
+                lease_owner=self.completion_lease_owner,
             )
+            if run_node.status == "skipped":
+                await self.db.refresh(run)
+                return run
 
             # Store output in execution state
             if run_node.output_data:
@@ -478,6 +507,13 @@ class DAGExecutor:
                     )
 
             # Save post-execution checkpoint
+            if node_type == "sdk_document_source":
+                await revalidate_source_state_staging_lease(
+                    self.db,
+                    run.id,
+                    job_id=self.completion_job_id,
+                    lease_owner=self.completion_lease_owner,
+                )
             await save_checkpoint(
                 db=self.db,
                 run_id=run.id,

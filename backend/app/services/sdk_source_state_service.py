@@ -24,7 +24,11 @@ class StaleSDKSourceStateCandidateError(RuntimeError):
     """A run attempted to promote state derived from an obsolete checkpoint."""
 
 
-class RunCompletionLeaseError(RuntimeError):
+class SDKSourceStateLeaseError(RuntimeError):
+    """A worker lost the durable lease required to stage source state."""
+
+
+class RunCompletionLeaseError(SDKSourceStateLeaseError):
     """The worker no longer owns the lease required to acknowledge a run."""
 
 
@@ -35,6 +39,57 @@ def _pipeline_key(owner_id: UUID, graph_id: UUID, node_id: str) -> str:
 def _lock_id(pipeline_key: str) -> int:
     digest = hashlib.sha256(pipeline_key.encode()).digest()
     return int.from_bytes(digest[:8], byteorder="big", signed=True)
+
+
+def _run_lock_id(run_id: UUID) -> int:
+    return _lock_id(f"studio-run:{run_id}")
+
+
+def _valid_job_lease(
+    job: RunJob | None,
+    *,
+    job_id: UUID,
+    run_id: UUID,
+    lease_owner: str | None,
+) -> bool:
+    now = datetime.now(UTC)
+    return bool(
+        job is not None
+        and job.id == job_id
+        and job.run_id == run_id
+        and job.status == RunJobStatus.LEASED.value
+        and lease_owner is not None
+        and job.lease_owner == lease_owner
+        and job.lease_expires_at is not None
+        and job.lease_expires_at > now
+    )
+
+
+async def _lock_and_validate_job(
+    db: AsyncSession,
+    *,
+    job_id: UUID,
+    run_id: UUID,
+    lease_owner: str | None,
+    error_type: type[SDKSourceStateLeaseError],
+    message: str,
+) -> RunJob:
+    result = await db.execute(
+        select(RunJob)
+        .where(RunJob.id == job_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    job = result.scalar_one_or_none()
+    if not _valid_job_lease(
+        job,
+        job_id=job_id,
+        run_id=run_id,
+        lease_owner=lease_owner,
+    ):
+        await db.rollback()
+        raise error_type(message)
+    return job
 
 
 class StudioSDKSourceStateStore(StateStore):
@@ -52,6 +107,8 @@ class StudioSDKSourceStateStore(StateStore):
         owner_id: UUID,
         graph_id: UUID,
         node_id: str,
+        job_id: UUID | None = None,
+        lease_owner: str | None = None,
         lock_timeout_seconds: float = 30.0,
     ) -> None:
         self.session = session
@@ -59,21 +116,61 @@ class StudioSDKSourceStateStore(StateStore):
         self.owner_id = UUID(str(owner_id))
         self.graph_id = UUID(str(graph_id))
         self.node_id = node_id
+        self.job_id = UUID(str(job_id)) if job_id is not None else None
+        self.lease_owner = lease_owner
         self.lock_timeout_seconds = max(0.0, lock_timeout_seconds)
         self.pipeline_key = _pipeline_key(self.owner_id, self.graph_id, node_id)
+        self._fence_acquired = False
 
     async def acquire_lock(self) -> None:
-        """Serialize candidate creation with state promotion for this node."""
+        """Fence this run/worker before reading state or staging candidates."""
+        if self._fence_acquired:
+            await self.revalidate_lease()
+            return
+        if self.job_id is not None:
+            await self.revalidate_lease()
+        elif self.lease_owner is not None:
+            await self.session.rollback()
+            raise SDKSourceStateLeaseError("Source-state lease owner requires a job id")
+
+        await self._acquire_advisory_lock(
+            _run_lock_id(self.run_id),
+            "Timed out waiting for SDK source run fence",
+        )
+        await self._acquire_advisory_lock(
+            _lock_id(self.pipeline_key),
+            "Timed out waiting for SDK source state lock",
+        )
+        await self._lock_active_run()
+        await self.revalidate_lease()
+        self._fence_acquired = True
+
+    async def _acquire_advisory_lock(self, lock_id: int, message: str) -> None:
         deadline = time.monotonic() + self.lock_timeout_seconds
-        lock_id = _lock_id(self.pipeline_key)
         while True:
             result = await self.session.execute(select(func.pg_try_advisory_xact_lock(lock_id)))
             if bool(result.scalar_one()):
                 return
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                raise TimeoutError("Timed out waiting for SDK source state lock")
+                raise TimeoutError(message)
             await asyncio.sleep(min(0.1, remaining))
+
+    async def revalidate_lease(self) -> None:
+        """Force-refresh the locked job and fail closed if its lease is stale."""
+        if self.job_id is None:
+            if self.lease_owner is not None:
+                await self.session.rollback()
+                raise SDKSourceStateLeaseError("Source-state lease owner requires a job id")
+            return
+        await _lock_and_validate_job(
+            self.session,
+            job_id=self.job_id,
+            run_id=self.run_id,
+            lease_owner=self.lease_owner,
+            error_type=SDKSourceStateLeaseError,
+            message="Run job lease was lost before source-state staging",
+        )
 
     async def load(self, pipeline: str, source: str, stream: str) -> Mapping[str, Any]:
         """Read only state acknowledged by a previously completed graph run."""
@@ -89,9 +186,10 @@ class StudioSDKSourceStateStore(StateStore):
         state: Mapping[str, Any],
     ) -> None:
         self._require_pipeline(pipeline)
-        await self._lock_active_run()
+        await self.acquire_lock()
         candidate = await self._candidate(source, stream)
         committed = await self._committed(source, stream)
+        await self.revalidate_lease()
         if candidate is None:
             candidate = SDKSourceStateCandidate(
                 run_id=self.run_id,
@@ -128,9 +226,10 @@ class StudioSDKSourceStateStore(StateStore):
 
     async def delete(self, pipeline: str, source: str, stream: str) -> None:
         self._require_pipeline(pipeline)
-        await self._lock_active_run()
+        await self.acquire_lock()
         candidate = await self._candidate(source, stream)
         committed = await self._committed(source, stream)
+        await self.revalidate_lease()
         if candidate is not None:
             if committed is None or committed.is_deleted:
                 await self.session.delete(candidate)
@@ -198,7 +297,11 @@ class StudioSDKSourceStateStore(StateStore):
             .execution_options(populate_existing=True)
         )
         run = result.scalar_one_or_none()
-        if run is None or run.status != RunStatus.RUNNING.value:
+        if (
+            run is None
+            or run.graph_id != self.graph_id
+            or run.status != RunStatus.RUNNING.value
+        ):
             raise RuntimeError("SDK source state cannot be staged for an inactive run")
 
     def _require_pipeline(self, pipeline: str) -> None:
@@ -225,6 +328,33 @@ async def _lock_candidate_scopes(db: AsyncSession, run_id: UUID) -> list[str]:
     return pipeline_keys
 
 
+async def _lock_run_fence(db: AsyncSession, run_id: UUID) -> None:
+    await db.execute(select(func.pg_advisory_xact_lock(_run_lock_id(run_id))))
+
+
+async def revalidate_source_state_staging_lease(
+    db: AsyncSession,
+    run_id: UUID,
+    *,
+    job_id: UUID | None,
+    lease_owner: str | None,
+) -> None:
+    """Recheck a source worker immediately before its POST_EXEC commit."""
+    if job_id is None:
+        if lease_owner is not None:
+            await db.rollback()
+            raise SDKSourceStateLeaseError("Source-state lease owner requires a job id")
+        return
+    await _lock_and_validate_job(
+        db,
+        job_id=job_id,
+        run_id=run_id,
+        lease_owner=lease_owner,
+        error_type=SDKSourceStateLeaseError,
+        message="Run job lease was lost before source-state POST_EXEC commit",
+    )
+
+
 async def promote_sdk_source_state_candidates(
     db: AsyncSession,
     run_id: UUID,
@@ -234,6 +364,7 @@ async def promote_sdk_source_state_candidates(
     """Promote one run's candidates without committing the surrounding transaction."""
     pipeline_keys = locked_pipeline_keys
     if pipeline_keys is None:
+        await _lock_run_fence(db, run_id)
         pipeline_keys = await _lock_candidate_scopes(db, run_id)
 
     result = await db.execute(
@@ -325,29 +456,31 @@ async def complete_run_with_source_state_promotion(
     durable-job lease is fenced in the same transaction before any state moves.
     """
     if job_id is not None:
-        job_result = await db.execute(
-            select(RunJob)
-            .where(RunJob.id == job_id)
-            .with_for_update()
-            .execution_options(populate_existing=True)
+        await _lock_and_validate_job(
+            db,
+            job_id=job_id,
+            run_id=run_id,
+            lease_owner=lease_owner,
+            error_type=RunCompletionLeaseError,
+            message="Run job lease was lost before graph completion",
         )
-        job = job_result.scalar_one_or_none()
-        now = datetime.now(UTC)
-        if (
-            job is None
-            or lease_owner is None
-            or job.run_id != run_id
-            or job.status != RunJobStatus.LEASED.value
-            or job.lease_owner != lease_owner
-            or job.lease_expires_at is None
-            or job.lease_expires_at <= now
-        ):
-            await db.rollback()
-            raise RunCompletionLeaseError("Run job lease was lost before graph completion")
+    elif lease_owner is not None:
+        await db.rollback()
+        raise RunCompletionLeaseError("Run completion lease owner requires a job id")
 
-    # Source staging takes its scope lock before the run row. Match that order so
-    # cancellation, staging, and completion cannot form an advisory/row deadlock.
+    # The run fence makes the candidate-scope snapshot stable: staging must finish
+    # and commit before completion can inspect and lock the sorted scopes.
+    await _lock_run_fence(db, run_id)
     pipeline_keys = await _lock_candidate_scopes(db, run_id)
+    if job_id is not None:
+        await _lock_and_validate_job(
+            db,
+            job_id=job_id,
+            run_id=run_id,
+            lease_owner=lease_owner,
+            error_type=RunCompletionLeaseError,
+            message="Run job lease was lost while graph completion was waiting",
+        )
 
     run_result = await db.execute(
         select(Run)
@@ -366,12 +499,31 @@ async def complete_run_with_source_state_promotion(
             return False
         raise RuntimeError(f"Cannot complete run in {run_status!r} state")
 
+    if job_id is not None:
+        await _lock_and_validate_job(
+            db,
+            job_id=job_id,
+            run_id=run_id,
+            lease_owner=lease_owner,
+            error_type=RunCompletionLeaseError,
+            message="Run job lease was lost after graph completion acquired the run",
+        )
+
     try:
         await promote_sdk_source_state_candidates(
             db,
             run_id,
             locked_pipeline_keys=pipeline_keys,
         )
+        if job_id is not None:
+            await _lock_and_validate_job(
+                db,
+                job_id=job_id,
+                run_id=run_id,
+                lease_owner=lease_owner,
+                error_type=RunCompletionLeaseError,
+                message="Run job lease was lost before graph completion commit",
+            )
         run.status = RunStatus.COMPLETED.value
         run.error_message = None
         await db.commit()

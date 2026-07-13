@@ -15,6 +15,8 @@ from app.services.execution_service import (
     cancel_run,
     create_run,
     fail_run_if_running,
+    pause_run,
+    resume_run,
     update_run_status,
 )
 from fastapi import HTTPException
@@ -82,6 +84,57 @@ async def test_retryable_and_paused_runs_keep_candidates(initial_status, target_
     await update_run_status(db, run.id, target_status)
 
     assert db.execute.await_count == 1
+    db.commit.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_pause_locks_job_before_run_and_preserves_lease_for_worker_release():
+    run = Run(id=uuid4(), graph_id=uuid4(), status=RunStatus.RUNNING.value)
+    job = RunJob(
+        id=uuid4(),
+        run_id=run.id,
+        status=RunJobStatus.LEASED.value,
+        lease_owner="worker-1",
+        lease_expires_at=datetime.now(UTC) + timedelta(minutes=5),
+    )
+    db = AsyncMock()
+    db.execute.side_effect = [_scalar_result(job), _scalar_result(run)]
+
+    returned = await pause_run(db, run.id)
+
+    assert returned is run
+    assert run.status == RunStatus.PAUSED.value
+    assert job.status == RunJobStatus.LEASED.value
+    assert job.lease_owner == "worker-1"
+    assert "run_jobs" in str(db.execute.await_args_list[0].args[0])
+    assert "runs" in str(db.execute.await_args_list[1].args[0])
+    db.commit.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_resume_requeues_job_and_invalidates_old_lease_atomically():
+    run = Run(id=uuid4(), graph_id=uuid4(), status=RunStatus.PAUSED.value)
+    job = RunJob(
+        id=uuid4(),
+        run_id=run.id,
+        status=RunJobStatus.LEASED.value,
+        lease_owner="old-worker",
+        lease_expires_at=datetime.now(UTC) + timedelta(minutes=5),
+        heartbeat_at=datetime.now(UTC),
+    )
+    db = AsyncMock()
+    db.execute.side_effect = [_scalar_result(job), _scalar_result(run)]
+
+    returned = await resume_run(db, run.id)
+
+    assert returned is run
+    assert run.status == RunStatus.RUNNING.value
+    assert job.status == RunJobStatus.QUEUED.value
+    assert job.lease_owner is None
+    assert job.lease_expires_at is None
+    assert job.heartbeat_at is None
+    assert "run_jobs" in str(db.execute.await_args_list[0].args[0])
+    assert "runs" in str(db.execute.await_args_list[1].args[0])
     db.commit.assert_awaited_once()
 
 

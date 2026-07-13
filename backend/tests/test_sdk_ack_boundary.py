@@ -101,6 +101,23 @@ async def test_executor_locked_reload_does_not_resurrect_cached_cancelled_run(mo
 
 
 @pytest.mark.asyncio
+async def test_executor_does_not_auto_resume_a_paused_run(monkeypatch):
+    run = Run(id=uuid4(), graph_id=uuid4(), status="paused")
+    db = AsyncMock()
+    db.execute.return_value = _scalar_result(run)
+    executor = DAGExecutor(db)
+    graph_owner = AsyncMock()
+    monkeypatch.setattr(executor, "_graph_owner", graph_owner)
+
+    returned = await executor.execute(run, {"source": {"type": "source"}}, [])
+
+    assert returned is run
+    assert returned.status == "paused"
+    db.commit.assert_awaited_once()
+    graph_owner.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_executor_failure_transition_passes_durable_lease_fence(monkeypatch):
     run = Run(id=uuid4(), graph_id=uuid4(), status="running")
     job_id = uuid4()
@@ -189,6 +206,8 @@ async def test_failed_node_retry_restores_source_output_and_promotes_without_rer
     assert run_node.await_count == 1
     assert run_node.await_args.kwargs["node_id"] == "destination"
     assert run_node.await_args.kwargs["input_data"] == {"items": [{"id": "restored"}]}
+    assert run_node.await_args.kwargs["job_id"] == job.id
+    assert run_node.await_args.kwargs["lease_owner"] == "worker-1"
     executor_factory.assert_called_once_with(
         db,
         None,

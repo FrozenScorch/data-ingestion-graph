@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
@@ -15,8 +16,11 @@ from app.services.execution_service import (
     fail_run_if_running,
 )
 from app.services.sdk_source_state_service import (
+    RunCompletionLeaseError,
+    SDKSourceStateLeaseError,
     StaleSDKSourceStateCandidateError,
     StudioSDKSourceStateStore,
+    _run_lock_id,
     complete_run_with_source_state_promotion,
 )
 from sqlalchemy import func, select, text
@@ -169,6 +173,8 @@ def _store(
     run_id: UUID,
     owner_id: UUID,
     graph_id: UUID,
+    job_id: UUID | None = None,
+    worker: str | None = None,
 ) -> StudioSDKSourceStateStore:
     return StudioSDKSourceStateStore(
         session,
@@ -176,6 +182,8 @@ def _store(
         owner_id=owner_id,
         graph_id=graph_id,
         node_id="documents",
+        job_id=job_id,
+        lease_owner=worker,
     )
 
 
@@ -326,6 +334,190 @@ async def test_replaced_worker_lease_cannot_transition_run_to_failed():
             run = await verification_session.get(Run, run_id)
             assert run is not None and run.status == "running"
             assert run.error_message is None
+    finally:
+        await engine.dispose()
+        async with admin_engine.begin() as connection:
+            await connection.execute(text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
+        await admin_engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_replaced_worker_lease_cannot_stage_source_candidate():
+    schema = f"sdk_staging_lease_{uuid4().hex}"
+    engine = create_async_engine(
+        TEST_DATABASE_URL,
+        connect_args={"server_settings": {"search_path": schema}},
+    )
+    admin_engine = create_async_engine(TEST_DATABASE_URL)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    owner_id, graph_id, run_id, job_id = uuid4(), uuid4(), uuid4(), uuid4()
+
+    try:
+        await _create_schema(admin_engine, schema)
+        async with sessions() as session:
+            await _seed_run(
+                session,
+                owner_id=owner_id,
+                graph_id=graph_id,
+                run_id=run_id,
+                job_id=job_id,
+                worker="stale-worker",
+            )
+            await session.execute(
+                text("UPDATE run_jobs SET lease_owner = 'replacement-worker' WHERE id = :id"),
+                {"id": job_id},
+            )
+            await session.commit()
+
+        async with sessions() as session:
+            store = _store(
+                session,
+                run_id=run_id,
+                owner_id=owner_id,
+                graph_id=graph_id,
+                job_id=job_id,
+                worker="stale-worker",
+            )
+            with pytest.raises(SDKSourceStateLeaseError, match="lease was lost"):
+                await store.save(
+                    store.pipeline_key,
+                    "local_documents",
+                    "upload-1",
+                    {"cursor": 1},
+                )
+
+        async with sessions() as session:
+            assert await session.scalar(select(func.count(SDKSourceStateCandidate.id))) == 0
+    finally:
+        await engine.dispose()
+        async with admin_engine.begin() as connection:
+            await connection.execute(text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
+        await admin_engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_completion_waits_for_candidate_commit_then_promotes_it():
+    schema = f"sdk_scope_snapshot_{uuid4().hex}"
+    engine = create_async_engine(
+        TEST_DATABASE_URL,
+        connect_args={"server_settings": {"search_path": schema}},
+    )
+    admin_engine = create_async_engine(TEST_DATABASE_URL)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    owner_id, graph_id, run_id, job_id = uuid4(), uuid4(), uuid4(), uuid4()
+
+    try:
+        await _create_schema(admin_engine, schema)
+        async with sessions() as seed:
+            await _seed_run(
+                seed,
+                owner_id=owner_id,
+                graph_id=graph_id,
+                run_id=run_id,
+                job_id=job_id,
+                worker="worker-1",
+            )
+
+        async with sessions() as staging:
+            store = _store(
+                staging,
+                run_id=run_id,
+                owner_id=owner_id,
+                graph_id=graph_id,
+                job_id=job_id,
+                worker="worker-1",
+            )
+            await store.save(
+                store.pipeline_key,
+                "local_documents",
+                "upload-1",
+                {"cursor": 1},
+            )
+
+            async def complete() -> bool:
+                async with sessions() as completion:
+                    return await complete_run_with_source_state_promotion(
+                        completion,
+                        run_id,
+                        job_id=job_id,
+                        lease_owner="worker-1",
+                    )
+
+            completion_task = asyncio.create_task(complete())
+            await asyncio.sleep(0.05)
+            assert not completion_task.done()
+            await staging.commit()
+            assert await asyncio.wait_for(completion_task, timeout=3)
+
+        async with sessions() as verification:
+            state = await verification.scalar(select(SDKSourceState))
+            assert state is not None and state.state_data == {"cursor": 1}
+            assert await verification.scalar(
+                select(func.count(SDKSourceStateCandidate.id))
+            ) == 0
+            run = await verification.get(Run, run_id)
+            assert run is not None and run.status == "completed"
+    finally:
+        await engine.dispose()
+        async with admin_engine.begin() as connection:
+            await connection.execute(text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
+        await admin_engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_completion_lease_expiry_while_waiting_on_run_fence_fails_closed():
+    schema = f"sdk_completion_expiry_{uuid4().hex}"
+    engine = create_async_engine(
+        TEST_DATABASE_URL,
+        connect_args={"server_settings": {"search_path": schema}},
+    )
+    admin_engine = create_async_engine(TEST_DATABASE_URL)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    owner_id, graph_id, run_id, job_id = uuid4(), uuid4(), uuid4(), uuid4()
+
+    try:
+        await _create_schema(admin_engine, schema)
+        async with sessions() as seed:
+            await _seed_run(
+                seed,
+                owner_id=owner_id,
+                graph_id=graph_id,
+                run_id=run_id,
+                job_id=job_id,
+                worker="worker-1",
+            )
+            await seed.execute(
+                text("UPDATE run_jobs SET lease_expires_at = :expiry WHERE id = :id"),
+                {
+                    "id": job_id,
+                    "expiry": datetime.now(UTC) + timedelta(milliseconds=200),
+                },
+            )
+            await seed.commit()
+
+        async with sessions() as blocker:
+            await blocker.execute(select(func.pg_advisory_xact_lock(_run_lock_id(run_id))))
+
+            async def complete() -> bool:
+                async with sessions() as completion:
+                    return await complete_run_with_source_state_promotion(
+                        completion,
+                        run_id,
+                        job_id=job_id,
+                        lease_owner="worker-1",
+                    )
+
+            completion_task = asyncio.create_task(complete())
+            await asyncio.sleep(0.3)
+            assert not completion_task.done()
+            await blocker.commit()
+            with pytest.raises(RunCompletionLeaseError, match="lease was lost"):
+                await asyncio.wait_for(completion_task, timeout=3)
+
+        async with sessions() as verification:
+            run = await verification.get(Run, run_id)
+            assert run is not None and run.status == "running"
+            assert await verification.scalar(select(func.count(SDKSourceState.id))) == 0
     finally:
         await engine.dispose()
         async with admin_engine.begin() as connection:

@@ -6,10 +6,11 @@ from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
 import pytest
-from app.models.execution import Run, RunJob, RunJobStatus, RunJobType
+from app.models.execution import Run, RunJob, RunJobStatus, RunJobType, RunStatus
 from app.services.run_queue_service import (
     claim_run_job,
     enqueue_run_job,
+    finalize_run_job,
     finish_run_job,
     heartbeat_run_job,
     mark_run_failed_if_owned,
@@ -102,6 +103,8 @@ async def test_claim_query_includes_expired_lease_recovery_and_skip_locked():
     query = db.execute.await_args.args[0]
     sql = str(query)
     assert "run_jobs.lease_expires_at" in sql
+    assert "JOIN runs" in sql
+    assert "runs.status" in sql
     assert "FOR UPDATE" in sql
     db.rollback.assert_awaited_once()
 
@@ -186,6 +189,66 @@ async def test_mark_run_failed_locks_job_and_run_before_commit():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "run_status",
+    [
+        RunStatus.PAUSED.value,
+        RunStatus.COMPLETED.value,
+        RunStatus.CANCELLED.value,
+        RunStatus.SUPERSEDED.value,
+    ],
+)
+async def test_mark_run_failed_preserves_every_non_running_state(run_status):
+    run = Run(id=uuid4(), graph_id=uuid4(), status=run_status)
+    job = RunJob(
+        run_id=run.id,
+        status=RunJobStatus.LEASED.value,
+        lease_owner="worker-1",
+        lease_expires_at=datetime.now(timezone.utc) + timedelta(seconds=60),
+    )
+    db = AsyncMock()
+    db.execute = AsyncMock(side_effect=[scalar_result(job), scalar_result(run)])
+
+    assert not await mark_run_failed_if_owned(
+        db,
+        job_id=job.id,
+        run_id=run.id,
+        worker_id="worker-1",
+        error="late failure",
+    )
+    assert run.status == run_status
+    assert run.error_message is None
+    db.rollback.assert_awaited_once()
+    db.commit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_finalizer_requeues_owned_job_instead_of_completing_paused_run():
+    run = Run(id=uuid4(), graph_id=uuid4(), status=RunStatus.PAUSED.value)
+    job = RunJob(
+        run_id=run.id,
+        status=RunJobStatus.LEASED.value,
+        lease_owner="worker-1",
+        lease_expires_at=datetime.now(timezone.utc) + timedelta(seconds=60),
+    )
+    db = AsyncMock()
+    db.execute = AsyncMock(side_effect=[scalar_result(job), scalar_result(run)])
+
+    outcome = await finalize_run_job(
+        db,
+        job_id=job.id,
+        run_id=run.id,
+        worker_id="worker-1",
+    )
+
+    assert outcome == "requeued"
+    assert job.status == RunJobStatus.QUEUED.value
+    assert job.lease_owner is None
+    assert job.lease_expires_at is None
+    db.commit.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_graceful_release_is_fenced_by_lease_owner():
     db = AsyncMock()
     db.execute = AsyncMock(return_value=SimpleNamespace(rowcount=1))
@@ -215,6 +278,22 @@ async def test_reclaimed_job_does_not_reexecute_completed_run(monkeypatch):
     from app.engine import run_job_executor
 
     run = SimpleNamespace(status="completed")
+    job = SimpleNamespace(run_id=uuid4(), job_type=RunJobType.FULL.value)
+    db = AsyncMock()
+    db.get = AsyncMock(return_value=run)
+    execute_full = AsyncMock()
+    monkeypatch.setattr(run_job_executor, "_execute_full_run", execute_full)
+
+    await run_job_executor.execute_run_job(db, job)
+
+    execute_full.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_queued_paused_run_is_not_executed(monkeypatch):
+    from app.engine import run_job_executor
+
+    run = SimpleNamespace(status=RunStatus.PAUSED.value)
     job = SimpleNamespace(run_id=uuid4(), job_type=RunJobType.FULL.value)
     db = AsyncMock()
     db.get = AsyncMock(return_value=run)

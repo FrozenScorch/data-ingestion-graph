@@ -11,14 +11,23 @@ immutable graph version but no job record. Completed and cancelled runs are
 never re-executed when an expired lease is reclaimed.
 
 SDK source adapters stage run-scoped state candidates at source POST_EXEC. The
-worker promotes them only after all graph nodes succeed, while holding the live
-job lease and run row lock, in the same transaction that marks the run completed.
+worker promotes them only after all graph nodes succeed. Job-backed staging and
+completion use one lock order: job row, deterministic run advisory lock, sorted
+source-scope advisory locks, then the forced-refresh run row. The lease is checked
+again after every wait and immediately before acknowledgement commits. Direct
+execution uses the same run advisory fence without requiring a job lease.
 A downstream failure keeps candidates for same-run failed-node retry; a crash or
 lease loss cannot expose them as committed source state. Cancellation atomically
 deletes its candidates because it is terminal. Paused runs retain candidates,
 while a new full run locks prior failed jobs and then their runs for the same owner and
 graph. Queued or leased retries survive; inactive failures become terminally
 `superseded` and lose their candidates atomically before the new run is created.
+
+Queue claims join the run and accept only `pending` or `running` work. Pausing
+serializes the job row before the run row; a cooperative worker requeues rather
+than completes that job. Resume changes `paused` to `running` and resets the
+single job to `queued` in the same transaction, clearing the old lease so a stale
+worker cannot stage state or acknowledge failure/completion.
 
 ## Runtime settings
 

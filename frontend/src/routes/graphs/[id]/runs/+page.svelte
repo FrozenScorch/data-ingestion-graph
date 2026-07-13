@@ -14,6 +14,7 @@
     switch (status) {
       case 'completed': return 'text-green-400 bg-green-500/10 border-green-500/20';
       case 'running': return 'text-indigo-400 bg-indigo-500/10 border-indigo-500/20';
+      case 'paused': return 'text-amber-400 bg-amber-500/10 border-amber-500/20';
       case 'failed': return 'text-red-400 bg-red-500/10 border-red-500/20';
       case 'cancelled': return 'text-gray-400 bg-gray-500/10 border-gray-500/20';
       case 'superseded': return 'text-gray-500 bg-gray-500/10 border-gray-500/20';

@@ -59,7 +59,8 @@ completes. The source POST_EXEC checkpoint commits its successful bounded output
 and candidates together, but committed SDK reads do not see those candidates.
 
 After every graph node reports success, the durable worker fences its live job
-lease, locks the run and affected source scopes, rejects stale base revisions, and
+lease, takes the run advisory fence and sorted affected source scopes, then locks
+the run, rejects stale base revisions, and
 promotes all candidates in the same transaction that marks the run completed.
 Downstream failure, cancellation, lease loss, or a crash before that transaction
 leaves committed source state unchanged. Failed runs retain candidates so
@@ -70,7 +71,8 @@ locks prior failed jobs and then their runs for that owner/graph. A queued or le
 retry wins and keeps its run/candidates; otherwise the old run becomes terminally
 `superseded` and its candidates are deleted before the new run is created. A
 concurrent retry then sees either `pending` or `superseded`, never an unlocked
-intermediate state. Paused runs retain candidates. Revisions and retained delete
+intermediate state. Paused runs retain candidates; their jobs are not claimable
+until resume atomically invalidates the prior lease and requeues the job. Revisions and retained delete
 tombstones prevent an older concurrent run from recreating or regressing state.
 
 This makes each Document Source run an incremental delta: unchanged uploads emit

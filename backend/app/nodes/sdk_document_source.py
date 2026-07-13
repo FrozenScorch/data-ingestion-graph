@@ -9,7 +9,10 @@ from uuid import UUID
 
 from app.nodes.base import BaseNode, NodeContext, NodeResult, PortDataType, PortDef
 from app.services import upload_service
-from app.services.sdk_source_state_service import StudioSDKSourceStateStore
+from app.services.sdk_source_state_service import (
+    SDKSourceStateLeaseError,
+    StudioSDKSourceStateStore,
+)
 from ingestion_graph.messages import RecordMessage, StateMessage
 from ingestion_graph.sources import LocalDocumentsSource
 from ingestion_graph.sources.documents import SUPPORTED_EXTENSIONS
@@ -28,6 +31,8 @@ class _StudioStateStore(Protocol):
     pipeline_key: str
 
     async def acquire_lock(self) -> None: ...
+
+    async def revalidate_lease(self) -> None: ...
 
     async def load(self, pipeline: str, source: str, stream: str) -> Mapping[str, Any]: ...
 
@@ -187,6 +192,8 @@ class SDKDocumentSourceNode(BaseNode):
                     owner_id=owner_id,
                     graph_id=graph_id,
                     node_id=context.node_id,
+                    job_id=UUID(context.job_id) if context.job_id is not None else None,
+                    lease_owner=context.lease_owner,
                 ),
             )
         pipeline = store.pipeline_key
@@ -285,6 +292,7 @@ class SDKDocumentSourceNode(BaseNode):
                         selected_streams=set(selected_streams),
                         pending_states=pending_states,
                     )
+                    await store.revalidate_lease()
             else:
                 await _stage_states(
                     store,
@@ -308,6 +316,8 @@ class SDKDocumentSourceNode(BaseNode):
                     "operations": operations,
                 },
             )
+        except SDKSourceStateLeaseError:
+            raise
         except _OutputLimitExceeded as exc:
             return self._failure(
                 f"Document delta exceeds {exc}; narrow the selection or raise the limit"

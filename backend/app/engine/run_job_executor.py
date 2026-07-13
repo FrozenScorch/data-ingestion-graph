@@ -9,7 +9,6 @@ from app.engine.executor import DAGExecutor
 from app.engine.graph_data import unpack_version_data
 from app.engine.runner import run_node_with_retry
 from app.engine.scheduler import topological_sort
-from app.engine.state import can_transition
 from app.models.execution import (
     CheckpointType,
     NodeStatus,
@@ -20,7 +19,10 @@ from app.models.execution import (
     RunStatus,
 )
 from app.models.graph import Graph, GraphVersion
-from app.services.sdk_source_state_service import complete_run_with_source_state_promotion
+from app.services.sdk_source_state_service import (
+    complete_run_with_source_state_promotion,
+    revalidate_source_state_staging_lease,
+)
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -30,6 +32,7 @@ async def execute_run_job(db: AsyncSession, job: RunJob, ws_manager: Any = None)
     if run is None:
         raise RuntimeError("Queued run no longer exists")
     if run.status in (
+        RunStatus.PAUSED.value,
         RunStatus.CANCELLED.value,
         RunStatus.COMPLETED.value,
         RunStatus.SUPERSEDED.value,
@@ -140,7 +143,7 @@ async def _execute_failed_nodes(
         await db.rollback()
         raise RuntimeError("Run no longer exists")
     run = locked_run
-    if can_transition(run.status, RunStatus.RUNNING.value):
+    if run.status in (RunStatus.PENDING.value, RunStatus.FAILED.value):
         run.status = RunStatus.RUNNING.value
     if run.status != RunStatus.RUNNING.value:
         await db.commit()
@@ -150,7 +153,7 @@ async def _execute_failed_nodes(
 
     for level_nodes in topological_sort(nodes, edges):
         await db.refresh(run)
-        if run.status == RunStatus.CANCELLED.value:
+        if run.status in (RunStatus.PAUSED.value, RunStatus.CANCELLED.value):
             return
         for node_id in (node for node in level_nodes if node in nodes_to_reexecute):
             node_def = nodes[node_id]
@@ -166,7 +169,11 @@ async def _execute_failed_nodes(
                 input_data=inputs,
                 state=executor._state_for_node(node_id, node_configs, exec_state),
                 defer_completion_commit=True,
+                job_id=job.id,
+                lease_owner=job.lease_owner,
             )
+            if run_node.status == NodeStatus.SKIPPED.value:
+                return
             if run_node.status != NodeStatus.COMPLETED.value:
                 error = f"Retry failed at node {node_id}: {run_node.error_message}"
                 await executor._fail_run(
@@ -177,6 +184,13 @@ async def _execute_failed_nodes(
                 return
             if run_node.output_data:
                 exec_state["outputs"][node_id] = run_node.output_data
+            if node_type == "sdk_document_source":
+                await revalidate_source_state_staging_lease(
+                    db,
+                    run.id,
+                    job_id=job.id,
+                    lease_owner=job.lease_owner,
+                )
             await save_checkpoint(
                 db,
                 run.id,

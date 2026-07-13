@@ -154,6 +154,7 @@ async def fail_run_if_running(
     lease_owner: str | None = None,
 ) -> tuple[Run | None, bool]:
     """Fail a still-running run, fencing durable workers by their current lease."""
+    job: RunJob | None = None
     if job_id is not None:
         job_result = await db.execute(
             select(RunJob)
@@ -189,14 +190,49 @@ async def fail_run_if_running(
     if run is None:
         await db.rollback()
         return None, False
+    if job_id is not None and not _owned_unexpired_job(
+        job,
+        job_id=job_id,
+        run_id=run_id,
+        lease_owner=lease_owner,
+    ):
+        await db.rollback()
+        raise RunFailureLeaseError("Run job lease was lost after failure acquired the run")
     transitioned = run.status == RunStatus.RUNNING.value
     if transitioned:
         run.status = RunStatus.FAILED.value
         run.error_message = error_message
+    if job_id is not None and not _owned_unexpired_job(
+        job,
+        job_id=job_id,
+        run_id=run_id,
+        lease_owner=lease_owner,
+    ):
+        await db.rollback()
+        raise RunFailureLeaseError("Run job lease was lost before failure commit")
     await db.commit()
     if transitioned:
         await db.refresh(run)
     return run, transitioned
+
+
+def _owned_unexpired_job(
+    job: RunJob | None,
+    *,
+    job_id: UUID,
+    run_id: UUID,
+    lease_owner: str | None,
+) -> bool:
+    return bool(
+        job is not None
+        and job.id == job_id
+        and job.run_id == run_id
+        and job.status == RunJobStatus.LEASED.value
+        and lease_owner is not None
+        and job.lease_owner == lease_owner
+        and job.lease_expires_at is not None
+        and job.lease_expires_at > datetime.now(UTC)
+    )
 
 
 async def cancel_run(db: AsyncSession, run_id: UUID) -> Run | None:
@@ -205,13 +241,69 @@ async def cancel_run(db: AsyncSession, run_id: UUID) -> Run | None:
 
 
 async def pause_run(db: AsyncSession, run_id: UUID) -> Run | None:
-    """Pause a running run."""
-    return await update_run_status(db, run_id, RunStatus.PAUSED.value)
+    """Pause a run while serializing with its durable dispatch row."""
+    await _lock_control_job(db, run_id)
+    run = await _lock_control_run(db, run_id)
+    if run is None:
+        await db.rollback()
+        return None
+
+    from app.engine.state import can_transition
+
+    if not can_transition(run.status, RunStatus.PAUSED.value):
+        await db.rollback()
+        raise ValueError(f"Invalid status transition: {run.status} -> paused")
+    run.status = RunStatus.PAUSED.value
+    await db.commit()
+    await db.refresh(run)
+    return run
 
 
 async def resume_run(db: AsyncSession, run_id: UUID) -> Run | None:
-    """Resume a paused run."""
-    return await update_run_status(db, run_id, RunStatus.RUNNING.value)
+    """Resume a paused run and invalidate/requeue its prior worker lease."""
+    job = await _lock_control_job(db, run_id)
+    run = await _lock_control_run(db, run_id)
+    if run is None:
+        await db.rollback()
+        return None
+
+    from app.engine.state import can_transition
+
+    if not can_transition(run.status, RunStatus.RUNNING.value):
+        await db.rollback()
+        raise ValueError(f"Invalid status transition: {run.status} -> running")
+
+    run.status = RunStatus.RUNNING.value
+    if job is not None:
+        job.status = RunJobStatus.QUEUED.value
+        job.available_at = datetime.now(UTC)
+        job.lease_owner = None
+        job.lease_expires_at = None
+        job.heartbeat_at = None
+        job.last_error = None
+    await db.commit()
+    await db.refresh(run)
+    return run
+
+
+async def _lock_control_job(db: AsyncSession, run_id: UUID) -> RunJob | None:
+    result = await db.execute(
+        select(RunJob)
+        .where(RunJob.run_id == run_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    return result.scalar_one_or_none()
+
+
+async def _lock_control_run(db: AsyncSession, run_id: UUID) -> Run | None:
+    result = await db.execute(
+        select(Run)
+        .where(Run.id == run_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    return result.scalar_one_or_none()
 
 
 def _graph_owner_id(graph_id: UUID):
