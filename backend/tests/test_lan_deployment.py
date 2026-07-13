@@ -177,6 +177,26 @@ def test_legacy_storage_import_is_atomic_one_time_and_non_overwriting(tmp_path):
     assert not (destination / "nested" / "legacy.txt").exists()
 
 
+def test_legacy_storage_import_rejects_destination_symlinks(tmp_path):
+    source = tmp_path / "legacy"
+    destination = tmp_path / "volume"
+    outside = tmp_path / "outside"
+    source.mkdir()
+    destination.mkdir()
+    outside.mkdir()
+    (source / "redirect" / "nested").mkdir(parents=True)
+    (source / "redirect" / "nested" / "secret.txt").write_text("secret", encoding="utf-8")
+    try:
+        (destination / "redirect").symlink_to(outside, target_is_directory=True)
+    except OSError:
+        pytest.skip("this host does not permit test symlink creation")
+
+    with pytest.raises(RuntimeError, match="unsupported symlink"):
+        import_legacy_tree(source, destination)
+    assert not (outside / "nested" / "secret.txt").exists()
+    assert not (destination / ".legacy-import-complete").exists()
+
+
 @pytest.mark.parametrize("host", ["https://server", "server:8040", "server/path", ""])
 def test_generator_rejects_hosts_that_could_corrupt_the_public_origin(host):
     with pytest.raises(ArgumentTypeError):

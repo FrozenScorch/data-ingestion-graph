@@ -12,12 +12,18 @@ _STAGING_NAME = ".legacy-import-staging"
 
 def import_legacy_tree(source: Path, destination: Path) -> bool:
     """Import once without overwriting volume data; return True when work was done."""
+    if destination.is_symlink():
+        raise RuntimeError(f"storage destination must not be a symlink: {destination}")
     destination.mkdir(parents=True, exist_ok=True)
     marker = destination / _MARKER_NAME
+    if marker.is_symlink():
+        raise RuntimeError(f"storage import marker must not be a symlink: {marker}")
     if marker.exists():
         return False
 
     staging = destination / _STAGING_NAME
+    if staging.is_symlink():
+        raise RuntimeError(f"storage import staging path must not be a symlink: {staging}")
     shutil.rmtree(staging, ignore_errors=True)
     staging.mkdir()
     try:
@@ -35,6 +41,8 @@ def import_legacy_tree(source: Path, destination: Path) -> bool:
             target = destination / relative
             if staged.is_symlink():
                 raise RuntimeError(f"legacy storage contains unsupported symlink: {relative}")
+            if target.is_symlink():
+                raise RuntimeError(f"volume contains unsupported symlink: {relative}")
             if staged.is_dir():
                 if target.exists() and not target.is_dir():
                     raise RuntimeError(f"legacy directory conflicts with volume file: {relative}")
@@ -46,6 +54,10 @@ def import_legacy_tree(source: Path, destination: Path) -> bool:
                 os.replace(staged, target)
         shutil.rmtree(staging)
         marker_temp = destination / f"{_MARKER_NAME}.tmp"
+        if marker_temp.is_symlink():
+            raise RuntimeError(
+                f"storage marker temporary path must not be a symlink: {marker_temp}"
+            )
         marker_temp.write_text("legacy bind import completed\n", encoding="utf-8")
         os.replace(marker_temp, marker)
     except BaseException:
@@ -57,11 +69,16 @@ def import_legacy_tree(source: Path, destination: Path) -> bool:
 def chown_tree(path: Path, user: str = "appuser") -> None:
     import pwd
 
+    if path.is_symlink():
+        raise RuntimeError(f"storage ownership root must not be a symlink: {path}")
     account = pwd.getpwnam(user)
     for root, directories, files in os.walk(path):
-        os.chown(root, account.pw_uid, account.pw_gid)
+        os.chown(root, account.pw_uid, account.pw_gid, follow_symlinks=False)
         for name in (*directories, *files):
-            os.chown(Path(root) / name, account.pw_uid, account.pw_gid)
+            target = Path(root) / name
+            if target.is_symlink():
+                raise RuntimeError(f"volume contains unsupported symlink: {target}")
+            os.chown(target, account.pw_uid, account.pw_gid, follow_symlinks=False)
 
 
 def main() -> None:
