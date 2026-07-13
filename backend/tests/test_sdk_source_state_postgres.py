@@ -55,6 +55,7 @@ async def _create_schema(admin_engine, schema: str) -> None:
                     triggered_by UUID NULL REFERENCES "{schema}".users(id),
                     status VARCHAR(50) NOT NULL,
                     error_message TEXT NULL,
+                    trigger_payload JSONB NULL,
                     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
                     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
                 )
