@@ -109,6 +109,14 @@ discovery, pagination, mid-page failure, page resume, rate limits, duplicates,
 schema changes, permission failures, and secret leakage. Connectors must declare
 unsupported capabilities such as delete capture rather than implying them.
 
+The SDK's dependency-free conformance kit checks the portable portion of that
+contract: manifests, emitted identity/stream/capability invariants, final
+checkpoint ordering, destination write counts, flushes, exact replay, and
+caller-selected secret representations. Connector packages still inject fake
+clients and clocks for pagination/rate-limit/failure scenarios and keep live
+service tests opt-in; the kit deliberately does not guess cursor ordering or a
+physical tombstone strategy.
+
 ## Migration sequence
 
 1. Wrap remaining database nodes behind SDK sources/transforms.
