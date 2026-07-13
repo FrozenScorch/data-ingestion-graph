@@ -19,7 +19,17 @@ def discover_plugins(kind: str) -> dict[str, EntryPoint]:
         group = PLUGIN_GROUPS[kind]
     except KeyError as exc:
         raise PluginError(f"Unknown plugin kind: {kind!r}") from exc
-    return {point.name: point for point in entry_points(group=group)}
+    discovered: dict[str, EntryPoint] = {}
+    duplicates: set[str] = set()
+    for point in entry_points(group=group):
+        if point.name in discovered:
+            duplicates.add(point.name)
+        else:
+            discovered[point.name] = point
+    if duplicates:
+        names = ", ".join(repr(name) for name in sorted(duplicates))
+        raise PluginError(f"Duplicate {kind} plugin entry points are installed: {names}")
+    return discovered
 
 
 def load_plugin(kind: str, name: str) -> Any:

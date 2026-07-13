@@ -77,6 +77,20 @@ class Source(ABC):
 class Destination(ABC):
     idempotent: bool = False
 
+    @classmethod
+    def manifest(cls) -> ConnectorSpec:
+        """Return constructor-free connector metadata when available.
+
+        Destinations written before the manifest contract remain instantiable.
+        Registries should treat ``NotImplementedError`` as the explicit legacy
+        boundary rather than trying to guess constructor arguments.
+        """
+        raise NotImplementedError(f"{cls.__name__} does not expose a connector manifest")
+
+    def spec(self) -> ConnectorSpec:
+        """Return metadata for this configured destination instance."""
+        return type(self).manifest()
+
     @abstractmethod
     async def check(self) -> CheckResult: ...
 

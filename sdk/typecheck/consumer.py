@@ -14,6 +14,7 @@ from ingestion_graph import (
 )
 
 manifest: ConnectorSpec = load_connector_manifest("sources", "discord")
+destination_manifest: ConnectorSpec = load_connector_manifest("destinations", "sqlite")
 
 record: Envelope = Envelope(
     id=stable_record_id("example", "items", "1"),
