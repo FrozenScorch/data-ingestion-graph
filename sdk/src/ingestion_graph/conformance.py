@@ -190,7 +190,15 @@ def _inspect_source_messages_with_spec(
         if isinstance(message_value, RecordMessage):
             saw_record = True
             last_record_index = index
-            envelope = message_value.envelope
+            envelope_value: Any = message_value.envelope
+            if not isinstance(envelope_value, Envelope):
+                report.add(
+                    "source.envelope_type",
+                    f"record envelope must be Envelope, received {type(envelope_value).__name__}",
+                    path=f"{path}.envelope",
+                )
+                continue
+            envelope = envelope_value
             if envelope.source != spec.name:
                 report.add(
                     "source.envelope_source",
@@ -239,7 +247,42 @@ def _inspect_source_messages_with_spec(
                     "SchemaMessage emitted while schema_discovery capability is false",
                     path=path,
                 )
-        elif not isinstance(message_value, LogMessage):
+            schema_value: Any = message_value.schema
+            if not isinstance(schema_value, Mapping):
+                report.add(
+                    "source.schema_shape",
+                    "schema message payload must be an object",
+                    path=f"{path}.schema",
+                )
+            if not isinstance(message_value.version, str) or not message_value.version.strip():
+                report.add(
+                    "source.schema_version",
+                    "schema message version must be a non-empty string",
+                    path=f"{path}.version",
+                )
+        elif isinstance(message_value, LogMessage):
+            level_value: Any = message_value.level
+            log_message_value: Any = message_value.message
+            attributes_value: Any = message_value.attributes
+            if not isinstance(level_value, str) or not level_value.strip():
+                report.add(
+                    "source.log_level",
+                    "log level must be a non-empty string",
+                    path=f"{path}.level",
+                )
+            if not isinstance(log_message_value, str):
+                report.add(
+                    "source.log_message",
+                    "log message must be a string",
+                    path=f"{path}.message",
+                )
+            if not isinstance(attributes_value, Mapping):
+                report.add(
+                    "source.log_attributes",
+                    "log attributes must be an object",
+                    path=f"{path}.attributes",
+                )
+        else:
             report.add(
                 "source.message_type",
                 f"unsupported message type {type(message_value).__name__}",
@@ -350,6 +393,13 @@ async def inspect_destination_replay(
             "destination.idempotent",
             "Pipeline-compatible destinations must declare idempotent=True",
         )
+    if not records:
+        report.add(
+            "destination.empty_fixture",
+            "at least one record is required to exercise destination writes",
+            path="records",
+        )
+        return report
     if any(record.operation is Operation.DELETE for record in records) and not (
         capabilities.deletes
     ):

@@ -23,7 +23,13 @@ from ingestion_graph.connectors.base import (
     StreamDescriptor,
 )
 from ingestion_graph.destinations import JsonlDestination
-from ingestion_graph.messages import RecordMessage, SchemaMessage, SourceMessage, StateMessage
+from ingestion_graph.messages import (
+    LogMessage,
+    RecordMessage,
+    SchemaMessage,
+    SourceMessage,
+    StateMessage,
+)
 from ingestion_graph.models import Envelope, Operation, RecordPayload, Tombstone
 from ingestion_graph.sources import JsonlSource
 
@@ -245,6 +251,29 @@ def test_malformed_source_spec_is_reported_instead_of_raised() -> None:
     assert type_report.issues[0].code == "source.spec_type"
 
 
+def test_malformed_source_message_payloads_are_reported_instead_of_raised() -> None:
+    source = FakeSource(
+        spec(schema_discovery=True),
+        [
+            RecordMessage(cast(Any, object())),
+            SchemaMessage("items", cast(Any, object()), ""),
+            LogMessage("", cast(Any, object()), cast(Any, object())),
+        ],
+    )
+
+    report = inspect_source_messages(source, StreamDescriptor("items"), source.messages)
+
+    assert {
+        "source.envelope_type",
+        "source.log_attributes",
+        "source.log_level",
+        "source.log_message",
+        "source.schema_shape",
+        "source.schema_version",
+        "source.uncheckpointed_records",
+    } <= {issue.code for issue in report.issues}
+
+
 @pytest.mark.asyncio
 async def test_source_read_is_bounded_and_reports_failed_checks() -> None:
     failed = FakeSource(spec(), [], check=CheckResult(False, "bad credentials"))
@@ -313,6 +342,11 @@ async def test_destination_that_drops_every_record_cannot_pass() -> None:
     malformed = FakeDestination(cast(Any, {"name": "not-a-spec"}))
     malformed_report = await inspect_destination_replay(malformed, [record()])
     assert malformed_report.issues[0].code == "destination.spec_type"
+
+    empty = FakeDestination(spec(), counts=(0, 0))
+    empty_report = await inspect_destination_replay(empty, [])
+    assert empty_report.issues[-1].code == "destination.empty_fixture"
+    assert empty.flushes == 0
 
 
 @pytest.mark.asyncio
