@@ -56,6 +56,7 @@ async def test_postgres_claim_is_exclusive_and_expired_lease_is_reclaimed():
                         triggered_by UUID,
                         status VARCHAR(50) NOT NULL DEFAULT 'pending',
                         error_message TEXT,
+                        trigger_payload JSONB NULL,
                         created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
                         updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
                     )

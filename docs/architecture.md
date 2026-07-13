@@ -38,6 +38,23 @@ Predefined pipelines are immutable Studio catalog entries. They reference live
 node contracts and are validated at startup for missing nodes, ports, required
 inputs, and incompatible data types. They never duplicate connector code.
 
+## Trigger control plane
+
+`GraphTrigger` is owner-scoped through its graph and always pins a non-null,
+immutable `GraphVersion`. Schedule rows carry either a bounded interval or a
+timezone-aware five-field cron expression. Webhook rows carry only an encrypted
+HMAC secret and a per-minute acceptance limit. Trigger names are unique inside a
+graph. Graph deletion cascades trigger/delivery state, while referenced graph
+versions remain protected from deletion.
+
+The scheduler and webhook ingress both reuse the durable execution boundary:
+they create a pending Run and its queued RunJob atomically. Schedule pollers use
+PostgreSQL row locks with `SKIP LOCKED`; webhook receivers serialize delivery-ID
+and rolling rate-window checks on the trigger row and retain a unique delivery
+ledger. Webhook JSON lives in the private `Run.trigger_payload` column, which is
+not part of `RunResponse`. The executor injects it only into a root
+`webhook_source`; downstream transport continues through explicit DAG edges.
+
 ## Checkpoint transaction
 
 For every source page, the runtime performs:

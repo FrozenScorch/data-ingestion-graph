@@ -5,6 +5,9 @@ Studio dispatches every manual run, replay, and failed-node retry through the
 one transaction. Workers claim jobs with PostgreSQL row locks, renew expiring
 leases, and fence heartbeats/completion by worker identity. A process crash
 therefore leaves recoverable work instead of losing a FastAPI background task.
+Cron/interval schedules and accepted signed webhooks use the same atomic Run plus
+RunJob boundary, pinned to the immutable graph version selected when the trigger
+was saved.
 
 At startup, the worker also queues legacy pending or running runs that have an
 immutable graph version but no job record. Completed and cancelled runs are
@@ -48,6 +51,54 @@ lease for connectors that can block the Python event loop for long periods.
 Multiple Studio processes may safely claim from the same PostgreSQL database;
 each process starts its configured number of worker slots.
 
+## Schedule and webhook dispatch
+
+Each API process may run a trigger scheduler. Due enabled schedule rows are
+claimed in bounded batches with `FOR UPDATE SKIP LOCKED`, so multiple processes
+can poll the same database without dispatching the same occurrence. Interval
+and five-field cron schedules calculate the first instant strictly after the
+poll time; downtime therefore skips missed backlog instead of producing a run
+storm. Each dispatch creates a pending Run and queued RunJob, records the last
+run, and advances `next_run_at` in one transaction. A savepoint isolates an
+invalid trigger from the rest of its claimed batch. Scheduler state and its last
+poll/error are exposed by `/health`.
+
+Webhook triggers return a 256-bit URL-safe secret only on creation or rotation.
+The database stores that value through the same Fernet-backed encrypted JSONB
+primitive used for saved connection credentials. Senders POST a JSON object to
+`/api/webhooks/{trigger_id}` with:
+
+```text
+X-Ingestion-Timestamp: <Unix seconds>
+X-Ingestion-Delivery: <stable delivery ID>
+X-Ingestion-Signature: sha256=<hex HMAC-SHA256>
+```
+
+The signature input is the exact bytes
+`timestamp + "." + delivery_id + "." + raw_body`. The delivery ID is signed so
+captured requests cannot be replayed under a fresh ID. Studio
+checks clock skew and the configured body limit before accepting the delivery,
+then locks the trigger for the short replay/rate-limit transaction. A unique
+trigger/delivery constraint and the trigger row lock guarantee that concurrent
+copies create one delivery ledger row, one Run, and one RunJob. The JSON object
+is stored on the Run but excluded from normal Run responses; execution supplies
+it only as `webhook_payload` to a root `webhook_source` node, including failed-node
+retry. Other nodes receive it only through ordinary graph edges.
+
+```dotenv
+TRIGGER_SCHEDULER_ENABLED=true
+TRIGGER_SCHEDULER_POLL_SECONDS=5
+TRIGGER_SCHEDULER_BATCH_SIZE=50
+WEBHOOK_MAX_BYTES=1048576
+WEBHOOK_TIMESTAMP_SKEW_SECONDS=300
+WEBHOOK_DELIVERY_RETENTION_HOURS=168
+WEBHOOK_PRUNE_INTERVAL_SECONDS=3600
+```
+
+The scheduler prunes webhook delivery ledger rows after the retention window.
+Once a row is pruned, that old delivery ID is no longer a replay guard; senders
+must keep retry attempts inside the configured window.
+
 Run failure recording locks and validates the worker's current job lease before
 using a forced-refresh run-row lock. A late node failure
 can change only `running` to `failed`, so it cannot overwrite a concurrently
@@ -72,7 +123,9 @@ flush before returning success.
 The backend suite includes a real PostgreSQL contention test that proves only
 one worker claims a queued row, an expired lease can be reclaimed, and a stale
 worker cannot heartbeat or finish the job. CI provides PostgreSQL through a
-service container and sets `TEST_DATABASE_URL` for that test.
+service container and sets `TEST_DATABASE_URL` for that test. Trigger contention
+tests additionally prove that two schedulers dispatch one due occurrence and
+two concurrent copies of a webhook delivery create only one Run/RunJob pair.
 
 Compose gates API startup on the one-shot `ingestion-migrate` service. Legacy
 unversioned legacy databases run idempotent ordered migrations; versioned databases apply ordered

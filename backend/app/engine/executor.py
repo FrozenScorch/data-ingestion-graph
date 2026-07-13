@@ -14,7 +14,7 @@ from app.engine.checkpoint import save_checkpoint
 from app.engine.runner import run_node_with_retry
 from app.engine.scheduler import topological_sort, validate_dag
 from app.engine.state import can_transition
-from app.models.execution import CheckpointType, Run, RunStatus
+from app.models.execution import CheckpointType, Run, RunStatus, TriggerType
 from app.models.graph import Connection, Graph
 from app.services.connection_crypto import decrypt_connection_config
 from app.services.execution_service import fail_run_if_running
@@ -129,6 +129,11 @@ class DAGExecutor:
             "connections": connections,
             "owner_id": str(owner_id),
             "graph_id": str(run.graph_id),
+            "trigger_payload": (
+                run.trigger_payload
+                if run.trigger_type == TriggerType.WEBHOOK.value
+                else None
+            ),
         }
 
         # Execute each level
@@ -318,6 +323,13 @@ class DAGExecutor:
                     input_data, lineage_edges = self._collect_inputs(
                         node_id, edges_data, exec_state
                     )
+                    input_data = self._inject_webhook_payload(
+                        node_id,
+                        node_type,
+                        edges_data,
+                        input_data,
+                        exec_state,
+                    )
 
                     await self._emit_event(
                         run.id,
@@ -463,6 +475,13 @@ class DAGExecutor:
 
             # Collect input data from predecessor outputs
             input_data, lineage_edges = self._collect_inputs(node_id, edges_data, exec_state)
+            input_data = self._inject_webhook_payload(
+                node_id,
+                node_type,
+                edges_data,
+                input_data,
+                exec_state,
+            )
 
             await self._emit_event(
                 run.id,
@@ -605,6 +624,25 @@ class DAGExecutor:
                     }
                 )
         return inputs, lineage_edges
+
+    @staticmethod
+    def _inject_webhook_payload(
+        node_id: str,
+        node_type: str,
+        edges: list[dict],
+        inputs: dict[str, Any],
+        exec_state: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Expose webhook data only to a root webhook_source node."""
+        payload = exec_state.get("trigger_payload")
+        if node_type != "webhook_source" or payload is None:
+            return inputs
+        if any(
+            str(edge.get("target", edge.get("target_id", ""))) == str(node_id)
+            for edge in edges
+        ):
+            return inputs
+        return {**inputs, "webhook_payload": payload}
 
     async def _record_lineage(
         self,

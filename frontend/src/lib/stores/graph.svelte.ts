@@ -156,11 +156,14 @@ class GraphState {
         ...node,
         data: { ...node.data, config: {} }
       }));
-      await graphService.saveVersion(graphId, {
+      const savedVersion = await graphService.saveVersion(graphId, {
         nodes_data: { nodes: nodesWithoutConfigs },
         edges_data: { edges: this.edges },
         node_configs: nodeConfigs
       });
+      if (this.currentGraph?.id === graphId) {
+        this.currentGraph = { ...this.currentGraph, latest_version: savedVersion };
+      }
       return true;
     } catch (e: unknown) {
       this.error = e instanceof Error ? e.message : 'Failed to save graph';

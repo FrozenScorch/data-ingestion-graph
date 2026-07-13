@@ -80,6 +80,15 @@ class Settings(BaseSettings):
     run_worker_lease_seconds: int = Field(default=60, ge=15, le=3600)
     run_worker_heartbeat_seconds: int = Field(default=15, ge=5, le=300)
 
+    # Schedule dispatch and signed webhook ingestion
+    trigger_scheduler_enabled: bool = True
+    trigger_scheduler_poll_seconds: float = Field(default=5.0, ge=0.1, le=300)
+    trigger_scheduler_batch_size: int = Field(default=50, ge=1, le=1000)
+    webhook_max_bytes: int = Field(default=1_048_576, ge=1024, le=104_857_600)
+    webhook_timestamp_skew_seconds: int = Field(default=300, ge=1, le=3600)
+    webhook_delivery_retention_hours: int = Field(default=168, ge=1, le=8760)
+    webhook_prune_interval_seconds: int = Field(default=3600, ge=60, le=86400)
+
     @model_validator(mode="after")
     def validate_worker_lease(self) -> "Settings":
         if self.run_worker_heartbeat_seconds * 2 >= self.run_worker_lease_seconds:

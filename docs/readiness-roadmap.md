@@ -1,6 +1,6 @@
 # Studio and SDK readiness roadmap
 
-Baseline: `main` after PRs #34-#37 plus this LAN appliance change, audited 2026-07-12.
+Baseline: `main` after PR #40 plus this trigger milestone, audited 2026-07-13.
 
 ## Executive assessment
 
@@ -11,10 +11,10 @@ multi-user service or a continuous anything-to-anything synchronization platform
 | Outcome | Readiness | Current reality |
 | --- | ---: | --- |
 | Reusable Python SDK | 82% | Installable, typed, resumable core with constructor-free manifests, three real source families, and two local destinations |
-| Local single-user visual ingestion | 72% | Visual manual graphs, durable workers, transforms, PostgreSQL, server files, Discord preview, query inspection, and one-command deployment |
-| Trusted-LAN Studio | 52% | Private networking, generated secrets, TLS, exact origins, migrations, and durable execution exist; service auth, rate limits, backups, and recurring triggers remain |
+| Local single-user visual ingestion | 78% | Visual manual and recurring graphs, durable workers, transforms, PostgreSQL, server files, Discord preview, query inspection, and one-command deployment |
+| Trusted-LAN Studio | 60% | Private networking, generated secrets, TLS, exact origins, migrations, durable execution, schedules, and signed webhooks exist; service auth, edge rate limits, and backups remain |
 | Enterprise multi-user Studio | 15% | Tenant isolation, service auth, SSO, HA, backups, and observability are release gates |
-| Anywhere-to-anywhere continuous sync | 25% | The SDK protocol and durable execution are credible, but connector breadth and sync modes remain narrow |
+| Anywhere-to-anywhere continuous sync | 32% | The SDK protocol, downstream acknowledgement, durable execution, and recurring triggers are credible, but connector breadth and sync modes remain narrow |
 
 These percentages measure delivered capability, not code volume.
 
@@ -36,6 +36,7 @@ These percentages measure delivered capability, not code volume.
 
 - Svelte visual DAG editor backed by a dynamic node registry and typed ports.
 - Graph versions, manual execution, retries/replay, node checkpoints, DLQ, lineage, and run inspection.
+- Version-pinned interval/cron schedules and replay-protected signed webhook triggers.
 - Encrypted owner-scoped PostgreSQL and Discord Connection Center.
 - Discord, PostgreSQL, and documents starter graphs.
 - PDF, DOCX, CSV, text/Markdown/JSON/XML/HTML parsing; chunking and AI transforms.
@@ -54,7 +55,7 @@ and HTTP actions, but several displayed capabilities are incomplete:
 - Local Excel/XLSX and RFC email-file ingestion are now supported by the SDK;
   OCR, mailbox APIs, Slack/Teams, Drive/SharePoint/S3,
   SQL Server/MySQL/Oracle/MongoDB, queues, generic paginated REST, or database CDC.
-- GitHub Source is a stub; Webhook Source has no receiver route.
+- GitHub Source is a stub.
 - The generic HTTP node does not yet stream upstream records as a destination.
 - Constructor-free SDK manifests and strict Studio schema projections are implemented
   for built-ins, with Discord as the first manifest-backed node. Generic executable
@@ -83,17 +84,20 @@ and HTTP actions, but several displayed capabilities are incomplete:
   inactive failures, while queued/leased retries and paused runs retain candidates.
   This boundary depends on destinations returning success only after their own
   durable write/flush; the starter query collection remains a per-run delta view.
-- `schedule` and `webhook` are labels, not implemented trigger services.
+- Owner-scoped interval/cron schedules and signed webhook triggers now pin saved
+  graph versions and dispatch through the durable Run/RunJob transaction. The
+  webhook ledger provides bounded replay and per-trigger rate protection.
 - Durable PostgreSQL jobs, leases, heartbeat, and expired-job recovery are implemented.
   The worker still runs inside the API deployment and lacks an independently scaled
   worker profile and per-stream concurrency policy.
-- Missing modes: scheduled polling, snapshot-to-incremental handoff, CDC, streaming,
+- Missing modes: snapshot-to-incremental handoff, CDC, streaming,
   bidirectional conflict resolution, partitioned backfill, and reconciliation.
 
 ### UX and LAN readiness
 
-- Folder selection/watch, connector discovery/preview, schema mapping,
-  run freshness, and schedule management need first-class UX.
+- Folder selection/watch, connector discovery/preview, schema mapping, and
+  richer run freshness/reconciliation views still need first-class UX. Basic
+  schedule/webhook management is available from the graph toolbar.
 - Complete owner checks are required across every execution, WebSocket, DLQ, and lineage path.
 - The single-host LAN appliance now generates non-default secrets, uses private service
   networks, offers HTTP or private-CA TLS, enforces exact HTTP/WebSocket origins, adds
@@ -126,7 +130,7 @@ Exit: a trusted user can safely upload documents and run graphs from another LAN
    bridge to other sources and audit every destination's durable-success contract.
 2. Done in-process: durable queued workers, run leases, heartbeat, and recovery.
    Add per-stream concurrency policies and a separately deployed worker profile.
-3. Implement cron/interval schedules and authenticated webhook triggers with UI.
+3. Done: cron/interval schedules and HMAC-authenticated webhook triggers with UI.
 4. Add freshness, cursor, lag, and reconciliation status to each stream.
 
 Exit: PostgreSQL/files/Discord can run repeatedly without rereading everything or losing work on restart.
@@ -159,9 +163,9 @@ Exit: multiple teams can operate audited, recoverable syncs on a LAN or private 
 
 ## Highest-leverage next features
 
-1. Generate a safe Studio adapter for `LocalDocumentsSource`, using owner-scoped
-   uploads and LAN folder roots without exposing arbitrary server paths.
+1. Generate Studio nodes and Connection Center forms from every SDK connector
+   manifest, keeping execution in the reusable SDK.
 2. Add database and object-storage source/destination packs plus connector
    conformance tests shared by SDK and Studio.
-3. Merge the reviewed durable-run worker, then persist SDK source state per
-   graph/node only after downstream writes are durable.
+3. Add service accounts/scoped API keys, outbound HTTP policy, and freshness,
+   cursor, lag, and reconciliation views.

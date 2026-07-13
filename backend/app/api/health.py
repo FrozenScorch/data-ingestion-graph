@@ -57,6 +57,15 @@ async def health_check(response: Response):
             health_status["status"] = "degraded"
             has_error = True
 
+    from app.services.trigger_scheduler import get_trigger_scheduler_health
+
+    scheduler_health = get_trigger_scheduler_health()
+    health_status["components"]["trigger_scheduler"] = scheduler_health
+    if scheduler_health["status"] in {"error", "degraded"}:
+        if health_status["status"] == "healthy":
+            health_status["status"] = "degraded"
+        has_error = True
+
     if has_error and health_status["status"] == "unhealthy":
         response.status_code = 503
     elif has_error and health_status["status"] == "degraded":

@@ -22,6 +22,7 @@ from app.models.execution import (
 from app.models.graph import Connection, ConnectionType, Graph, GraphStatus, GraphVersion
 from app.models.lineage import DataLineage, Provenance
 from app.models.sdk_source_state import SDKSourceState, SDKSourceStateCandidate
+from app.models.trigger import GraphTrigger, GraphTriggerType, ScheduleKind, WebhookDelivery
 from app.models.user import ApiKey, User, UserRole
 
 __all__ = [
@@ -39,6 +40,10 @@ __all__ = [
     "Connection",
     "GraphStatus",
     "ConnectionType",
+    "GraphTrigger",
+    "GraphTriggerType",
+    "ScheduleKind",
+    "WebhookDelivery",
     # Execution
     "Run",
     "RunJob",
