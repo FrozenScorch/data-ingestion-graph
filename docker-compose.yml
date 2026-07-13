@@ -94,8 +94,14 @@ services:
       - sh
       - -ec
       - |
-        cp -a -n /legacy/uploads/. /app/data/uploads/ 2>/dev/null || true
-        cp -a -n /legacy/temp/. /app/data/temp/ 2>/dev/null || true
+        if [ ! -e /app/data/uploads/.legacy-import-complete ]; then
+          cp -a -n /legacy/uploads/. /app/data/uploads/
+          touch /app/data/uploads/.legacy-import-complete
+        fi
+        if [ ! -e /app/data/temp/.legacy-import-complete ]; then
+          cp -a -n /legacy/temp/. /app/data/temp/
+          touch /app/data/temp/.legacy-import-complete
+        fi
         chown -R appuser:appuser /app/data/uploads /app/data/temp
     volumes:
       - ./data/uploads:/legacy/uploads:ro
@@ -137,9 +143,29 @@ services:
         condition: service_completed_successfully
       ingestion-storage-init:
         condition: service_completed_successfully
+      ingestion-connection-credentials:
+        condition: service_completed_successfully
       ingestion-redis:
         condition: service_healthy
     networks: [data, edge]
+
+  ingestion-connection-credentials:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    restart: "no"
+    command: ["python", "-m", "app.db.connection_credentials"]
+    environment:
+      POSTGRES_HOST: ingestion-postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: ingestion
+      POSTGRES_DB: ingestion_db
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?run scripts/init_lan_env.py first}
+      CONNECTION_ENCRYPTION_KEY: ${CONNECTION_ENCRYPTION_KEY:?run scripts/init_lan_env.py first}
+    depends_on:
+      ingestion-migrate:
+        condition: service_completed_successfully
+    networks: [data]
 
   ingestion-frontend:
     build:

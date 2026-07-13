@@ -54,13 +54,17 @@ Failure stops API startup instead of serving traffic against a partial schema.
 Before schema migration, `ingestion-postgres-credentials` verifies the generated
 database password and, only for an exact older Compose installation, transitions the
 legacy `ingestion_password` role to that generated secret on the private data network.
+After migration, `ingestion-connection-credentials` re-encrypts saved connection rows
+that used a recognized public legacy encryption key. Unknown keys fail closed instead
+of starting Studio with unreadable credentials.
 
 The Compose file intentionally has no fixed project name, so an existing clone keeps
 its directory-derived PostgreSQL and Redis volume identity across this upgrade.
 On first start, `ingestion-storage-init` copies earlier `./data/uploads` and
 `./data/temp` bind data into writable named volumes without overwriting existing volume
-files. PostgreSQL, Redis, managed uploads, temporary files, and Caddy authority state
-then persist in project-scoped named volumes.
+files. A durable marker prevents later restarts from resurrecting deleted legacy files,
+and any import error blocks API startup. PostgreSQL, Redis, managed uploads, temporary
+files, and Caddy authority state then persist in project-scoped named volumes.
 Run `docker compose down` before changing the checkout directory or Compose project
 name. Normal `docker compose down` preserves data. Do not use `down -v` unless permanent
 volume deletion is intended. Keep the legacy `./data/uploads` directory until its

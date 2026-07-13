@@ -12,8 +12,8 @@ from uuid import uuid4
 
 import asyncpg
 import pytest
+from app.db import connection_credentials, postgres_credentials
 from app.db import migrate as migration
-from app.db import postgres_credentials
 from app.models.base import Base
 from sqlalchemy import inspect as sqlalchemy_inspect
 from sqlalchemy import text
@@ -127,6 +127,31 @@ async def test_postgres_credential_transition_uses_exact_legacy_password(monkeyp
         "ALTER ROLE ingestion PASSWORD 'new-generated-password'"
     )
     legacy_connection.close.assert_awaited_once()
+
+
+def test_saved_connection_config_is_reencrypted_from_public_legacy_key():
+    legacy_key = "change-this-connection-encryption-key"
+    current_key = "generated-current-key-with-at-least-32-characters"
+    plaintext = b'{"token":"saved-secret"}'
+    legacy_config = {
+        "$encrypted": connection_credentials._fernet(legacy_key).encrypt(plaintext).decode("ascii")
+    }
+
+    updated, changed = connection_credentials.reencrypt_config(legacy_config, current_key)
+
+    assert changed is True
+    assert (
+        connection_credentials._fernet(current_key).decrypt(updated["$encrypted"].encode("ascii"))
+        == plaintext
+    )
+
+    unknown = {
+        "$encrypted": connection_credentials._fernet("unknown-private-key")
+        .encrypt(plaintext)
+        .decode("ascii")
+    }
+    with pytest.raises(RuntimeError, match="unknown encryption key"):
+        connection_credentials.reencrypt_config(unknown, current_key)
 
 
 @pytest.mark.parametrize("host", ["https://server", "server:8040", "server/path", ""])
@@ -335,6 +360,9 @@ def test_repository_compose_contract_has_private_data_plane_and_edge_proxy():
     assert "./data/uploads:/legacy/uploads:ro" in compose
     assert "ingestion_uploads:/app/data/uploads" in compose
     assert "app.db.postgres_credentials" in compose
+    assert "app.db.connection_credentials" in compose
+    assert ".legacy-import-complete" in compose
+    assert "2>/dev/null || true" not in compose
     assert "header Origin {$STUDIO_ORIGIN}" in routes
     assert "reverse_proxy ingestion-api:8040" in routes
     assert "reverse_proxy ingestion-frontend:3000" in routes
@@ -348,6 +376,9 @@ def test_rendered_compose_verifier_accepts_logical_network_keys():
     services = {
         "ingestion-postgres": {},
         "ingestion-postgres-credentials": {},
+        "ingestion-connection-credentials": {
+            "depends_on": {"ingestion-migrate": {"condition": "service_completed_successfully"}}
+        },
         "ingestion-redis": {},
         "ingestion-storage-init": {},
         "ingestion-migrate": {
@@ -365,6 +396,7 @@ def test_rendered_compose_verifier_accepts_logical_network_keys():
             "depends_on": {
                 "ingestion-migrate": {"condition": "service_completed_successfully"},
                 "ingestion-storage-init": {"condition": "service_completed_successfully"},
+                "ingestion-connection-credentials": {"condition": "service_completed_successfully"},
             },
         },
         "ingestion-frontend": {"environment": {"API_HOST": "http://ingestion-api:8040"}},
