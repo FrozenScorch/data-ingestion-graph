@@ -146,6 +146,11 @@ destination_report = await inspect_destination_replay(destination, records)
 destination_report.raise_for_errors()
 ```
 
+The destination must be disposable and initially empty; an UPSERT case expects
+all supplied records to be newly written before the zero-write replay. For a
+DELETE case, first populate the rows to remove and pass a positive
+`expected_first_write` count so a no-op delete cannot be certified.
+
 `inspect_manifest` checks an already loaded `ConnectorSpec`, while
 `inspect_installed_manifest` also exercises entry-point loading.
 `inspect_secret_redaction` checks caller-supplied secret values against the

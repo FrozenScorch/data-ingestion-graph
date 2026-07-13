@@ -20,9 +20,16 @@ from ingestion_graph.connectors.base import (
     Source,
     StreamDescriptor,
 )
-from ingestion_graph.messages import RecordMessage, SchemaMessage, SourceMessage, StateMessage
+from ingestion_graph.errors import PluginError
+from ingestion_graph.messages import (
+    LogMessage,
+    RecordMessage,
+    SchemaMessage,
+    SourceMessage,
+    StateMessage,
+)
 from ingestion_graph.models import Envelope, Operation
-from ingestion_graph.plugins import load_connector_manifest
+from ingestion_graph.plugins import load_connector_manifest, validate_connector_manifest
 
 
 class ConformanceSeverity(StrEnum):
@@ -82,6 +89,14 @@ def inspect_manifest(
 ) -> ConformanceReport:
     """Inspect an already-loaded connector manifest without plugin discovery."""
     report = ConformanceReport(expected_name or _safe_name(spec))
+    try:
+        validate_connector_manifest(
+            spec,
+            kind="connector",
+            entry_point_name=expected_name or _safe_name(spec),
+        )
+    except PluginError as exc:
+        report.add("manifest.invalid", str(exc), path="manifest")
     if not isinstance(spec.name, str) or not spec.name.strip():
         report.add("manifest.name", "name must be a non-empty string", path="name")
     elif expected_name is not None and spec.name != expected_name:
@@ -136,13 +151,26 @@ def inspect_source_messages(
     """Inspect a finite captured source read.
 
     Connector tests remain responsible for creating the configured source and
-    capturing a deterministic read. Stateful connectors declare that contract
-    through ``incremental`` or ``resumable_full_refresh`` and must finish a
-    record-bearing capture with a state message.
+    capturing a deterministic read. Every record-bearing capture must finish
+    with a state message, matching :class:`~ingestion_graph.pipeline.Pipeline`.
     """
-    spec = source.spec()
-    report = inspect_manifest(spec)
-    report.connector = spec.name
+    spec, report = _inspect_source_spec(source)
+    if spec is None:
+        return report
+    return _inspect_source_messages_with_spec(source, spec, stream, messages, report)
+
+
+def _inspect_source_messages_with_spec(
+    source: Source,
+    spec: ConnectorSpec,
+    stream: StreamDescriptor,
+    messages: Sequence[SourceMessage],
+    report: ConformanceReport,
+) -> ConformanceReport:
+    del source
+    capabilities: Any = spec.capabilities
+    if not isinstance(capabilities, ConnectorCapabilities):
+        return report
     if not stream.name:
         report.add("source.stream_name", "descriptor name must not be empty", path="stream.name")
     json_schema: Any = stream.json_schema
@@ -158,10 +186,11 @@ def inspect_source_messages(
     last_state_index = -1
     for index, message in enumerate(messages):
         path = f"messages[{index}]"
-        if isinstance(message, RecordMessage):
+        message_value: Any = message
+        if isinstance(message_value, RecordMessage):
             saw_record = True
             last_record_index = index
-            envelope = message.envelope
+            envelope = message_value.envelope
             if envelope.source != spec.name:
                 report.add(
                     "source.envelope_source",
@@ -180,42 +209,47 @@ def inspect_source_messages(
                     "record IDs must not be empty",
                     path=f"{path}.envelope.id",
                 )
-            if envelope.operation is Operation.DELETE and not spec.capabilities.deletes:
+            if envelope.operation is Operation.DELETE and not capabilities.deletes:
                 report.add(
                     "source.undeclared_deletes",
                     "DELETE emitted while deletes capability is false",
                     path=f"{path}.envelope.operation",
                 )
-        elif isinstance(message, StateMessage):
+        elif isinstance(message_value, StateMessage):
             last_state_index = index
-            if message.stream != stream.name:
+            if message_value.stream != stream.name:
                 report.add(
                     "source.state_stream",
-                    f"expected stream {stream.name!r}, received {message.stream!r}",
+                    f"expected stream {stream.name!r}, received {message_value.stream!r}",
                     path=f"{path}.stream",
                 )
-            state_value: Any = message.state
+            state_value: Any = message_value.state
             if not isinstance(state_value, Mapping):
                 report.add("source.state_shape", "state must be an object", path=f"{path}.state")
-        elif isinstance(message, SchemaMessage):
-            if message.stream != stream.name:
+        elif isinstance(message_value, SchemaMessage):
+            if message_value.stream != stream.name:
                 report.add(
                     "source.schema_stream",
-                    f"expected stream {stream.name!r}, received {message.stream!r}",
+                    f"expected stream {stream.name!r}, received {message_value.stream!r}",
                     path=f"{path}.stream",
                 )
-            if not spec.capabilities.schema_discovery:
+            if not capabilities.schema_discovery:
                 report.add(
                     "source.undeclared_schema",
                     "SchemaMessage emitted while schema_discovery capability is false",
                     path=path,
                 )
+        elif not isinstance(message_value, LogMessage):
+            report.add(
+                "source.message_type",
+                f"unsupported message type {type(message_value).__name__}",
+                path=path,
+            )
 
-    stateful = spec.capabilities.incremental or spec.capabilities.resumable_full_refresh
-    if stateful and saw_record and last_state_index < last_record_index:
+    if saw_record and last_state_index < last_record_index:
         report.add(
             "source.uncheckpointed_records",
-            "a stateful read must end its record batch with a StateMessage",
+            "a record-bearing read must end its batch with a StateMessage",
             path="messages",
         )
     return report
@@ -229,7 +263,9 @@ async def inspect_source_read(
     max_messages: int = 10_000,
 ) -> ConformanceReport:
     """Capture one bounded read and inspect it; callers provide deterministic sources."""
-    report = ConformanceReport(_source_name(source))
+    spec, report = _inspect_source_spec(source)
+    if spec is None:
+        return report
     try:
         check = await source.check()
     except Exception as exc:
@@ -247,13 +283,24 @@ async def inspect_source_read(
         return report
 
     try:
-        discovered = await source.discover()
+        discovered_value: Any = await source.discover()
     except Exception as exc:
         report.add(
             "source.discover_exception",
             f"discover() raised {type(exc).__name__}: {exc}",
         )
         return report
+    if (
+        not isinstance(discovered_value, Sequence)
+        or isinstance(discovered_value, (str, bytes))
+        or any(not isinstance(item, StreamDescriptor) for item in discovered_value)
+    ):
+        report.add(
+            "source.discover_type",
+            "discover() must return a sequence of StreamDescriptor values",
+        )
+        return report
+    discovered: Sequence[StreamDescriptor] = discovered_value
     if not any(
         item.name == stream.name and item.namespace == stream.namespace for item in discovered
     ):
@@ -277,29 +324,59 @@ async def inspect_source_read(
     except Exception as exc:
         report.add("source.read_exception", f"read() raised {type(exc).__name__}: {exc}")
         return report
-    report.extend(inspect_source_messages(source, stream, messages))
-    return report
+    return _inspect_source_messages_with_spec(source, spec, stream, messages, report)
 
 
 async def inspect_destination_replay(
     destination: Destination,
     records: Sequence[Envelope],
+    *,
+    expected_first_write: int | None = None,
 ) -> ConformanceReport:
-    """Exercise check/write/flush and one exact replay on a disposable destination."""
-    spec = destination.spec()
-    report = inspect_manifest(spec)
-    report.connector = spec.name
+    """Exercise check/write/flush and one exact replay on a disposable destination.
+
+    UPSERT-only cases default to every supplied record being newly written.
+    DELETE cases require an explicit positive expectation after the caller has
+    populated the disposable destination with the records that should be removed.
+    """
+    spec, report = _inspect_destination_spec(destination)
+    if spec is None:
+        return report
+    capabilities: Any = spec.capabilities
+    if not isinstance(capabilities, ConnectorCapabilities):
+        return report
     if not destination.idempotent:
         report.add(
             "destination.idempotent",
             "Pipeline-compatible destinations must declare idempotent=True",
         )
     if any(record.operation is Operation.DELETE for record in records) and not (
-        spec.capabilities.deletes
+        capabilities.deletes
     ):
         report.add(
             "destination.undeclared_deletes",
             "DELETE case supplied while deletes capability is false",
+        )
+        return report
+    has_delete = any(record.operation is Operation.DELETE for record in records)
+    if expected_first_write is None:
+        if has_delete:
+            report.add(
+                "destination.delete_expectation",
+                "DELETE cases require expected_first_write after destination setup",
+            )
+            return report
+        expected_first_write = len(records)
+    if (
+        isinstance(expected_first_write, bool)
+        or not isinstance(expected_first_write, int)
+        or expected_first_write < 0
+        or expected_first_write > len(records)
+        or (records and expected_first_write == 0)
+    ):
+        report.add(
+            "destination.first_write_expectation",
+            "expected_first_write must be a positive count within the supplied records",
         )
         return report
     try:
@@ -328,6 +405,12 @@ async def inspect_destination_replay(
         report.add(
             "destination.write_count",
             f"write() returned {first} for {len(records)} records",
+            path="first_write",
+        )
+    elif first != expected_first_write:
+        report.add(
+            "destination.first_write",
+            f"first write reported {first} newly written records; expected {expected_first_write}",
             path="first_write",
         )
     replay = await _write_and_flush(destination, records, report, phase="replay")
@@ -446,11 +529,49 @@ def _safe_name(spec: ConnectorSpec) -> str:
     return spec.name if isinstance(spec.name, str) and spec.name else "connector"
 
 
-def _source_name(source: Source) -> str:
+def _inspect_source_spec(
+    source: Source,
+) -> tuple[ConnectorSpec | None, ConformanceReport]:
+    connector = type(source).__name__
+    report = ConformanceReport(connector)
     try:
-        return _safe_name(source.spec())
-    except Exception:
-        return type(source).__name__
+        raw_spec: Any = source.spec()
+    except Exception as exc:
+        report.add("source.spec_exception", f"spec() raised {type(exc).__name__}: {exc}")
+        return None, report
+    if not isinstance(raw_spec, ConnectorSpec):
+        report.add(
+            "source.spec_type",
+            f"spec() returned {type(raw_spec).__name__}; expected ConnectorSpec",
+        )
+        return None, report
+    report = inspect_manifest(raw_spec)
+    report.connector = raw_spec.name
+    return raw_spec, report
+
+
+def _inspect_destination_spec(
+    destination: Destination,
+) -> tuple[ConnectorSpec | None, ConformanceReport]:
+    connector = type(destination).__name__
+    report = ConformanceReport(connector)
+    try:
+        raw_spec: Any = destination.spec()
+    except Exception as exc:
+        report.add(
+            "destination.spec_exception",
+            f"spec() raised {type(exc).__name__}: {exc}",
+        )
+        return None, report
+    if not isinstance(raw_spec, ConnectorSpec):
+        report.add(
+            "destination.spec_type",
+            f"spec() returned {type(raw_spec).__name__}; expected ConnectorSpec",
+        )
+        return None, report
+    report = inspect_manifest(raw_spec)
+    report.connector = raw_spec.name
+    return raw_spec, report
 
 
 __all__ = [

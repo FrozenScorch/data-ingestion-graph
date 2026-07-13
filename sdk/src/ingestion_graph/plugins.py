@@ -60,11 +60,11 @@ def load_connector_manifest(kind: str, name: str) -> ConnectorSpec:
         raise PluginError(
             f"{kind} plugin entry point {name!r} returned manifest name {spec.name!r}"
         )
-    _validate_connector_manifest(spec, kind=kind, entry_point_name=name)
+    validate_connector_manifest(spec, kind=kind, entry_point_name=name)
     return spec
 
 
-def _validate_connector_manifest(
+def validate_connector_manifest(
     spec: ConnectorSpec,
     *,
     kind: str,

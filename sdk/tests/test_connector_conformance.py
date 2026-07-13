@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Mapping, Sequence
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -144,10 +144,24 @@ def test_manifest_inspection_reports_schema_and_name_drift() -> None:
     report = inspect_manifest(connector_spec, expected_name="expected")
 
     assert {issue.code for issue in report.issues} == {
+        "manifest.invalid",
         "manifest.name_mismatch",
         "manifest.unknown_required",
         "manifest.version",
     }
+
+
+def test_direct_manifest_inspection_uses_canonical_validation() -> None:
+    connector_spec = ConnectorSpec(
+        name="example",
+        version="1",
+        config_schema={"type": "object", "properties": {"bad": "not-a-schema"}},
+    )
+
+    report = inspect_manifest(connector_spec)
+
+    assert not report.ok
+    assert "manifest.invalid" in {issue.code for issue in report.issues}
 
 
 def test_source_capture_accepts_checkpointed_capability_consistent_messages() -> None:
@@ -198,6 +212,37 @@ def test_source_capture_detects_identity_capability_and_checkpoint_violations() 
         "source.undeclared_schema",
         "source.uncheckpointed_records",
     } <= codes
+
+
+def test_every_record_bearing_source_requires_a_trailing_checkpoint() -> None:
+    source = FakeSource(spec(), [RecordMessage(record())])
+
+    report = inspect_source_messages(source, StreamDescriptor("items"), source.messages)
+
+    assert "source.uncheckpointed_records" in {issue.code for issue in report.issues}
+
+
+def test_malformed_source_spec_is_reported_instead_of_raised() -> None:
+    malformed_capabilities = ConnectorSpec(
+        name="example",
+        version="1",
+        config_schema={"type": "object", "properties": {}},
+        capabilities=cast(Any, object()),
+    )
+    malformed = FakeSource(malformed_capabilities, [])
+
+    capability_report = inspect_source_messages(
+        malformed,
+        StreamDescriptor("items"),
+        [],
+    )
+
+    assert not capability_report.ok
+    assert "manifest.invalid" in {issue.code for issue in capability_report.issues}
+
+    wrong_type = FakeSource(cast(Any, {"name": "not-a-spec"}), [])
+    type_report = inspect_source_messages(wrong_type, StreamDescriptor("items"), [])
+    assert type_report.issues[0].code == "source.spec_type"
 
 
 @pytest.mark.asyncio
@@ -258,6 +303,19 @@ async def test_destination_replay_detects_count_replay_and_flush_failures() -> N
 
 
 @pytest.mark.asyncio
+async def test_destination_that_drops_every_record_cannot_pass() -> None:
+    destination = FakeDestination(spec(), counts=(0, 0))
+
+    report = await inspect_destination_replay(destination, [record()])
+
+    assert "destination.first_write" in {issue.code for issue in report.issues}
+
+    malformed = FakeDestination(cast(Any, {"name": "not-a-spec"}))
+    malformed_report = await inspect_destination_replay(malformed, [record()])
+    assert malformed_report.issues[0].code == "destination.spec_type"
+
+
+@pytest.mark.asyncio
 async def test_destination_delete_case_is_capability_gated() -> None:
     destination = FakeDestination(spec(deletes=False))
 
@@ -268,6 +326,22 @@ async def test_destination_delete_case_is_capability_gated() -> None:
 
     assert report.issues[-1].code == "destination.undeclared_deletes"
     assert destination.flushes == 0
+
+    declared = FakeDestination(spec(deletes=True), counts=(1, 0))
+    missing_expectation = await inspect_destination_replay(
+        declared,
+        [record(operation=Operation.DELETE)],
+    )
+    assert missing_expectation.issues[-1].code == "destination.delete_expectation"
+    assert declared.flushes == 0
+
+    prepared = FakeDestination(spec(deletes=True), counts=(1, 0))
+    prepared_report = await inspect_destination_replay(
+        prepared,
+        [record(operation=Operation.DELETE)],
+        expected_first_write=1,
+    )
+    assert prepared_report.ok
 
 
 def test_secret_redaction_requires_explicit_values_and_representations() -> None:
