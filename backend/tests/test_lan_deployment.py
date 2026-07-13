@@ -136,6 +136,9 @@ def test_repository_compose_contract_has_private_data_plane_and_edge_proxy():
     assert "reverse_proxy ingestion-api:8040" in routes
     assert "reverse_proxy ingestion-frontend:3000" in routes
 
+    alembic_environment = (ROOT / "backend/alembic/env.py").read_text(encoding="utf-8")
+    assert 'set_main_option("sqlalchemy.url", settings.database_url)' in alembic_environment
+
 
 def test_rendered_compose_verifier_accepts_logical_network_keys():
     services = {

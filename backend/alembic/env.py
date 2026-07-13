@@ -32,8 +32,10 @@ from sqlalchemy.ext.asyncio import async_engine_from_config
 # Alembic Config object
 config = context.config
 
-# Set the database URL from settings (sync version for Alembic)
-config.set_main_option("sqlalchemy.url", settings.sync_database_url)
+# This environment creates an async SQLAlchemy engine, so retain the asyncpg
+# driver from the application URL. Supplying the sync URL here makes SQLAlchemy
+# fall back to psycopg2, which is intentionally absent from the runtime image.
+config.set_main_option("sqlalchemy.url", settings.database_url)
 
 # Interpret the config file for Python logging
 if config.config_file_name is not None:
