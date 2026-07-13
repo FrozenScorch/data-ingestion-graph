@@ -126,6 +126,7 @@ def test_schema_gate_stamps_bootstrap_and_upgrades_versioned_databases():
 def test_repository_compose_contract_has_private_data_plane_and_edge_proxy():
     compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
     routes = (ROOT / "deploy/caddy/routes.caddy").read_text(encoding="utf-8")
+    frontend_image = (ROOT / "frontend/Dockerfile").read_text(encoding="utf-8")
 
     assert "network_mode: host" not in compose
     assert "profiles:" not in compose
@@ -135,6 +136,7 @@ def test_repository_compose_contract_has_private_data_plane_and_edge_proxy():
     assert "header Origin {$STUDIO_ORIGIN}" in routes
     assert "reverse_proxy ingestion-api:8040" in routes
     assert "reverse_proxy ingestion-frontend:3000" in routes
+    assert "http://127.0.0.1:3000/" in frontend_image
 
     alembic_environment = (ROOT / "backend/alembic/env.py").read_text(encoding="utf-8")
     assert 'set_main_option("sqlalchemy.url", settings.database_url)' in alembic_environment
