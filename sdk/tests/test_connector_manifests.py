@@ -19,25 +19,43 @@ from ingestion_graph.destinations import JsonlDestination, PostgresDestination, 
 from ingestion_graph.errors import PluginError
 from ingestion_graph.messages import SourceMessage
 from ingestion_graph.plugins import discover_plugins, load_connector_manifest
-from ingestion_graph.sources import DiscordSource, JsonlSource, LocalDocumentsSource, PostgresSource
+from ingestion_graph.sources import (
+    DiscordSource,
+    JsonlSource,
+    LocalDocumentsSource,
+    PostgresSource,
+    RestSource,
+)
 
 
 @pytest.mark.parametrize(
-    ("source_type", "name"),
+    ("source_type", "name", "incremental"),
     [
-        (DiscordSource, "discord"),
-        (JsonlSource, "jsonl"),
-        (LocalDocumentsSource, "local_documents"),
-        (PostgresSource, "postgres"),
+        (DiscordSource, "discord", True),
+        (JsonlSource, "jsonl", True),
+        (LocalDocumentsSource, "local_documents", True),
+        (PostgresSource, "postgres", True),
+        (RestSource, "rest", False),
     ],
 )
-def test_builtin_source_manifests_need_no_runtime_configuration(source_type, name):
+def test_builtin_source_manifests_need_no_runtime_configuration(source_type, name, incremental):
     manifest = source_type.manifest()
 
     assert manifest.name == name
     assert manifest.version
     assert manifest.config_schema["type"] == "object"
-    assert manifest.capabilities.incremental is True
+    assert manifest.capabilities.incremental is incremental
+
+
+def test_rest_manifest_declares_resumable_snapshot_capabilities():
+    manifest = RestSource.manifest()
+
+    assert manifest.name == "rest"
+    assert manifest.capabilities.incremental is False
+    assert manifest.capabilities.resumable_full_refresh is True
+    assert manifest.capabilities.schema_discovery is True
+    assert manifest.capabilities.rate_limits is True
+    assert manifest.config_schema["properties"]["secret"]["format"] == "secret-ref"
 
 
 @pytest.mark.parametrize(
@@ -126,7 +144,7 @@ def test_legacy_destination_remains_instantiable_but_has_no_manifest():
 @pytest.mark.parametrize(
     ("kind", "expected"),
     [
-        ("sources", {"discord", "jsonl", "local_documents", "postgres"}),
+        ("sources", {"discord", "jsonl", "local_documents", "postgres", "rest"}),
         ("destinations", {"jsonl", "postgres", "sqlite"}),
     ],
 )
