@@ -2,6 +2,7 @@
 HttpRequest node: send HTTP requests.
 """
 
+import asyncio
 import json
 import logging
 from collections.abc import Callable, Mapping
@@ -154,60 +155,63 @@ class HttpRequestNode(BaseNode):
                 req_kwargs["content"] = str(body)
 
         try:
-            policy = self._egress_policy or EgressPolicy.from_settings()
-            target = await policy.validate_url(url)
-            max_redirects = (
-                settings.egress_max_redirects
-                if self._max_redirects is None
-                else self._max_redirects
-            )
-            redirect_count = 0
-            while True:
-                async with self._client_factory(target, timeout) as client:
-                    response = await client.request(
-                        method,
-                        target.url,
-                        follow_redirects=False,
-                        **req_kwargs,
+            async with asyncio.timeout(timeout):
+                policy = self._egress_policy or EgressPolicy.from_settings()
+                target = await policy.validate_url(url, timeout=timeout)
+                max_redirects = (
+                    settings.egress_max_redirects
+                    if self._max_redirects is None
+                    else self._max_redirects
+                )
+                redirect_count = 0
+                while True:
+                    async with self._client_factory(target, timeout) as client:
+                        response = await client.request(
+                            method,
+                            target.url,
+                            follow_redirects=False,
+                            **req_kwargs,
+                        )
+                    if response.status_code not in {301, 302, 303, 307, 308}:
+                        break
+                    if method != "GET":
+                        raise EgressPolicyError("Redirects are allowed only for GET requests")
+                    if redirect_count >= max_redirects:
+                        raise EgressPolicyError("Outbound redirect limit was exceeded")
+                    location = response.headers.get("location")
+                    if not isinstance(location, str) or not location:
+                        raise EgressPolicyError("Outbound redirect is missing a Location header")
+                    redirected = await policy.validate_url(
+                        urljoin(target.url, location), timeout=timeout
                     )
-                if response.status_code not in {301, 302, 303, 307, 308}:
-                    break
-                if method != "GET":
-                    raise EgressPolicyError("Redirects are allowed only for GET requests")
-                if redirect_count >= max_redirects:
-                    raise EgressPolicyError("Outbound redirect limit was exceeded")
-                location = response.headers.get("location")
-                if not isinstance(location, str) or not location:
-                    raise EgressPolicyError("Outbound redirect is missing a Location header")
-                redirected = await policy.validate_url(urljoin(target.url, location))
-                if redirected.safe_origin != target.safe_origin:
-                    raise EgressPolicyError("Cross-origin outbound redirects are blocked")
-                target = redirected
-                redirect_count += 1
-            response.raise_for_status()
+                    if redirected.safe_origin != target.safe_origin:
+                        raise EgressPolicyError("Cross-origin outbound redirects are blocked")
+                    target = redirected
+                    redirect_count += 1
+                response.raise_for_status()
 
-            # Try to parse response body as JSON; fall back to raw text
-            content_type = response.headers.get("content-type", "")
-            if "application/json" in content_type:
-                response_data = response.json()
-            else:
-                try:
+                # Try to parse response body as JSON; fall back to raw text
+                content_type = response.headers.get("content-type", "")
+                if "application/json" in content_type:
                     response_data = response.json()
-                except (json.JSONDecodeError, ValueError):
-                    response_data = {"raw_text": response.text}
+                else:
+                    try:
+                        response_data = response.json()
+                    except (json.JSONDecodeError, ValueError):
+                        response_data = {"raw_text": response.text}
 
-            return NodeResult(
-                success=True,
-                output_data={"json": response_data},
-                items_processed=1,
-                metadata={
-                    "status_code": response.status_code,
-                    "url": target.safe_origin,
-                    "method": method,
-                    "content_type": content_type,
-                    "redirects_followed": redirect_count,
-                },
-            )
+                return NodeResult(
+                    success=True,
+                    output_data={"json": response_data},
+                    items_processed=1,
+                    metadata={
+                        "status_code": response.status_code,
+                        "url": target.safe_origin,
+                        "method": method,
+                        "content_type": content_type,
+                        "redirects_followed": redirect_count,
+                    },
+                )
 
         except EgressPolicyError as exc:
             logger.warning("Outbound HTTP request blocked by egress policy")
@@ -223,6 +227,9 @@ class HttpRequestNode(BaseNode):
             )
         except httpx.TimeoutException:
             logger.error("Outbound HTTP request timed out")
+            return self._error(f"Request timed out after {timeout:g} seconds")
+        except TimeoutError:
+            logger.error("Outbound HTTP request exceeded its total deadline")
             return self._error(f"Request timed out after {timeout:g} seconds")
         except httpx.RequestError as exc:
             logger.error("Outbound HTTP request failed (%s)", type(exc).__name__)

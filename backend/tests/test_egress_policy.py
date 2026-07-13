@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import ipaddress
 import logging
 from collections import deque
@@ -313,6 +314,75 @@ async def test_pinned_backend_preserves_connect_timeout(monkeypatch) -> None:
 
     with pytest.raises(httpcore.ConnectTimeout):
         await backend.connect_tcp("public.example", 443)
+
+
+@pytest.mark.asyncio
+async def test_resolution_timeout_is_bounded_and_cancels_resolver() -> None:
+    cancelled = asyncio.Event()
+
+    async def slow_resolver(_host: str, _port: int) -> Sequence[str]:
+        try:
+            await asyncio.sleep(60)
+        finally:
+            cancelled.set()
+        return ("93.184.216.34",)
+
+    policy = EgressPolicy(resolver=slow_resolver, resolution_timeout=0.02)
+    started = asyncio.get_running_loop().time()
+    with pytest.raises(EgressPolicyError, match="resolution timed out"):
+        await policy.validate_url("https://slow.example/")
+
+    assert asyncio.get_running_loop().time() - started < 0.2
+    assert cancelled.is_set()
+
+
+@pytest.mark.asyncio
+async def test_pinned_backend_shares_connect_deadline_across_addresses(monkeypatch) -> None:
+    class Backend:
+        def __init__(self) -> None:
+            self.timeouts: list[float] = []
+
+        async def connect_tcp(self, *_args: Any, **kwargs: Any) -> Any:
+            timeout = float(kwargs["timeout"])
+            self.timeouts.append(timeout)
+            await asyncio.sleep(min(0.03, timeout))
+            raise httpcore.ConnectTimeout
+
+    target = await EgressPolicy(
+        resolver=Resolver({"public.example": ("93.184.216.34", "2606:4700:4700::1111")})
+    ).validate_url("https://public.example/")
+    backend = _PinnedNetworkBackend(target)
+    fake_backend = Backend()
+    monkeypatch.setattr(backend, "_backend", fake_backend)
+
+    started = asyncio.get_running_loop().time()
+    with pytest.raises(httpcore.ConnectTimeout):
+        await backend.connect_tcp("public.example", 443, timeout=0.05)
+    elapsed = asyncio.get_running_loop().time() - started
+
+    assert len(fake_backend.timeouts) == 2
+    assert fake_backend.timeouts[1] < fake_backend.timeouts[0]
+    assert elapsed < 0.09
+
+
+@pytest.mark.asyncio
+async def test_http_node_timeout_bounds_dns_and_entire_request_lifecycle() -> None:
+    async def slow_resolver(_host: str, _port: int) -> Sequence[str]:
+        await asyncio.sleep(60)
+        return ("93.184.216.34",)
+
+    policy = EgressPolicy(resolver=slow_resolver, resolution_timeout=10)
+    factory = ClientFactory([])
+    node = HttpRequestNode(egress_policy=policy, client_factory=factory)
+
+    started = asyncio.get_running_loop().time()
+    result = await node.execute(context("https://slow.example/", timeout=1))
+    elapsed = asyncio.get_running_loop().time() - started
+
+    assert result.success is False
+    assert "timed out" in (result.error_message or "")
+    assert elapsed < 1.5
+    assert factory.targets == []
 
 
 @pytest.mark.asyncio

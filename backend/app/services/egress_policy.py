@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import ipaddress
 import logging
+import math
 import re
 import socket
 import ssl
@@ -85,6 +86,7 @@ class EgressPolicy:
         allowed_hosts: Iterable[str] = (),
         allowed_cidrs: Iterable[str] = (),
         resolver: Resolver | None = None,
+        resolution_timeout: float = 10.0,
     ) -> None:
         if mode not in {"public", "allowlist-only"}:
             raise EgressPolicyError("Outbound policy mode is invalid")
@@ -92,6 +94,14 @@ class EgressPolicy:
         self.allowed_hosts = frozenset(_normalize_hostname(host) for host in allowed_hosts)
         self.allowed_networks = tuple(_normalize_network(cidr) for cidr in allowed_cidrs)
         self._resolver = resolver or resolve_all_addresses
+        if (
+            isinstance(resolution_timeout, bool)
+            or not isinstance(resolution_timeout, (int, float))
+            or not math.isfinite(float(resolution_timeout))
+            or resolution_timeout <= 0
+        ):
+            raise EgressPolicyError("Outbound resolution timeout is invalid")
+        self.resolution_timeout = float(resolution_timeout)
 
     @classmethod
     def from_settings(cls, configured: Settings = settings) -> EgressPolicy:
@@ -101,33 +111,46 @@ class EgressPolicy:
             allowed_cidrs=configured.egress_allowed_cidrs_list,
         )
 
-    async def validate_url(self, value: Any) -> ValidatedTarget:
+    async def validate_url(self, value: Any, *, timeout: float | None = None) -> ValidatedTarget:
         parsed = _parse_url(value)
         scheme = parsed.scheme.lower()
         port = _url_port(parsed, scheme)
         host = _normalize_host(parsed.hostname or "")
-        addresses, was_name = await self._resolve_and_validate(host, port)
+        addresses, was_name = await self._resolve_and_validate(host, port, timeout=timeout)
         canonical = _canonical_url(parsed, scheme=scheme, host=host, port=port)
         return ValidatedTarget(canonical, scheme, host, port, addresses, was_name)
 
-    async def validate_host(self, host: Any, port: Any) -> ValidatedTarget:
+    async def validate_host(
+        self, host: Any, port: Any, *, timeout: float | None = None
+    ) -> ValidatedTarget:
         normalized_port = _validate_port(port)
         normalized_host = _normalize_host_value(host)
-        addresses, was_name = await self._resolve_and_validate(normalized_host, normalized_port)
+        addresses, was_name = await self._resolve_and_validate(
+            normalized_host, normalized_port, timeout=timeout
+        )
         literal = f"[{normalized_host}]" if ":" in normalized_host else normalized_host
         url = f"tcp://{literal}:{normalized_port}"
         return ValidatedTarget(url, "tcp", normalized_host, normalized_port, addresses, was_name)
 
     async def _resolve_and_validate(
-        self, host: str, port: int
+        self, host: str, port: int, *, timeout: float | None
     ) -> tuple[tuple[IPAddress, ...], bool]:
         if host in _METADATA_HOSTS:
             raise EgressPolicyError("Cloud metadata destinations are blocked")
         literal = _parse_ip(host)
         host_was_name = literal is None
         if literal is None:
+            resolution_timeout = self.resolution_timeout
+            if timeout is not None:
+                if not math.isfinite(timeout) or timeout <= 0:
+                    raise EgressPolicyError("Outbound resolution timeout is invalid")
+                resolution_timeout = min(resolution_timeout, timeout)
             try:
-                answers = await self._resolver(host, port)
+                answers = await asyncio.wait_for(
+                    self._resolver(host, port), timeout=resolution_timeout
+                )
+            except TimeoutError:
+                raise EgressPolicyError("Outbound hostname resolution timed out") from None
             except Exception:
                 raise EgressPolicyError("Outbound hostname resolution failed") from None
             if not answers:
@@ -317,13 +340,19 @@ class _PinnedNetworkBackend(httpcore.AsyncNetworkBackend):
             raise httpcore.ConnectError("Pinned outbound host changed") from None
         if requested_host != self._target.host or port != self._target.port:
             raise httpcore.ConnectError("Pinned outbound destination changed")
+        loop = asyncio.get_running_loop()
+        deadline = None if timeout is None else loop.time() + max(timeout, 0.0)
         timed_out = False
         for address in self._target.addresses:
+            remaining = None if deadline is None else deadline - loop.time()
+            if remaining is not None and remaining <= 0:
+                timed_out = True
+                break
             try:
                 return await self._backend.connect_tcp(
                     str(address),
                     port,
-                    timeout=timeout,
+                    timeout=remaining,
                     local_address=local_address,
                     socket_options=socket_options,
                 )
