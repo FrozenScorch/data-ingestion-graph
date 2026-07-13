@@ -29,22 +29,22 @@ from ingestion_graph.sources import (
 
 
 @pytest.mark.parametrize(
-    ("source_type", "name"),
+    ("source_type", "name", "incremental"),
     [
-        (DiscordSource, "discord"),
-        (JsonlSource, "jsonl"),
-        (LocalDocumentsSource, "local_documents"),
-        (PostgresSource, "postgres"),
-        (RestSource, "rest"),
+        (DiscordSource, "discord", True),
+        (JsonlSource, "jsonl", True),
+        (LocalDocumentsSource, "local_documents", True),
+        (PostgresSource, "postgres", True),
+        (RestSource, "rest", False),
     ],
 )
-def test_builtin_source_manifests_need_no_runtime_configuration(source_type, name):
+def test_builtin_source_manifests_need_no_runtime_configuration(source_type, name, incremental):
     manifest = source_type.manifest()
 
     assert manifest.name == name
     assert manifest.version
     assert manifest.config_schema["type"] == "object"
-    assert manifest.capabilities.incremental is True
+    assert manifest.capabilities.incremental is incremental
 
 
 def test_rest_manifest_declares_resumable_snapshot_capabilities():
