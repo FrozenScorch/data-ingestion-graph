@@ -4,8 +4,9 @@ from collections import deque
 from collections.abc import Mapping
 from typing import Any
 from unittest.mock import patch
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, parse_qsl, urlsplit
 
+import httpx
 import pytest
 
 from ingestion_graph.conformance import inspect_source_messages
@@ -49,7 +50,7 @@ class FakeClient:
         self.closed = True
 
 
-def rest_source(client: FakeClient, **kwargs: Any) -> RestSource:
+def rest_source(client: Any, **kwargs: Any) -> RestSource:
     options: dict[str, Any] = {
         "stream": "widgets",
         "records_path": "data.items",
@@ -108,6 +109,15 @@ def test_rest_allows_explicit_loopback_http_but_rejects_url_credentials() -> Non
 
     with pytest.raises(ConfigurationError, match="SecretRef-backed headers"):
         rest_source(FakeClient([]), query_params={"api_key": "plaintext"})
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["token", "refresh_token", "client_secret", "X-Amz-Credential", "accessToken"],
+)
+def test_rest_rejects_sensitive_query_parameter_names(name: str) -> None:
+    with pytest.raises(ConfigurationError, match="SecretRef-backed headers"):
+        rest_source(FakeClient([]), query_params={name: "plaintext"})
 
 
 @pytest.mark.asyncio
@@ -340,6 +350,59 @@ async def test_cross_origin_next_link_is_rejected_before_request_or_secret_forwa
     assert len(client.requests) == 1
 
 
+@pytest.mark.parametrize("name", ["client_secret", "refresh_token", "X-Amz-Credential"])
+@pytest.mark.asyncio
+async def test_sensitive_next_link_query_is_rejected_before_checkpointing(name: str) -> None:
+    client = FakeClient(
+        [
+            FakeResponse(
+                {"data": {"items": []}},
+                headers={"Link": f'</v1/widgets?{name}=plaintext>; rel="next"'},
+            )
+        ]
+    )
+
+    with pytest.raises(ProtocolError, match="appears to contain credentials"):
+        await collect(rest_source(client, pagination="link"))
+    assert len(client.requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_injected_redirect_following_client_cannot_forward_auth() -> None:
+    requests: list[httpx.Request] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.host == "api.example.test":
+            return httpx.Response(
+                302,
+                headers={"Location": "https://attacker.test/collect"},
+                request=request,
+            )
+        return httpx.Response(200, json={"data": {"items": []}}, request=request)
+
+    client = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        follow_redirects=True,
+    )
+    source = rest_source(
+        client,
+        auth_type="bearer",
+        secret=SecretRef("REST_SECRET"),
+        secret_provider=EnvSecretProvider({"REST_SECRET": "top-secret"}),
+    )
+
+    try:
+        with pytest.raises(ConfigurationError, match="HTTP 302"):
+            await collect(source)
+    finally:
+        await client.aclose()
+
+    assert len(requests) == 1
+    assert requests[0].url.host == "api.example.test"
+    assert requests[0].headers["Authorization"] == "Bearer top-secret"
+
+
 @pytest.mark.asyncio
 async def test_opted_in_cross_origin_link_never_receives_auth_header() -> None:
     client = FakeClient(
@@ -469,3 +532,80 @@ async def test_max_pages_stops_on_a_durable_next_request_checkpoint() -> None:
     checkpoint = states(messages)[-1].state
     assert parse_qs(urlsplit(checkpoint["request_url"]).query)["cursor"] == ["second"]
     assert len(client.requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_pagination_loop_is_detected_across_max_pages_runs() -> None:
+    endpoint = "https://api.example.test/v1/widgets"
+    first = rest_source(
+        FakeClient(
+            [
+                FakeResponse(
+                    {"data": {"items": []}},
+                    headers={"Link": '</v1/widgets?page=2>; rel="next"'},
+                )
+            ]
+        ),
+        pagination="link",
+        max_pages=1,
+    )
+    checkpoint = states(await collect(first))[-1].state
+    assert checkpoint["completed_request_hashes"]
+
+    second = rest_source(
+        FakeClient(
+            [
+                FakeResponse(
+                    {"data": {"items": []}},
+                    headers={"Link": f'<{endpoint}>; rel="next"'},
+                )
+            ]
+        ),
+        pagination="link",
+        max_pages=1,
+    )
+    with pytest.raises(ProtocolError, match="repeated a request URL"):
+        await collect(second, checkpoint)
+
+
+@pytest.mark.asyncio
+async def test_cursor_pagination_preserves_blank_query_parameters() -> None:
+    client = FakeClient(
+        [
+            FakeResponse({"data": {"items": []}, "next": "second"}),
+            FakeResponse({"data": {"items": []}, "next": None}),
+        ]
+    )
+    source = rest_source(
+        client,
+        pagination="cursor",
+        next_cursor_path="next",
+        query_params={"include": None},
+    )
+
+    await collect(source)
+
+    assert ("include", "") in parse_qsl(
+        urlsplit(client.requests[1][1]).query,
+        keep_blank_values=True,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "invalid_hashes",
+    [
+        "not-a-list",
+        ["not-a-hash"],
+        ["0" * 64, "0" * 64],
+    ],
+)
+async def test_checkpoint_rejects_invalid_completed_request_hashes(
+    invalid_hashes: Any,
+) -> None:
+    original = rest_source(FakeClient([FakeResponse({"data": {"items": []}})]))
+    checkpoint = states(await collect(original))[-1].state
+    checkpoint["completed_request_hashes"] = invalid_hashes
+
+    with pytest.raises(ConfigurationError, match="completed_request_hashes"):
+        await collect(rest_source(FakeClient([])), checkpoint)

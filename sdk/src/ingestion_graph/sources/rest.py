@@ -8,7 +8,7 @@ import ipaddress
 import json
 import math
 import re
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
@@ -47,17 +47,28 @@ Sleep: TypeAlias = Callable[[float], Awaitable[None]]
 
 _HEADER_NAME = re.compile(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
 _STREAM_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
-_SENSITIVE_QUERY_NAMES = {
-    "access_token",
-    "api_key",
+_SENSITIVE_QUERY_COMPONENTS = frozenset(
+    {
+        "apikey",
+        "auth",
+        "authorization",
+        "credential",
+        "key",
+        "password",
+        "secret",
+        "signature",
+        "sig",
+        "token",
+    }
+)
+_SENSITIVE_QUERY_SUFFIXES = (
     "apikey",
-    "auth_token",
-    "authorization",
     "credential",
-    "key",
     "password",
     "secret",
-}
+    "signature",
+    "token",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,6 +79,7 @@ class _ResumePoint:
     page_fingerprint: str | None = None
     primary_key_types: tuple[str, ...] | None = None
     record_field_types: Mapping[str, tuple[str, ...]] | None = None
+    completed_request_hashes: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -280,13 +292,13 @@ class RestSource(Source):
         cycle = resume.cycle
         primary_key_types = resume.primary_key_types
         record_field_types = resume.record_field_types
-        requested_urls: set[str] = set()
+        completed_request_hashes = set(resume.completed_request_hashes)
         emitted = 0
 
         for _page_number in range(self.max_pages):
-            if request_url in requested_urls:
+            request_hash = _request_hash(request_url)
+            if request_hash in completed_request_hashes:
                 raise ProtocolError("REST pagination repeated a request URL without progress")
-            requested_urls.add(request_url)
             page = await self._fetch_page(request_url)
             identities, page_key_types = self._validate_page_identities(
                 page.records, primary_key_types
@@ -330,10 +342,12 @@ class RestSource(Source):
                         page_fingerprint=page.fingerprint,
                         primary_key_types=primary_key_types,
                         record_field_types=record_field_types,
+                        completed_request_hashes=completed_request_hashes,
                     ),
                 )
                 return
 
+            completed_request_hashes.add(request_hash)
             if page.next_url is None:
                 yield StateMessage(
                     self.stream,
@@ -343,6 +357,7 @@ class RestSource(Source):
                         cycle=cycle + 1,
                         primary_key_types=primary_key_types,
                         record_field_types=record_field_types,
+                        completed_request_hashes=(),
                     ),
                 )
                 return
@@ -353,8 +368,9 @@ class RestSource(Source):
                 cycle=cycle,
                 primary_key_types=primary_key_types,
                 record_field_types=record_field_types,
+                completed_request_hashes=completed_request_hashes,
             )
-            if page.next_url in requested_urls:
+            if _request_hash(page.next_url) in completed_request_hashes:
                 raise ProtocolError("REST pagination repeated a request URL without progress")
             yield StateMessage(self.stream, continuation)
             if emitted >= self.max_records:
@@ -427,7 +443,10 @@ class RestSource(Source):
         for attempt in range(self.max_retries + 1):
             try:
                 response = await client.request(
-                    "GET", request_url, headers=self._auth_headers(request_url)
+                    "GET",
+                    request_url,
+                    headers=self._auth_headers(request_url),
+                    follow_redirects=False,
                 )
             except IngestionError:
                 raise
@@ -655,7 +674,7 @@ def _validate_query_params(
     result: dict[str, JsonScalar] = {}
     for key, value in values.items():
         safe_key = _validate_parameter_name(key, "query_params key")
-        if safe_key.lower() in _SENSITIVE_QUERY_NAMES:
+        if _is_sensitive_query_name(safe_key):
             raise ConfigurationError(
                 "REST authentication credentials must use SecretRef-backed headers, not URLs"
             )
@@ -682,7 +701,9 @@ def _append_query(url: str, values: Mapping[str, JsonScalar]) -> str:
 
 def _replace_query_parameter(url: str, name: str, value: JsonScalar) -> str:
     parsed = urlsplit(url)
-    pairs = [(key, item) for key, item in parse_qsl(parsed.query) if key != name]
+    pairs = [
+        (key, item) for key, item in parse_qsl(parsed.query, keep_blank_values=True) if key != name
+    ]
     pairs.append((name, _query_value(value)))
     return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, urlencode(pairs), ""))
 
@@ -693,6 +714,23 @@ def _query_value(value: JsonScalar) -> str:
     if isinstance(value, bool):
         return "true" if value else "false"
     return str(value)
+
+
+def _is_sensitive_query_name(value: str) -> bool:
+    # Split separators and camelCase before comparing whole semantic components.
+    # The suffix check also covers common all-lowercase spellings such as
+    # ``refreshtoken`` without treating unrelated names such as ``monkey`` as keys.
+    separated = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", value)
+    components = tuple(item for item in re.split(r"[^A-Za-z0-9]+", separated.lower()) if item)
+    collapsed = "".join(components)
+    if any(item in _SENSITIVE_QUERY_COMPONENTS for item in components):
+        return True
+    if collapsed in _SENSITIVE_QUERY_COMPONENTS:
+        return True
+    return any(
+        len(collapsed) > len(suffix) and collapsed.endswith(suffix)
+        for suffix in _SENSITIVE_QUERY_SUFFIXES
+    )
 
 
 def _configuration_fingerprint(source: RestSource) -> str:
@@ -750,7 +788,7 @@ def _validate_request_url(
     if not allow_cross_origin and not _same_origin(value, base_url):
         raise ProtocolError("REST pagination attempted a cross-origin next link")
     for key, _item in parse_qsl(parsed.query, keep_blank_values=True):
-        if key.lower() in _SENSITIVE_QUERY_NAMES:
+        if _is_sensitive_query_name(key):
             raise ProtocolError("REST pagination next URL appears to contain credentials")
     return value
 
@@ -831,6 +869,10 @@ def _canonical_identity(values: Sequence[JsonScalar]) -> str:
     return json.dumps(typed, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
 
+def _request_hash(url: str) -> str:
+    return hashlib.sha256(url.encode()).hexdigest()
+
+
 def _page_fingerprint(records: Sequence[Mapping[str, Any]], next_url: str | None) -> str:
     try:
         encoded = json.dumps(
@@ -907,6 +949,7 @@ def _encode_state(
     page_fingerprint: str | None = None,
     primary_key_types: tuple[str, ...] | None = None,
     record_field_types: Mapping[str, tuple[str, ...]] | None = None,
+    completed_request_hashes: Iterable[str] = (),
 ) -> dict[str, Any]:
     state: dict[str, Any] = {
         "version": 1,
@@ -923,6 +966,9 @@ def _encode_state(
         state["record_field_types"] = {
             path: list(types) for path, types in sorted(record_field_types.items())
         }
+    completed = sorted(set(completed_request_hashes))
+    if completed:
+        state["completed_request_hashes"] = completed
     return state
 
 
@@ -991,6 +1037,17 @@ def _decode_state(
             ):
                 raise ConfigurationError("REST checkpoint record_field_types is invalid")
             record_field_types[path] = tuple(types)
+    raw_completed = state.get("completed_request_hashes", [])
+    if (
+        not isinstance(raw_completed, list)
+        or len(raw_completed) > 100_000
+        or len(raw_completed) != len(set(raw_completed))
+        or any(
+            not isinstance(item, str) or re.fullmatch(r"[0-9a-f]{64}", item) is None
+            for item in raw_completed
+        )
+    ):
+        raise ConfigurationError("REST checkpoint completed_request_hashes is invalid")
     return _ResumePoint(
         request_url=request_url,
         cycle=cycle,
@@ -998,6 +1055,7 @@ def _decode_state(
         page_fingerprint=page_fingerprint,
         primary_key_types=primary_key_types,
         record_field_types=record_field_types,
+        completed_request_hashes=tuple(raw_completed),
     )
 
 
