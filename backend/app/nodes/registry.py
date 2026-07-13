@@ -1,6 +1,7 @@
 """
 Node registry: auto-discovery and registration of node types.
 """
+
 import importlib
 import pkgutil
 from typing import Any, Optional
@@ -51,7 +52,22 @@ def discover_nodes() -> None:
         except Exception as e:
             # Log but don't crash on import errors
             import logging
+
             logging.getLogger(__name__).warning(f"Failed to import node module {modname}: {e}")
+    validate_registry_contracts()
+
+
+def validate_registry_contracts() -> None:
+    """Materialize every node contract so schema drift fails during startup."""
+    for node_type, node in _registry.items():
+        try:
+            definition = node.to_dict()
+        except Exception as exc:
+            raise ValueError(
+                f"Node type {node_type!r} has an invalid registry contract: {exc}"
+            ) from exc
+        if definition.get("type") != node_type:
+            raise ValueError(f"Node type {node_type!r} serialized with a different type")
 
 
 def get_registry_summary() -> list[dict[str, Any]]:

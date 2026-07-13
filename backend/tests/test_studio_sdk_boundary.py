@@ -1,7 +1,7 @@
 """Enterprise Studio packaging, template, and SDK adapter boundary tests."""
 
 from copy import deepcopy
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
@@ -83,6 +83,27 @@ def test_manifest_projection_fails_when_sdk_fields_are_not_accounted_for():
             ),
             omitted={"token": "saved connection"},
         )
+
+
+def test_node_discovery_fails_startup_when_sdk_manifest_drifts():
+    manifest = DiscordSource.manifest()
+    drifted_schema = dict(manifest.config_schema)
+    drifted_schema["properties"] = {
+        **manifest.config_schema["properties"],
+        "unprojected": {"type": "string"},
+    }
+    drifted = type(manifest)(
+        name=manifest.name,
+        version=manifest.version,
+        config_schema=drifted_schema,
+        capabilities=manifest.capabilities,
+    )
+
+    with (
+        patch.object(DiscordSource, "manifest", return_value=drifted),
+        pytest.raises(ValueError, match="discord_source.*unprojected"),
+    ):
+        discover_nodes()
 
 
 def test_templates_materialize_live_nodes_configs_and_dual_edge_ports():
