@@ -8,6 +8,11 @@ from typing import Any, Protocol, cast
 from uuid import UUID
 
 from app.nodes.base import BaseNode, NodeContext, NodeResult, PortDataType, PortDef
+from app.nodes.sdk_manifest import (
+    ManifestFieldProjection,
+    project_manifest_config_schema,
+    serialize_connector_manifest,
+)
 from app.services import upload_service
 from app.services.sdk_source_state_service import (
     SDKSourceStateLeaseError,
@@ -64,6 +69,10 @@ class SDKDocumentSourceNode(BaseNode):
         return "ingestion_graph.sources.LocalDocumentsSource"
 
     @property
+    def connector_manifest(self) -> dict[str, Any]:
+        return serialize_connector_manifest(LocalDocumentsSource.manifest())
+
+    @property
     def node_type(self) -> str:
         return "sdk_document_source"
 
@@ -89,9 +98,38 @@ class SDKDocumentSourceNode(BaseNode):
 
     @property
     def config_schema(self) -> dict[str, Any]:
-        return {
-            "type": "object",
-            "properties": {
+        return project_manifest_config_schema(
+            LocalDocumentsSource.manifest(),
+            fields=(
+                ManifestFieldProjection(
+                    source_field="checkpoint_interval",
+                    target_field="checkpoint_interval",
+                    overrides={"maximum": 1000},
+                ),
+                ManifestFieldProjection(
+                    source_field="text_chunk_chars",
+                    target_field="text_chunk_chars",
+                    overrides={"maximum": 1_000_000},
+                ),
+                ManifestFieldProjection(
+                    source_field="table_batch_rows",
+                    target_field="table_batch_rows",
+                    overrides={"maximum": 5000},
+                ),
+            ),
+            omitted={
+                "paths": "Studio resolves owner-scoped upload IDs to managed paths",
+                "recursive": "Studio selects explicit managed files rather than directory trees",
+                "extensions": "Studio validates managed uploads against supported extensions",
+                "include_hidden": "Studio-managed uploads do not traverse hidden directories",
+                "follow_symlinks": "Studio-managed uploads never enable symlink traversal",
+                "stream_names": "Studio derives stable stream names from upload IDs",
+                "max_file_size_bytes": "Studio enforces centrally managed upload limits",
+                "max_archive_uncompressed_bytes": (
+                    "Studio enforces centrally managed archive expansion limits"
+                ),
+            },
+            studio_properties={
                 "artifact_ids": {
                     "type": "array",
                     "items": {"type": "string", "format": "uuid"},
@@ -101,24 +139,6 @@ class SDKDocumentSourceNode(BaseNode):
                     "maxItems": 100,
                     "accepted_extensions": list(SUPPORTED_EXTENSIONS),
                     "description": "Explicit Studio-managed files to ingest. Empty selects none.",
-                },
-                "checkpoint_interval": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "maximum": 1000,
-                    "default": 50,
-                },
-                "text_chunk_chars": {
-                    "type": "integer",
-                    "minimum": 256,
-                    "maximum": 1_000_000,
-                    "default": 12000,
-                },
-                "table_batch_rows": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "maximum": 5000,
-                    "default": 500,
                 },
                 "max_output_items": {
                     "type": "integer",
@@ -135,7 +155,7 @@ class SDKDocumentSourceNode(BaseNode):
                     "description": "Fail safely when serialized run output exceeds this size",
                 },
             },
-        }
+        )
 
     async def execute(self, context: NodeContext) -> NodeResult:
         forbidden = {"path", "paths", "file_path", "file_pattern", "source_type"}

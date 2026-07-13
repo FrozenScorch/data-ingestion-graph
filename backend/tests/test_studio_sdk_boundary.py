@@ -20,9 +20,14 @@ from app.graph_validation import (
 from app.nodes.discord_source import DiscordSourceNode
 from app.nodes.registry import discover_nodes
 from app.nodes.sdk_document_source import SDKDocumentSourceNode
-from app.nodes.sdk_manifest import ManifestFieldProjection, project_manifest_config_schema
+from app.nodes.sdk_manifest import (
+    ManifestFieldProjection,
+    project_manifest_config_schema,
+    serialize_connector_manifest,
+)
 from app.nodes.sdk_query_store import SDKQueryStoreNode
-from ingestion_graph.sources import DiscordSource
+from ingestion_graph.destinations import SQLiteCollection
+from ingestion_graph.sources import DiscordSource, LocalDocumentsSource
 
 
 def test_sdk_adapter_metadata_is_visible_to_studio():
@@ -45,8 +50,12 @@ def test_sdk_adapter_metadata_is_visible_to_studio():
     }
     assert documents["implementation"] == "sdk-adapter"
     assert documents["sdk_component"] == "ingestion_graph.sources.LocalDocumentsSource"
+    assert documents["connector_manifest"] == serialize_connector_manifest(
+        LocalDocumentsSource.manifest()
+    )
     assert query["implementation"] == "sdk-adapter"
     assert query["sdk_component"] == "ingestion_graph.destinations.SQLiteCollection"
+    assert query["connector_manifest"] == serialize_connector_manifest(SQLiteCollection.manifest())
 
 
 def test_discord_studio_schema_is_strictly_projected_from_sdk_manifest():
@@ -59,6 +68,49 @@ def test_discord_studio_schema_is_strictly_projected_from_sdk_manifest():
     }
     assert studio_schema["required"] == ["channel_id", "connection_id"]
     assert "token" not in studio_schema["properties"]
+
+
+def test_document_studio_schema_is_strictly_projected_from_sdk_manifest():
+    sdk_schema = LocalDocumentsSource.manifest().config_schema
+    studio_schema = SDKDocumentSourceNode().config_schema
+
+    for field, maximum in (
+        ("checkpoint_interval", 1000),
+        ("text_chunk_chars", 1_000_000),
+        ("table_batch_rows", 5000),
+    ):
+        assert studio_schema["properties"][field] == {
+            **sdk_schema["properties"][field],
+            "maximum": maximum,
+        }
+    assert studio_schema["properties"]["artifact_ids"]["format"] == "artifact-refs"
+    assert studio_schema["properties"]["artifact_ids"]["accepted_extensions"]
+    assert studio_schema["required"] == []
+    assert {
+        "paths",
+        "recursive",
+        "extensions",
+        "include_hidden",
+        "follow_symlinks",
+        "stream_names",
+        "max_file_size_bytes",
+        "max_archive_uncompressed_bytes",
+    }.isdisjoint(studio_schema["properties"])
+
+
+def test_query_store_schema_omits_sdk_path_and_adds_studio_collection():
+    studio_schema = SDKQueryStoreNode().config_schema
+
+    assert "path" not in studio_schema["properties"]
+    assert studio_schema["properties"] == {
+        "collection": {
+            "type": "string",
+            "default": "pipeline-output",
+            "pattern": "^[a-zA-Z0-9_-]+$",
+            "description": "Logical collection name shown in query results",
+        }
+    }
+    assert studio_schema["required"] == []
 
 
 def test_manifest_projection_fails_when_sdk_fields_are_not_accounted_for():
@@ -89,8 +141,16 @@ def test_manifest_projection_fails_when_sdk_fields_are_not_accounted_for():
         )
 
 
-def test_node_discovery_fails_startup_when_sdk_manifest_drifts():
-    manifest = DiscordSource.manifest()
+@pytest.mark.parametrize(
+    ("connector_type", "node_type"),
+    [
+        (DiscordSource, "discord_source"),
+        (LocalDocumentsSource, "sdk_document_source"),
+        (SQLiteCollection, "sdk_query_store"),
+    ],
+)
+def test_node_discovery_fails_startup_when_sdk_manifest_drifts(connector_type, node_type):
+    manifest = connector_type.manifest()
     drifted_schema = dict(manifest.config_schema)
     drifted_schema["properties"] = {
         **manifest.config_schema["properties"],
@@ -104,8 +164,8 @@ def test_node_discovery_fails_startup_when_sdk_manifest_drifts():
     )
 
     with (
-        patch.object(DiscordSource, "manifest", return_value=drifted),
-        pytest.raises(ValueError, match="discord_source.*unprojected"),
+        patch.object(connector_type, "manifest", return_value=drifted),
+        pytest.raises(ValueError, match=rf"{node_type}.*unprojected"),
     ):
         discover_nodes()
 
