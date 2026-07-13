@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
+import time
 from collections.abc import Mapping
 from typing import Any
 from uuid import UUID
@@ -28,18 +30,28 @@ class StudioSDKSourceStateStore(StateStore):
         owner_id: UUID,
         graph_id: UUID,
         node_id: str,
+        lock_timeout_seconds: float = 30.0,
     ) -> None:
         self.session = session
         self.owner_id = UUID(str(owner_id))
         self.graph_id = UUID(str(graph_id))
         self.node_id = node_id
+        self.lock_timeout_seconds = max(0.0, lock_timeout_seconds)
         self.pipeline_key = f"studio:{self.owner_id}:{self.graph_id}:{node_id}"
 
     async def acquire_lock(self) -> None:
         """Serialize this node's state transition across Studio workers."""
         digest = hashlib.sha256(self.pipeline_key.encode()).digest()
         lock_id = int.from_bytes(digest[:8], byteorder="big", signed=True)
-        await self.session.execute(select(func.pg_advisory_xact_lock(lock_id)))
+        deadline = time.monotonic() + self.lock_timeout_seconds
+        while True:
+            result = await self.session.execute(select(func.pg_try_advisory_xact_lock(lock_id)))
+            if bool(result.scalar_one()):
+                return
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("Timed out waiting for SDK source state lock")
+            await asyncio.sleep(min(0.1, remaining))
 
     async def load(self, pipeline: str, source: str, stream: str) -> Mapping[str, Any]:
         self._require_pipeline(pipeline)

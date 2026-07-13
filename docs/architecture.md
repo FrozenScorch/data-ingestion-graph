@@ -46,9 +46,10 @@ after records without a state message is a protocol error.
 The Studio document adapter binds the SDK `StateStore` contract to PostgreSQL
 rows keyed by owner, graph, node, source, and stream. An advisory lock serializes
 concurrent runs for the same graph node. The adapter buffers all state messages
-until every stream completes, then the node runner commits successful bounded
-output and staged source state together. Failed or over-limit reads cannot advance
-state.
+until every stream completes. The node runner flushes successful bounded output
+and staged source state without committing; the executor's POST_EXEC checkpoint
+then commits all three in one database transaction. Failed or over-limit reads and
+checkpoint failures cannot advance state.
 
 This makes each Document Source run an incremental delta: unchanged uploads emit
 nothing, changed files emit stable upserts and deletes, and deselecting a prior

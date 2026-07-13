@@ -31,6 +31,7 @@ async def run_node_with_retry(
     working_dir: str | None = None,
     max_retries: int = 3,
     retry_config: RetryConfig | None = None,
+    defer_completion_commit: bool = False,
 ) -> RunNode:
     """
     Execute a single node with retry support.
@@ -38,7 +39,8 @@ async def run_node_with_retry(
     On first failure, if retries are available, uses the retry handler
     from ``app.engine.retry`` to retry with exponential backoff.
 
-    Returns the updated RunNode record.
+    Returns the updated RunNode record. Executors set ``defer_completion_commit``
+    so successful output and adapter state commit with the POST_EXEC checkpoint.
     """
     # Create the initial RunNode record
     run_node = RunNode(
@@ -51,7 +53,10 @@ async def run_node_with_retry(
         input_data=input_data,
     )
     db.add(run_node)
-    await db.commit()
+    if defer_completion_commit:
+        await db.flush()
+    else:
+        await db.commit()
     await db.refresh(run_node)
 
     # Get node implementation

@@ -291,6 +291,7 @@ class DAGExecutor:
                         config=node_config,
                         input_data=input_data,
                         state=self._state_for_node(node_id, node_configs, exec_state),
+                        defer_completion_commit=True,
                     )
 
                     # Store output in execution state (only on success)
@@ -421,6 +422,7 @@ class DAGExecutor:
                 config=node_config,
                 input_data=input_data,
                 state=self._state_for_node(node_id, node_configs, exec_state),
+                defer_completion_commit=True,
             )
 
             # Store output in execution state

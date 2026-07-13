@@ -12,6 +12,7 @@ from app.nodes.base import NodeContext
 from app.nodes.sdk_query_store import SDKQueryStoreNode
 from fastapi import HTTPException
 from ingestion_graph.destinations import SQLiteCollection
+from ingestion_graph.models import Operation, RecordPayload
 from ingestion_graph.query import QueryRequest
 
 
@@ -42,6 +43,41 @@ async def test_studio_node_materializes_queryable_sdk_collection(tmp_path):
         await store.close()
     assert len(hits) == 1
     assert hits[0].envelope.stream == "preview"
+
+
+@pytest.mark.asyncio
+async def test_query_store_keeps_document_delete_as_searchable_delta_data(tmp_path):
+    run_id = str(uuid4())
+    context = NodeContext(
+        run_id=run_id,
+        node_id="query-store",
+        config={"collection": "document-deltas"},
+        input_data={
+            "items": [
+                {
+                    "id": "canonical-document-id",
+                    "source": "local_documents",
+                    "stream": "upload-artifact",
+                    "operation": "delete",
+                    "payload": {"reason": "artifact removed"},
+                }
+            ]
+        },
+        working_dir=str(tmp_path),
+    )
+
+    result = await SDKQueryStoreNode().execute(context)
+
+    assert result.success is True
+    store = SQLiteCollection(tmp_path / "query" / f"{run_id}.db")
+    try:
+        hits = await store.query(QueryRequest(text="artifact removed"))
+    finally:
+        await store.close()
+    assert len(hits) == 1
+    assert hits[0].envelope.operation is Operation.UPSERT
+    assert isinstance(hits[0].envelope.payload, RecordPayload)
+    assert hits[0].envelope.payload.data["operation"] == "delete"
 
 
 @pytest.mark.asyncio
@@ -194,3 +230,34 @@ async def test_runner_defaults_to_configured_temp_dir(tmp_path):
 
     assert result.status == "completed"
     assert observed["working_dir"] == str(tmp_path)
+
+
+@pytest.mark.asyncio
+async def test_runner_can_defer_completion_commit_until_checkpoint(tmp_path):
+    from app.engine.retry import RetryConfig
+    from app.engine.runner import run_node_with_retry
+    from app.nodes.base import NodeResult
+
+    class SuccessfulNode:
+        async def execute(self, context):
+            return NodeResult(success=True, output_data={"items": [{"id": "one"}]})
+
+    db = AsyncMock()
+    db.add = MagicMock()
+    with patch("app.engine.runner.registry_get_node", return_value=SuccessfulNode()):
+        result = await run_node_with_retry(
+            db=db,
+            run_id=uuid4(),
+            node_id="source",
+            node_type="source",
+            config={},
+            input_data={},
+            state={},
+            working_dir=str(tmp_path),
+            retry_config=RetryConfig(max_retries=1, jitter=False),
+            defer_completion_commit=True,
+        )
+
+    assert result.status == "completed"
+    assert db.commit.await_count == 1  # Initial RUNNING record only.
+    db.flush.assert_awaited_once()

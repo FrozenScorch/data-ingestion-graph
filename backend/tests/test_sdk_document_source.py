@@ -194,3 +194,21 @@ async def test_output_limit_fails_without_advancing_state(upload_root):
     assert "max_output_items" in (result.error_message or "")
     assert result.output_data == {"items": []}
     assert store.states == {}
+
+
+@pytest.mark.asyncio
+async def test_output_byte_limit_fails_without_advancing_state(upload_root):
+    owner_id, graph_id = uuid4(), uuid4()
+    saved = await _save(owner_id, "large.txt", b"x" * 2_000)
+    store = MemoryStudioStateStore(owner_id=owner_id, graph_id=graph_id, node_id="documents")
+    result = await SDKDocumentSourceNode(store).execute(  # type: ignore[arg-type]
+        _context(
+            owner_id=owner_id,
+            graph_id=graph_id,
+            config={"artifact_ids": [saved["id"]], "max_output_bytes": 1_024},
+        )
+    )
+    assert result.success is False
+    assert "max_output_bytes" in (result.error_message or "")
+    assert result.output_data == {"items": []}
+    assert store.states == {}

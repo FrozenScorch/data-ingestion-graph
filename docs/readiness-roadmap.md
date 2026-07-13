@@ -77,8 +77,9 @@ and HTTP actions, but several displayed capabilities are incomplete:
 
 - Studio's SDK Document Source now resumes and reconciles per graph/node, but Discord
   and native sources do not yet share the same durable state bridge.
-- Document state commits atomically with successful bounded source output, not yet after
-  a downstream destination flush; its starter query collection is a per-run delta view.
+- Document state, successful bounded source output, and the POST_EXEC checkpoint commit
+  atomically, but not yet with a downstream destination flush; its starter query
+  collection is a per-run delta view.
 - `schedule` and `webhook` are labels, not implemented trigger services.
 - Durable leased workers execute queued runs and recover expired jobs, but there is no
   per-stream concurrency policy or independently scaled worker deployment profile yet.

@@ -37,3 +37,22 @@ async def test_state_load_query_contains_every_owner_scope_dimension():
     assert "documents" in parameter_values
     assert "local_documents" in parameter_values
     assert "upload-artifact" in parameter_values
+
+
+@pytest.mark.asyncio
+async def test_state_lock_wait_is_bounded():
+    owner_id, graph_id = uuid4(), uuid4()
+    result = MagicMock()
+    result.scalar_one.return_value = False
+    session = AsyncMock()
+    session.execute.return_value = result
+    store = StudioSDKSourceStateStore(
+        session,
+        owner_id=owner_id,
+        graph_id=graph_id,
+        node_id="documents",
+        lock_timeout_seconds=0,
+    )
+
+    with pytest.raises(TimeoutError, match="Timed out"):
+        await store.acquire_lock()

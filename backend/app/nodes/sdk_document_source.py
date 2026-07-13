@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 from typing import Any, Protocol, cast
 from uuid import UUID
@@ -16,6 +17,7 @@ from ingestion_graph.sources.documents import SUPPORTED_EXTENSIONS
 SOURCE_NAME = "local_documents"
 STREAM_PREFIX = "upload-"
 MAX_OUTPUT_ITEMS = 10_000
+MAX_OUTPUT_BYTES = 64 * 1024 * 1024
 
 
 class _OutputLimitExceeded(RuntimeError):
@@ -91,21 +93,26 @@ class SDKDocumentSourceNode(BaseNode):
                     "format": "artifact-refs",
                     "default": [],
                     "uniqueItems": True,
+                    "maxItems": 100,
+                    "accepted_extensions": list(SUPPORTED_EXTENSIONS),
                     "description": "Explicit Studio-managed files to ingest. Empty selects none.",
                 },
                 "checkpoint_interval": {
                     "type": "integer",
                     "minimum": 1,
+                    "maximum": 1000,
                     "default": 50,
                 },
                 "text_chunk_chars": {
                     "type": "integer",
                     "minimum": 256,
+                    "maximum": 1_000_000,
                     "default": 12000,
                 },
                 "table_batch_rows": {
                     "type": "integer",
                     "minimum": 1,
+                    "maximum": 5000,
                     "default": 500,
                 },
                 "max_output_items": {
@@ -114,6 +121,13 @@ class SDKDocumentSourceNode(BaseNode):
                     "maximum": MAX_OUTPUT_ITEMS,
                     "default": 5000,
                     "description": "Fail safely when a run delta exceeds this item count",
+                },
+                "max_output_bytes": {
+                    "type": "integer",
+                    "minimum": 1024,
+                    "maximum": MAX_OUTPUT_BYTES,
+                    "default": 16 * 1024 * 1024,
+                    "description": "Fail safely when serialized run output exceeds this size",
                 },
             },
         }
@@ -138,16 +152,27 @@ class SDKDocumentSourceNode(BaseNode):
             return self._failure("Invalid upload reference")
         if len(set(artifact_ids)) != len(artifact_ids):
             return self._failure("Duplicate upload references are not allowed")
+        if len(artifact_ids) > 100:
+            return self._failure("Document Source accepts at most 100 artifacts per node")
 
         try:
             checkpoint_interval = int(context.config.get("checkpoint_interval", 50))
             text_chunk_chars = int(context.config.get("text_chunk_chars", 12_000))
             table_batch_rows = int(context.config.get("table_batch_rows", 500))
             max_output_items = int(context.config.get("max_output_items", 5_000))
+            max_output_bytes = int(context.config.get("max_output_bytes", 16 * 1024 * 1024))
         except (TypeError, ValueError):
             return self._failure("Document parser limits must be integers")
         if not 1 <= max_output_items <= MAX_OUTPUT_ITEMS:
             return self._failure(f"max_output_items must be between 1 and {MAX_OUTPUT_ITEMS}")
+        if not 1024 <= max_output_bytes <= MAX_OUTPUT_BYTES:
+            return self._failure(f"max_output_bytes must be between 1024 and {MAX_OUTPUT_BYTES}")
+        if not 1 <= checkpoint_interval <= 1000:
+            return self._failure("checkpoint_interval must be between 1 and 1000")
+        if not 256 <= text_chunk_chars <= 1_000_000:
+            return self._failure("text_chunk_chars must be between 256 and 1000000")
+        if not 1 <= table_batch_rows <= 5000:
+            return self._failure("table_batch_rows must be between 1 and 5000")
 
         store = self._injected_state_store
         production_store = store is None
@@ -218,6 +243,7 @@ class SDKDocumentSourceNode(BaseNode):
 
             artifact_by_stream = {stream: artifact_id for artifact_id, stream, _ in configured}
             items: list[dict[str, Any]] = []
+            output_bytes = 0
             pending_states: dict[str, Mapping[str, Any]] = {}
             streams = await connector.discover()
             for stream in streams:
@@ -226,13 +252,22 @@ class SDKDocumentSourceNode(BaseNode):
                 async for message in connector.read(stream, saved_state):
                     if isinstance(message, RecordMessage):
                         if len(items) >= max_output_items:
-                            raise _OutputLimitExceeded
-                        items.append(
-                            _sanitized_envelope(
-                                message.envelope,
-                                artifact_by_stream[stream.name],
-                            )
+                            raise _OutputLimitExceeded("max_output_items")
+                        item = _sanitized_envelope(
+                            message.envelope,
+                            artifact_by_stream[stream.name],
                         )
+                        item_bytes = len(
+                            json.dumps(
+                                item,
+                                ensure_ascii=False,
+                                separators=(",", ":"),
+                            ).encode("utf-8")
+                        )
+                        if output_bytes + item_bytes > max_output_bytes:
+                            raise _OutputLimitExceeded("max_output_bytes")
+                        items.append(item)
+                        output_bytes += item_bytes
                     elif isinstance(message, StateMessage):
                         final_state = dict(message.state)
                 if final_state is None:
@@ -272,9 +307,9 @@ class SDKDocumentSourceNode(BaseNode):
                     "operations": operations,
                 },
             )
-        except _OutputLimitExceeded:
+        except _OutputLimitExceeded as exc:
             return self._failure(
-                "Document delta exceeds max_output_items; narrow the selection or raise the limit"
+                f"Document delta exceeds {exc}; narrow the selection or raise the limit"
             )
         except Exception as exc:
             return self._failure(f"Document SDK source failed: {type(exc).__name__}")
