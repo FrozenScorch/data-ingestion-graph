@@ -58,9 +58,11 @@ save-or-delete intent. The adapter buffers all state messages until every stream
 completes. The source POST_EXEC checkpoint commits its successful bounded output
 and candidates together, but committed SDK reads do not see those candidates.
 
-After every graph node reports success, the durable worker fences its live job
-lease, takes the run advisory fence and sorted affected source scopes, then locks
-the run, rejects stale base revisions, and
+During a source read, the durable worker holds only run/source advisory fences,
+allowing its job heartbeat to renew. Candidate staging briefly locks the job then
+the run. After every graph node reports success, completion takes the run advisory
+fence and sorted affected source scopes, then locks the job and run, rejects stale
+base revisions, and
 promotes all candidates in the same transaction that marks the run completed.
 Downstream failure, cancellation, lease loss, or a crash before that transaction
 leaves committed source state unchanged. Failed runs retain candidates so

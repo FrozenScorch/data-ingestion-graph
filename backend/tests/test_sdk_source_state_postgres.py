@@ -15,6 +15,7 @@ from app.services.execution_service import (
     cancel_run,
     fail_run_if_running,
 )
+from app.services.run_queue_service import heartbeat_run_job
 from app.services.sdk_source_state_service import (
     RunCompletionLeaseError,
     SDKSourceStateLeaseError,
@@ -22,6 +23,7 @@ from app.services.sdk_source_state_service import (
     StudioSDKSourceStateStore,
     _run_lock_id,
     complete_run_with_source_state_promotion,
+    revalidate_source_state_staging_lease,
 )
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -518,6 +520,95 @@ async def test_completion_lease_expiry_while_waiting_on_run_fence_fails_closed()
             run = await verification.get(Run, run_id)
             assert run is not None and run.status == "running"
             assert await verification.scalar(select(func.count(SDKSourceState.id))) == 0
+    finally:
+        await engine.dispose()
+        async with admin_engine.begin() as connection:
+            await connection.execute(text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
+        await admin_engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_long_read_fences_allow_heartbeat_then_stage_and_promote():
+    schema = f"sdk_read_heartbeat_{uuid4().hex}"
+    engine = create_async_engine(
+        TEST_DATABASE_URL,
+        connect_args={"server_settings": {"search_path": schema}},
+    )
+    admin_engine = create_async_engine(TEST_DATABASE_URL)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    owner_id, graph_id, run_id, job_id = uuid4(), uuid4(), uuid4(), uuid4()
+    worker = "worker-1"
+    original_expiry = datetime.now(UTC) + timedelta(seconds=2)
+
+    try:
+        await _create_schema(admin_engine, schema)
+        async with sessions() as seed:
+            await _seed_run(
+                seed,
+                owner_id=owner_id,
+                graph_id=graph_id,
+                run_id=run_id,
+                job_id=job_id,
+                worker=worker,
+            )
+            await seed.execute(
+                text("UPDATE run_jobs SET lease_expires_at = :expiry WHERE id = :id"),
+                {"id": job_id, "expiry": original_expiry},
+            )
+            await seed.commit()
+
+        async with sessions() as long_read:
+            store = _store(
+                long_read,
+                run_id=run_id,
+                owner_id=owner_id,
+                graph_id=graph_id,
+                job_id=job_id,
+                worker=worker,
+            )
+            await store.acquire_lock()
+
+            async with sessions() as heartbeat:
+                assert await asyncio.wait_for(
+                    heartbeat_run_job(
+                        heartbeat,
+                        job_id=job_id,
+                        worker_id=worker,
+                        lease_seconds=10,
+                    ),
+                    timeout=1,
+                )
+
+            await asyncio.sleep(
+                max(0.0, (original_expiry - datetime.now(UTC)).total_seconds() + 0.1)
+            )
+            await store.save(
+                store.pipeline_key,
+                "local_documents",
+                "upload-1",
+                {"cursor": 1},
+            )
+            await revalidate_source_state_staging_lease(
+                long_read,
+                run_id,
+                job_id=job_id,
+                lease_owner=worker,
+            )
+            await long_read.commit()
+
+        async with sessions() as completion:
+            assert await complete_run_with_source_state_promotion(
+                completion,
+                run_id,
+                job_id=job_id,
+                lease_owner=worker,
+            )
+
+        async with sessions() as verification:
+            state = await verification.scalar(select(SDKSourceState))
+            assert state is not None and state.state_data == {"cursor": 1}
+            run = await verification.get(Run, run_id)
+            assert run is not None and run.status == "completed"
     finally:
         await engine.dispose()
         async with admin_engine.begin() as connection:

@@ -11,11 +11,15 @@ immutable graph version but no job record. Completed and cancelled runs are
 never re-executed when an expired lease is reclaimed.
 
 SDK source adapters stage run-scoped state candidates at source POST_EXEC. The
-worker promotes them only after all graph nodes succeed. Job-backed staging and
-completion use one lock order: job row, deterministic run advisory lock, sorted
-source-scope advisory locks, then the forced-refresh run row. The lease is checked
-again after every wait and immediately before acknowledgement commits. Direct
-execution uses the same run advisory fence without requiring a job lease.
+worker promotes them only after all graph nodes succeed. A long connector read
+holds only the deterministic run and source-scope transaction advisory fences;
+its lease checks do not lock the job row, so heartbeats can renew concurrently.
+Candidate staging then locks the job row followed by the forced-refresh run row
+for the short POST_EXEC transaction. Completion takes the run advisory fence,
+sorted source scopes, job row, and run row. Thus every mixed database row-lock
+path remains job-then-run while advisory fences preserve a stable candidate
+snapshot. The lease is rechecked after waits and immediately before commits.
+Direct execution uses the same advisory fences without requiring a job lease.
 A downstream failure keeps candidates for same-run failed-node retry; a crash or
 lease loss cannot expose them as committed source state. Cancellation atomically
 deletes its candidates because it is terminal. Paused runs retain candidates,
