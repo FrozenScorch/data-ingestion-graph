@@ -72,6 +72,7 @@ async def run_node_with_retry(
         input_data=input_data,
         state=state,
         working_dir=working_dir or settings.temp_dir,
+        db_session=db,
     )
 
     # Build retry config from parameters

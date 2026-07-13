@@ -107,6 +107,7 @@ class DAGExecutor:
             "outputs": {},
             "connections": connections,
             "owner_id": str(owner_id),
+            "graph_id": str(run.graph_id),
         }
 
         # Execute each level
@@ -224,6 +225,7 @@ class DAGExecutor:
         return {
             "connections": scoped_connections,
             "owner_id": exec_state.get("owner_id"),
+            "graph_id": exec_state.get("graph_id"),
         }
 
     async def _execute_level_parallel(

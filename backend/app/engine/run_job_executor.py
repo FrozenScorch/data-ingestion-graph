@@ -106,6 +106,7 @@ async def _execute_failed_nodes(db: AsyncSession, run: Run, ws_manager: Any) -> 
         "outputs": restored_outputs,
         "connections": connections,
         "owner_id": str(owner_id),
+        "graph_id": str(run.graph_id),
     }
 
     run.status = RunStatus.RUNNING.value
