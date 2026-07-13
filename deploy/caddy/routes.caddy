@@ -1,0 +1,31 @@
+(studio_routes) {
+    encode zstd gzip
+
+    header {
+        -Server
+        X-Content-Type-Options nosniff
+        X-Frame-Options DENY
+        Referrer-Policy no-referrer
+        Permissions-Policy "camera=(), microphone=(), geolocation=()"
+    }
+
+    @authorized_websocket {
+        path /ws/*
+        header Origin {$STUDIO_ORIGIN}
+    }
+    handle @authorized_websocket {
+        reverse_proxy ingestion-api:8040
+    }
+    handle /ws/* {
+        respond "WebSocket origin is not allowed" 403
+    }
+    handle /api/* {
+        reverse_proxy ingestion-api:8040
+    }
+    handle /health {
+        reverse_proxy ingestion-api:8040
+    }
+    handle {
+        reverse_proxy ingestion-frontend:3000
+    }
+}

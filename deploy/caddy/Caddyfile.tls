@@ -1,0 +1,11 @@
+import routes.caddy
+
+:8080 {
+    redir https://{$STUDIO_HOSTNAME}:{$STUDIO_HTTPS_PORT:8443}{uri} permanent
+}
+
+{$STUDIO_HOSTNAME}:8443 {
+    tls internal
+    header Strict-Transport-Security "max-age=31536000"
+    import studio_routes
+}

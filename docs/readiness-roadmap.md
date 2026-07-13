@@ -1,18 +1,18 @@
 # Studio and SDK readiness roadmap
 
-Baseline: `main` after PRs #34-#36 plus this manifest change, audited 2026-07-12.
+Baseline: `main` after PRs #34-#37 plus this LAN appliance change, audited 2026-07-12.
 
 ## Executive assessment
 
-The SDK is usable today from unrelated Python projects. The Studio is a useful
-manual, local visual ingestion product, but it is not yet a safe LAN appliance or
-a continuous anything-to-anything synchronization platform.
+The SDK is usable today from unrelated Python projects. The Studio is now a useful
+single-host local/LAN visual ingestion appliance, but it is not yet a hardened
+multi-user service or a continuous anything-to-anything synchronization platform.
 
 | Outcome | Readiness | Current reality |
 | --- | ---: | --- |
 | Reusable Python SDK | 82% | Installable, typed, resumable core with constructor-free manifests, three real source families, and two local destinations |
-| Local single-user visual ingestion | 68% | Visual manual graphs, durable workers, transforms, PostgreSQL, server files, Discord preview, and query inspection |
-| Trusted-LAN Studio | 35% | Core owner isolation and durable execution exist; production networking, TLS, service auth, and recurring triggers remain |
+| Local single-user visual ingestion | 72% | Visual manual graphs, durable workers, transforms, PostgreSQL, server files, Discord preview, query inspection, and one-command deployment |
+| Trusted-LAN Studio | 52% | Private networking, generated secrets, TLS, exact origins, migrations, and durable execution exist; service auth, rate limits, backups, and recurring triggers remain |
 | Enterprise multi-user Studio | 15% | Tenant isolation, service auth, SSO, HA, backups, and observability are release gates |
 | Anywhere-to-anywhere continuous sync | 25% | The SDK protocol and durable execution are credible, but connector breadth and sync modes remain narrow |
 
@@ -91,13 +91,12 @@ and HTTP actions, but several displayed capabilities are incomplete:
 - Folder selection/watch, connector discovery/preview, schema mapping,
   run freshness, and schedule management need first-class UX.
 - Complete owner checks are required across every execution, WebSocket, DLQ, and lineage path.
-- LAN deployment needs non-default secrets, private service networks, TLS/reverse proxy,
-  secure headers/rate limits, LAN-aware CORS/origin, and working WebSocket proxying.
-- The documented plain Compose command does not start the profile-gated frontend, so
-  local/LAN bootstrap is not yet a one-command visual appliance.
+- The single-host LAN appliance now generates non-default secrets, uses private service
+  networks, offers HTTP or private-CA TLS, enforces exact HTTP/WebSocket origins, adds
+  security headers, and gates API startup on schema migration. Edge rate limits remain.
 - File access must be confined to server-owned roots; outbound HTTP needs an SSRF policy.
-- Health reporting, Alembic migrations, backup/restore, structured metrics/tracing,
-  retention, quotas, and disaster-recovery tests are incomplete.
+- Deeper dependency health, backup/restore, structured metrics/tracing, retention,
+  quotas, and disaster-recovery tests are incomplete.
 - Enterprise use additionally needs organizations/projects, scoped API keys or service
   accounts, SSO/OIDC, audit logs, RBAC/ACLs, HA workers, and shared event delivery.
 
@@ -110,8 +109,8 @@ assume connectors can use stable upstream APIs. They are planning ranges, not pr
 
 1. Done: owner authorization coverage for runs, controls, WebSockets, DLQ, and lineage.
 2. Done: browser upload, server-owned owner isolation, file picker, and documents template.
-3. Add production Compose profiles: generated secrets, private networks, reverse proxy/TLS,
-   WebSockets, LAN origins, health correctness, and migrations.
+3. Done: one-command Compose appliance with generated secrets, private networks,
+   reverse proxy/private TLS, WebSockets, exact LAN origins, health, and migration gate.
 4. Lock down outbound HTTP and add a scoped agent/service authentication path.
 
 Exit: a trusted user can safely upload documents and run graphs from another LAN device.

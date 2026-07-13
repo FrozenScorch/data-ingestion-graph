@@ -34,8 +34,8 @@ export const handle: Handle = async ({ event, resolve }) => {
 
   // Proxy WebSocket upgrade requests to backend
   if (url.pathname.startsWith('/ws/')) {
-    // WebSocket proxying requires a full TCP proxy.
-    // For now, let the client connect directly to the backend.
+    // SvelteKit cannot tunnel the upgraded connection. Production Compose routes
+    // /ws directly through Caddy before traffic can reach this private service.
     return resolve(event);
   }
 

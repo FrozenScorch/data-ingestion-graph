@@ -30,24 +30,27 @@ SDK-backed nodes are marked **SDK** in the node palette. Studio-native nodes can
 be migrated behind SDK sources, transforms, and destinations without changing
 saved graph definitions.
 
-## Start Studio
+## Start Studio locally or on a LAN
 
-Copy `.env.example` to `.env`, replace the development credentials, then run
-the stack. Docker is built from the repository root because the backend installs
-`./sdk` as a normal package dependency.
+Generate production-mode secrets for the exact hostname or IPv4 address that
+browsers will open, then start the complete visual appliance. Docker is built
+from the repository root because the backend installs `./sdk` as a normal package
+dependency.
 
 ```shell
-docker compose up --build
+python scripts/init_lan_env.py --host localhost
+docker compose up --build -d
 ```
+
+The command prints the Studio URL and one-time initial admin password. Only the
+Caddy edge port is published; PostgreSQL, Redis, the API, and the frontend stay
+on private Compose networks. Add `--tls` for Caddy's private LAN CA and follow
+the trust instructions in [docs/lan-deployment.md](docs/lan-deployment.md).
 
 Open Studio, upload private document inputs from **Files**, create a graph from a
 predefined pipeline or the blank canvas, configure saved connections, run it,
 and inspect/query its outputs. File Source nodes store opaque file IDs only;
 server paths stay owner-scoped and server-controlled.
-
-Outside development, configure independent, random values for
-`JWT_SECRET_KEY` and `CONNECTION_ENCRYPTION_KEY`. Saved connector credentials
-are encrypted at rest and scoped to the graph owner and referencing node.
 
 ## Develop Studio
 

@@ -1,0 +1,5 @@
+import routes.caddy
+
+:8080 {
+    import studio_routes
+}

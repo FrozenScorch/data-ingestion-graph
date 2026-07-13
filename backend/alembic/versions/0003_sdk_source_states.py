@@ -18,33 +18,40 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
-    op.create_table(
-        "sdk_source_states",
-        sa.Column("owner_id", postgresql.UUID(as_uuid=True), nullable=False),
-        sa.Column("graph_id", postgresql.UUID(as_uuid=True), nullable=False),
-        sa.Column("node_id", sa.String(length=255), nullable=False),
-        sa.Column("source", sa.String(length=255), nullable=False),
-        sa.Column("stream", sa.String(length=255), nullable=False),
-        sa.Column("state_data", postgresql.JSONB(astext_type=sa.Text()), nullable=False),
-        sa.Column("id", postgresql.UUID(as_uuid=True), nullable=False),
-        sa.Column(
-            "created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
-        ),
-        sa.Column(
-            "updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
-        ),
-        sa.ForeignKeyConstraint(["graph_id"], ["graphs.id"], ondelete="CASCADE"),
-        sa.ForeignKeyConstraint(["owner_id"], ["users.id"], ondelete="CASCADE"),
-        sa.PrimaryKeyConstraint("id"),
-        sa.UniqueConstraint(
-            "owner_id",
-            "graph_id",
-            "node_id",
-            "source",
-            "stream",
-            name="uq_sdk_source_state_scope",
-        ),
-    )
+    if not sa.inspect(op.get_bind()).has_table("sdk_source_states"):
+        op.create_table(
+            "sdk_source_states",
+            sa.Column("owner_id", postgresql.UUID(as_uuid=True), nullable=False),
+            sa.Column("graph_id", postgresql.UUID(as_uuid=True), nullable=False),
+            sa.Column("node_id", sa.String(length=255), nullable=False),
+            sa.Column("source", sa.String(length=255), nullable=False),
+            sa.Column("stream", sa.String(length=255), nullable=False),
+            sa.Column("state_data", postgresql.JSONB(astext_type=sa.Text()), nullable=False),
+            sa.Column("id", postgresql.UUID(as_uuid=True), nullable=False),
+            sa.Column(
+                "created_at",
+                sa.DateTime(timezone=True),
+                server_default=sa.func.now(),
+                nullable=False,
+            ),
+            sa.Column(
+                "updated_at",
+                sa.DateTime(timezone=True),
+                server_default=sa.func.now(),
+                nullable=False,
+            ),
+            sa.ForeignKeyConstraint(["graph_id"], ["graphs.id"], ondelete="CASCADE"),
+            sa.ForeignKeyConstraint(["owner_id"], ["users.id"], ondelete="CASCADE"),
+            sa.PrimaryKeyConstraint("id"),
+            sa.UniqueConstraint(
+                "owner_id",
+                "graph_id",
+                "node_id",
+                "source",
+                "stream",
+                name="uq_sdk_source_state_scope",
+            ),
+        )
 
 
 def downgrade() -> None:
