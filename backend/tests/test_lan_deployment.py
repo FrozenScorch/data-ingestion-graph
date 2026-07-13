@@ -10,8 +10,10 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
+import asyncpg
 import pytest
 from app.db import migrate as migration
+from app.db import postgres_credentials
 from app.models.base import Base
 from sqlalchemy import inspect as sqlalchemy_inspect
 from sqlalchemy import text
@@ -82,6 +84,49 @@ def test_reconfiguration_preserves_secrets_and_custom_settings(tmp_path):
         assert updated[key] == original[key]
     assert updated["RUN_WORKER_CONCURRENCY"] == "4"
     assert updated["STUDIO_ORIGIN"] == "https://new.home:9443"
+
+
+def test_reconfiguration_replaces_recognized_public_placeholders():
+    placeholders = {
+        "POSTGRES_PASSWORD": "replace-with-generated-value",
+        "REDIS_PASSWORD": "redis_secret_change_me",
+        "JWT_SECRET_KEY": "replace-with-generated-value-at-least-32-characters",
+        "CONNECTION_ENCRYPTION_KEY": "change-this-connection-encryption-key",
+        "ADMIN_PASSWORD": "admin123",
+    }
+
+    updated = build_environment(
+        "studio.home",
+        tls=False,
+        http_port=8040,
+        https_port=8443,
+        existing=placeholders,
+    )
+
+    for key, placeholder in placeholders.items():
+        assert updated[key] != placeholder
+        assert len(updated[key]) >= 32
+
+
+@pytest.mark.asyncio
+async def test_postgres_credential_transition_uses_exact_legacy_password(monkeypatch):
+    monkeypatch.setenv("POSTGRES_PASSWORD", "new-generated-password")
+    legacy_connection = AsyncMock()
+    legacy_connection.fetchval.return_value = "'new-generated-password'"
+    with patch.object(
+        postgres_credentials,
+        "_connect",
+        new_callable=AsyncMock,
+        side_effect=[asyncpg.InvalidPasswordError("invalid password"), legacy_connection],
+    ) as connect:
+        assert await postgres_credentials.ensure_current_password() is True
+
+    assert connect.await_args_list[0].args == ("new-generated-password",)
+    assert connect.await_args_list[1].args == ("ingestion_password",)
+    legacy_connection.execute.assert_awaited_once_with(
+        "ALTER ROLE ingestion PASSWORD 'new-generated-password'"
+    )
+    legacy_connection.close.assert_awaited_once()
 
 
 @pytest.mark.parametrize("host", ["https://server", "server:8040", "server/path", ""])
@@ -214,6 +259,22 @@ async def test_unversioned_legacy_postgres_schema_upgrades_to_head():
 
         async with legacy_engine.begin() as connection:
             await connection.run_sync(Base.metadata.create_all)
+            await connection.execute(text("DROP TABLE sdk_source_states"))
+            await connection.execute(text("DROP TABLE run_jobs"))
+            await connection.execute(
+                text("ALTER TABLE graph_versions DROP CONSTRAINT uq_graph_version")
+            )
+            for index_name in (
+                "ix_runs_graph_id_status",
+                "ix_run_nodes_run_id_status",
+                "ix_data_lineage_run_id",
+                "ix_data_lineage_source_target",
+                "ix_dead_letter_queue_run_id_resolved",
+                "ix_execution_logs_run_id_level",
+                "ix_graphs_owner_id_status",
+                "ix_run_costs_run_id",
+            ):
+                await connection.execute(text(f'DROP INDEX "{index_name}"'))
         await legacy_engine.dispose()
 
         environment = {**os.environ, "DATABASE_URL": database_url}
@@ -271,7 +332,9 @@ def test_repository_compose_contract_has_private_data_plane_and_edge_proxy():
     assert "service_completed_successfully" in compose
     assert "internal: true" in compose
     assert "caddy:2.11.4-alpine" in compose
-    assert "./data/uploads:/app/data/uploads" in compose
+    assert "./data/uploads:/legacy/uploads:ro" in compose
+    assert "ingestion_uploads:/app/data/uploads" in compose
+    assert "app.db.postgres_credentials" in compose
     assert "header Origin {$STUDIO_ORIGIN}" in routes
     assert "reverse_proxy ingestion-api:8040" in routes
     assert "reverse_proxy ingestion-frontend:3000" in routes
@@ -284,8 +347,14 @@ def test_repository_compose_contract_has_private_data_plane_and_edge_proxy():
 def test_rendered_compose_verifier_accepts_logical_network_keys():
     services = {
         "ingestion-postgres": {},
+        "ingestion-postgres-credentials": {},
         "ingestion-redis": {},
-        "ingestion-migrate": {},
+        "ingestion-storage-init": {},
+        "ingestion-migrate": {
+            "depends_on": {
+                "ingestion-postgres-credentials": {"condition": "service_completed_successfully"}
+            }
+        },
         "ingestion-api": {
             "environment": {
                 "APP_ENV": "production",
@@ -293,7 +362,10 @@ def test_rendered_compose_verifier_accepts_logical_network_keys():
                 "DATABASE_URL": "postgresql://user:secret@ingestion-postgres:5432/db",
                 "REDIS_URL": "redis://:secret@ingestion-redis:6379/0",
             },
-            "depends_on": {"ingestion-migrate": {"condition": "service_completed_successfully"}},
+            "depends_on": {
+                "ingestion-migrate": {"condition": "service_completed_successfully"},
+                "ingestion-storage-init": {"condition": "service_completed_successfully"},
+            },
         },
         "ingestion-frontend": {"environment": {"API_HOST": "http://ingestion-api:8040"}},
         "ingestion-proxy": {"ports": [{"target": 8080, "published": "8040"}]},

@@ -51,16 +51,21 @@ is materialized to the current model and stamped at the Alembic head. An existin
 unversioned Studio database is based before migration `0001` and runs the ordered,
 legacy-safe migrations; versioned databases run ordinary `alembic upgrade head`.
 Failure stops API startup instead of serving traffic against a partial schema.
+Before schema migration, `ingestion-postgres-credentials` verifies the generated
+database password and, only for an exact older Compose installation, transitions the
+legacy `ingestion_password` role to that generated secret on the private data network.
 
 The Compose file intentionally has no fixed project name, so an existing clone keeps
 its directory-derived PostgreSQL and Redis volume identity across this upgrade.
-Managed uploads and temporary files remain in `./data/uploads` and `./data/temp` for
-compatibility with earlier Studio releases; Caddy authority state uses named volumes.
+On first start, `ingestion-storage-init` copies earlier `./data/uploads` and
+`./data/temp` bind data into writable named volumes without overwriting existing volume
+files. PostgreSQL, Redis, managed uploads, temporary files, and Caddy authority state
+then persist in project-scoped named volumes.
 Run `docker compose down` before changing the checkout directory or Compose project
-name. Normal `docker compose down` preserves data. Do not use `down -v` unless named
-volume deletion is intended, and do not delete `./data/uploads`. Back up PostgreSQL
-and `./data/uploads` before upgrades; automated backup/restore and disaster-recovery
-validation remain enterprise gaps.
+name. Normal `docker compose down` preserves data. Do not use `down -v` unless permanent
+volume deletion is intended. Keep the legacy `./data/uploads` directory until its
+contents have been verified in Studio. Back up PostgreSQL and uploads before upgrades;
+automated backup/restore and disaster-recovery validation remain enterprise gaps.
 
 ## Operational boundary
 

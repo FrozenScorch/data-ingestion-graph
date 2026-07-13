@@ -66,6 +66,43 @@ services:
       start_period: 10s
     networks: [data]
 
+  ingestion-postgres-credentials:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    restart: "no"
+    command: ["python", "-m", "app.db.postgres_credentials"]
+    environment:
+      POSTGRES_HOST: ingestion-postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: ingestion
+      POSTGRES_DB: ingestion_db
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?run scripts/init_lan_env.py first}
+      LEGACY_POSTGRES_PASSWORD: ingestion_password
+    depends_on:
+      ingestion-postgres:
+        condition: service_healthy
+    networks: [data]
+
+  ingestion-storage-init:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    user: "0:0"
+    restart: "no"
+    command:
+      - sh
+      - -ec
+      - |
+        cp -a -n /legacy/uploads/. /app/data/uploads/ 2>/dev/null || true
+        cp -a -n /legacy/temp/. /app/data/temp/ 2>/dev/null || true
+        chown -R appuser:appuser /app/data/uploads /app/data/temp
+    volumes:
+      - ./data/uploads:/legacy/uploads:ro
+      - ./data/temp:/legacy/temp:ro
+      - ingestion_uploads:/app/data/uploads
+      - ingestion_temp:/app/data/temp
+
   ingestion-migrate:
     build:
       context: .
@@ -76,6 +113,8 @@ services:
     depends_on:
       ingestion-postgres:
         condition: service_healthy
+      ingestion-postgres-credentials:
+        condition: service_completed_successfully
     networks: [data]
 
   ingestion-api:
@@ -85,8 +124,8 @@ services:
     restart: unless-stopped
     environment: *api-environment
     volumes:
-      - ./data/uploads:/app/data/uploads
-      - ./data/temp:/app/data/temp
+      - ingestion_uploads:/app/data/uploads
+      - ingestion_temp:/app/data/temp
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import httpx; r = httpx.get('http://localhost:8040/health'); r.raise_for_status()\""]
       interval: 30s
@@ -95,6 +134,8 @@ services:
       start_period: 40s
     depends_on:
       ingestion-migrate:
+        condition: service_completed_successfully
+      ingestion-storage-init:
         condition: service_completed_successfully
       ingestion-redis:
         condition: service_healthy
@@ -152,5 +193,7 @@ networks:
 volumes:
   ingestion_postgres_data: {}
   ingestion_redis_data: {}
+  ingestion_uploads: {}
+  ingestion_temp: {}
   ingestion_caddy_data: {}
   ingestion_caddy_config: {}

@@ -10,6 +10,19 @@ from contextlib import suppress
 from pathlib import Path
 
 _HOST_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$")
+_INSECURE_SECRET_VALUES = {
+    "POSTGRES_PASSWORD": {"ingestion_password", "replace-with-generated-value"},
+    "REDIS_PASSWORD": {"redis_secret_change_me", "replace-with-generated-value"},
+    "JWT_SECRET_KEY": {
+        "change-this-secret-in-production",
+        "replace-with-generated-value-at-least-32-characters",
+    },
+    "CONNECTION_ENCRYPTION_KEY": {
+        "change-this-connection-encryption-key",
+        "replace-with-generated-value-at-least-32-characters",
+    },
+    "ADMIN_PASSWORD": {"admin123", "replace-with-generated-value"},
+}
 
 
 def validate_host(value: str) -> str:
@@ -47,7 +60,7 @@ def build_environment(
         ("CONNECTION_ENCRYPTION_KEY", 48),
         ("ADMIN_PASSWORD", 24),
     ):
-        if not values.get(key):
+        if not values.get(key) or values[key] in _INSECURE_SECRET_VALUES[key]:
             values[key] = secrets.token_urlsafe(byte_count)
     defaults = {
         "ADMIN_USERNAME": "admin",

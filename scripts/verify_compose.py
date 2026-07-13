@@ -13,7 +13,9 @@ def verify(config: dict[str, Any]) -> list[str]:
     services = config.get("services", {})
     expected = {
         "ingestion-postgres",
+        "ingestion-postgres-credentials",
         "ingestion-redis",
+        "ingestion-storage-init",
         "ingestion-migrate",
         "ingestion-api",
         "ingestion-frontend",
@@ -31,11 +33,7 @@ def verify(config: dict[str, Any]) -> list[str]:
 
     networks = config.get("networks", {})
     data_network = networks.get("data") or next(
-        (
-            value
-            for value in networks.values()
-            if value.get("name", "").endswith("_data")
-        ),
+        (value for value in networks.values() if value.get("name", "").endswith("_data")),
         None,
     )
     if not data_network or data_network.get("internal") is not True:
@@ -55,6 +53,16 @@ def verify(config: dict[str, Any]) -> list[str]:
     migrate_dependency = api.get("depends_on", {}).get("ingestion-migrate", {})
     if migrate_dependency.get("condition") != "service_completed_successfully":
         errors.append("API startup must be gated on successful schema migration")
+    storage_dependency = api.get("depends_on", {}).get("ingestion-storage-init", {})
+    if storage_dependency.get("condition") != "service_completed_successfully":
+        errors.append("API startup must be gated on successful storage initialization")
+
+    migration = services["ingestion-migrate"]
+    credential_dependency = migration.get("depends_on", {}).get(
+        "ingestion-postgres-credentials", {}
+    )
+    if credential_dependency.get("condition") != "service_completed_successfully":
+        errors.append("schema migration must follow PostgreSQL credential transition")
 
     frontend = services["ingestion-frontend"]
     if frontend.get("profiles"):
