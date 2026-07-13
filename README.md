@@ -67,4 +67,6 @@ SDK development and publishing instructions live in [sdk/README.md](sdk/README.m
 The boundaries are detailed in [docs/architecture.md](docs/architecture.md) and
 [docs/ingest-and-query.md](docs/ingest-and-query.md). Current product readiness,
 gaps, and the path to local/LAN synchronization are tracked in
-[docs/readiness-roadmap.md](docs/readiness-roadmap.md).
+[docs/readiness-roadmap.md](docs/readiness-roadmap.md). Studio's leased worker,
+recovery behavior, and connector idempotency requirements are documented in
+[docs/durable-execution.md](docs/durable-execution.md).

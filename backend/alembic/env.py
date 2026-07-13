@@ -1,22 +1,33 @@
 """
 Alembic environment configuration for async migrations.
 """
+
 import asyncio
 from logging.config import fileConfig
 
 from alembic import context
-from sqlalchemy import pool
-from sqlalchemy.ext.asyncio import async_engine_from_config
-
 from app.config import settings
-from app.models.base import Base
 
 # Import all models so they are registered with Base.metadata
 from app.models import (  # noqa: F401
-    User, ApiKey, Graph, GraphVersion, Connection,
-    Run, RunNode, Checkpoint, ExecutionLog, RunCost,
-    DataLineage, Provenance, DeadLetterQueue,
+    ApiKey,
+    Checkpoint,
+    Connection,
+    DataLineage,
+    DeadLetterQueue,
+    ExecutionLog,
+    Graph,
+    GraphVersion,
+    Provenance,
+    Run,
+    RunCost,
+    RunJob,
+    RunNode,
+    User,
 )
+from app.models.base import Base
+from sqlalchemy import pool
+from sqlalchemy.ext.asyncio import async_engine_from_config
 
 # Alembic Config object
 config = context.config

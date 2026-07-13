@@ -8,14 +8,13 @@ import sys
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
 
+from app.api.router import api_router
+from app.config import settings
+from app.db.redis import close_redis, init_redis
+from app.db.session import init_db
+from app.services.auth_service import seed_admin_user
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-
-from app.config import settings
-from app.api.router import api_router
-from app.db.session import init_db
-from app.db.redis import init_redis, close_redis
-from app.services.auth_service import seed_admin_user
 
 # Configure logging
 logging.basicConfig(
@@ -109,8 +108,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         from app.nodes.registry import discover_nodes
 
         discover_nodes()
-        from app.nodes.registry import get_all_nodes
         from app.graph_templates import validate_templates
+        from app.nodes.registry import get_all_nodes
 
         node_count = len(get_all_nodes())
         validate_templates()
@@ -119,14 +118,24 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         logger.exception("Failed to load node registry or graph templates")
         raise RuntimeError("Studio node registry failed validation") from e
 
+    run_worker = None
+    if settings.run_worker_enabled:
+        from app.engine.run_worker import DurableRunWorker
+
+        run_worker = DurableRunWorker()
+        await run_worker.start()
+        _component_health["run_worker"] = "ok"
+
     logger.info(f"Enterprise Data Ingestion Graph Studio ready on port {settings.app_port}")
 
-    yield  # Application is running
-
-    # Shutdown
-    logger.info("Shutting down Enterprise Data Ingestion Graph Studio...")
-    await close_redis()
-    logger.info("Shutdown complete")
+    try:
+        yield  # Application is running
+    finally:
+        logger.info("Shutting down Enterprise Data Ingestion Graph Studio...")
+        if run_worker is not None:
+            await run_worker.stop()
+        await close_redis()
+        logger.info("Shutdown complete")
 
 
 # Create FastAPI application
@@ -153,8 +162,8 @@ app.add_middleware(
 app.include_router(api_router)
 
 # WebSocket endpoint for execution progress
-from fastapi import WebSocket
 from app.ws.execution_ws import ws_manager
+from fastapi import WebSocket
 
 
 @app.websocket("/ws/executions/{run_id}")
