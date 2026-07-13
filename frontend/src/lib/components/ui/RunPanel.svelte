@@ -47,6 +47,7 @@
       case 'running': return 'text-indigo-400';
       case 'failed': return 'text-red-400';
       case 'cancelled': return 'text-gray-400';
+      case 'superseded': return 'text-gray-500';
       default: return 'text-gray-500';
     }
   }

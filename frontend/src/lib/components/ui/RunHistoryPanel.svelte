@@ -13,6 +13,7 @@
       case 'running': return 'text-indigo-400 bg-indigo-500/10 border-indigo-500/20';
       case 'failed': return 'text-red-400 bg-red-500/10 border-red-500/20';
       case 'cancelled': return 'text-gray-400 bg-gray-500/10 border-gray-500/20';
+      case 'superseded': return 'text-gray-500 bg-gray-500/10 border-gray-500/20';
       default: return 'text-yellow-400 bg-yellow-500/10 border-yellow-500/20';
     }
   }
