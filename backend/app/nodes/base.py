@@ -94,6 +94,11 @@ class BaseNode(ABC):
         return None
 
     @property
+    def connector_manifest(self) -> dict[str, Any] | None:
+        """Constructor-free SDK connector metadata used to build this node."""
+        return None
+
+    @property
     @abstractmethod
     def node_type(self) -> str:
         """Unique node type identifier (e.g., 'file_source', 'embedder')."""
@@ -171,6 +176,7 @@ class BaseNode(ABC):
             "description": self.description,
             "implementation": self.implementation,
             "sdk_component": self.sdk_component,
+            "connector_manifest": self.connector_manifest,
             "inputs": [
                 {
                     "name": p.name,

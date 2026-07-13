@@ -19,7 +19,9 @@ from app.graph_validation import (
 )
 from app.nodes.discord_source import DiscordSourceNode
 from app.nodes.registry import discover_nodes
+from app.nodes.sdk_manifest import ManifestFieldProjection, project_manifest_config_schema
 from app.nodes.sdk_query_store import SDKQueryStoreNode
+from ingestion_graph.sources import DiscordSource
 
 
 def test_sdk_adapter_metadata_is_visible_to_studio():
@@ -28,8 +30,59 @@ def test_sdk_adapter_metadata_is_visible_to_studio():
 
     assert discord["implementation"] == "sdk-adapter"
     assert discord["sdk_component"] == "ingestion_graph.sources.DiscordSource"
+    assert discord["connector_manifest"] == {
+        "name": "discord",
+        "version": "1.0.0",
+        "capabilities": {
+            "incremental": True,
+            "resumable_full_refresh": True,
+            "deletes": False,
+            "schema_discovery": True,
+            "rate_limits": True,
+        },
+    }
     assert query["implementation"] == "sdk-adapter"
     assert query["sdk_component"] == "ingestion_graph.destinations.SQLiteCollection"
+
+
+def test_discord_studio_schema_is_strictly_projected_from_sdk_manifest():
+    sdk_schema = DiscordSource.manifest().config_schema
+    studio_schema = DiscordSourceNode().config_schema
+
+    assert studio_schema["properties"]["channel_id"] == {
+        **sdk_schema["properties"]["channel_ids"]["items"],
+        "description": "Discord channel ID to preview",
+    }
+    assert studio_schema["required"] == ["channel_id", "connection_id"]
+    assert "token" not in studio_schema["properties"]
+
+
+def test_manifest_projection_fails_when_sdk_fields_are_not_accounted_for():
+    manifest = DiscordSource.manifest()
+    drifted_schema = dict(manifest.config_schema)
+    drifted_schema["properties"] = {
+        **manifest.config_schema["properties"],
+        "new_sdk_field": {"type": "string"},
+    }
+    drifted = type(manifest)(
+        name=manifest.name,
+        version=manifest.version,
+        config_schema=drifted_schema,
+        capabilities=manifest.capabilities,
+    )
+
+    with pytest.raises(ValueError, match="new_sdk_field"):
+        project_manifest_config_schema(
+            drifted,
+            fields=(
+                ManifestFieldProjection(
+                    source_field="channel_ids",
+                    target_field="channel_id",
+                    source_path=("items",),
+                ),
+            ),
+            omitted={"token": "saved connection"},
+        )
 
 
 def test_templates_materialize_live_nodes_configs_and_dual_edge_ports():

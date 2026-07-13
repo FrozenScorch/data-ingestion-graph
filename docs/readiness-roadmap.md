@@ -1,6 +1,7 @@
 # Studio and SDK readiness roadmap
 
-Baseline: document-source branch after PR #33, audited 2026-07-12.
+Baseline: `main` after PRs #34-#35, audited 2026-07-12. PR #36 is intentionally
+excluded until merged.
 
 ## Executive assessment
 
@@ -10,11 +11,11 @@ a continuous anything-to-anything synchronization platform.
 
 | Outcome | Readiness | Current reality |
 | --- | ---: | --- |
-| Reusable Python SDK | 78% | Installable, typed, resumable core with Discord, JSONL, and local document sources plus JSONL/SQLite destinations |
-| Local single-user visual ingestion | 60% | Manual batch graphs, transforms, PostgreSQL, server files, Discord preview, query inspection |
-| Trusted-LAN Studio | 25–30% | Experimental deployment only; upload, networking, auth coverage, and worker durability are incomplete |
-| Enterprise multi-user Studio | 10–15% | Tenant isolation, service auth, SSO, durable workers, HA, backups, and observability are release gates |
-| Anywhere-to-anywhere continuous sync | 15–20% | The SDK protocol is credible, but connector breadth and sync modes are narrow |
+| Reusable Python SDK | 82% | Installable, typed, resumable core with constructor-free manifests, three real source families, and two local destinations |
+| Local single-user visual ingestion | 68% | Visual manual graphs, durable workers, transforms, PostgreSQL, server files, Discord preview, and query inspection |
+| Trusted-LAN Studio | 35% | Core owner isolation and durable execution exist; production networking, TLS, service auth, and recurring triggers remain |
+| Enterprise multi-user Studio | 15% | Tenant isolation, service auth, SSO, HA, backups, and observability are release gates |
+| Anywhere-to-anywhere continuous sync | 25% | The SDK protocol and durable execution are credible, but connector breadth and sync modes remain narrow |
 
 These percentages measure delivered capability, not code volume.
 
@@ -56,7 +57,9 @@ and HTTP actions, but several displayed capabilities are incomplete:
   SQL Server/MySQL/Oracle/MongoDB, queues, generic paginated REST, or database CDC.
 - GitHub Source is a stub; Webhook Source has no receiver route.
 - The generic HTTP node does not yet stream upstream records as a destination.
-- SDK plugins do not automatically become typed Studio nodes or Connection Center forms.
+- Constructor-free SDK manifests and strict Studio schema projections are implemented
+  for built-ins, with Discord as the first manifest-backed node. Generic executable
+  node generation and Connection Center form projection remain.
 - Destination delete propagation, reconciliation, schema drift, and source-key upserts are inconsistent.
 
 ### SDK release engineering
@@ -72,11 +75,12 @@ and HTTP actions, but several displayed capabilities are incomplete:
 
 ### Sync semantics
 
-- Studio runs are manual, stateless batch/preview jobs. SDK source state is not persisted
-  per graph/node across Studio runs.
+- Studio runs are manual batch/preview jobs. SDK source state is not yet persisted
+  per graph/node across Studio runs on `main`.
 - `schedule` and `webhook` are labels, not implemented trigger services.
-- Work executes inside FastAPI background tasks, without a durable queue, leases,
-  heartbeat, restart recovery, or per-stream concurrency control.
+- Durable PostgreSQL jobs, leases, heartbeat, and expired-job recovery are implemented.
+  The worker still runs inside the API deployment and lacks an independently scaled
+  worker profile and per-stream concurrency policy.
 - Missing modes: scheduled polling, snapshot-to-incremental handoff, CDC, streaming,
   bidirectional conflict resolution, partitioned backfill, and reconciliation.
 
@@ -87,6 +91,8 @@ and HTTP actions, but several displayed capabilities are incomplete:
 - Complete owner checks are required across every execution, WebSocket, DLQ, and lineage path.
 - LAN deployment needs non-default secrets, private service networks, TLS/reverse proxy,
   secure headers/rate limits, LAN-aware CORS/origin, and working WebSocket proxying.
+- The documented plain Compose command does not start the profile-gated frontend, so
+  local/LAN bootstrap is not yet a one-command visual appliance.
 - File access must be confined to server-owned roots; outbound HTTP needs an SSRF policy.
 - Health reporting, Alembic migrations, backup/restore, structured metrics/tracing,
   retention, quotas, and disaster-recovery tests are incomplete.
@@ -100,7 +106,7 @@ assume connectors can use stable upstream APIs. They are planning ranges, not pr
 
 ### Milestone 0 — safe local/LAN foundation (1–3 weeks)
 
-1. Fix authorization coverage for runs, controls, WebSockets, DLQ, and lineage.
+1. Done: owner authorization coverage for runs, controls, WebSockets, DLQ, and lineage.
 2. Done: browser upload, server-owned owner isolation, file picker, and documents template.
 3. Add production Compose profiles: generated secrets, private networks, reverse proxy/TLS,
    WebSockets, LAN origins, health correctness, and migrations.
@@ -111,7 +117,8 @@ Exit: a trusted user can safely upload documents and run graphs from another LAN
 ### Milestone 1 — real recurring sync (3–6 additional weeks)
 
 1. Execute SDK `Pipeline` adapters with per-graph/per-node durable source state.
-2. Add durable queued workers, run leases, heartbeat/recovery, and concurrency policies.
+2. Done: durable queued workers, run leases, heartbeat, and expired-job recovery;
+   independently scaled workers and concurrency policies remain.
 3. Implement cron/interval schedules and authenticated webhook triggers with UI.
 4. Add freshness, cursor, lag, and reconciliation status to each stream.
 
@@ -119,7 +126,7 @@ Exit: PostgreSQL/files/Discord can run repeatedly without rereading everything o
 
 ### Milestone 2 — connector platform (6–12 additional weeks)
 
-1. Generate Studio nodes and connection forms from SDK connector manifests.
+1. Extend manifest-backed Studio node and connection-form generation to every connector.
 2. Add connector conformance tests for discovery, pagination, resume, rate limits,
    duplicates, deletes, schema changes, and secret leakage.
 3. Ship high-value packs: filesystem/object storage, email/productivity,

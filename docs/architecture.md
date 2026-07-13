@@ -16,6 +16,12 @@ Studio nodes declare whether they are `studio` implementations or thin
 SDK components. Remaining native parsing and database nodes can migrate without
 changing the Studio graph format.
 
+Manifest-aware SDK sources expose constructor-free `ConnectorSpec` metadata.
+Studio projects those schemas into control-plane-safe fields, explicitly replacing
+raw secrets and local paths with saved connections and managed artifacts. Registry
+startup fails if an SDK field is neither projected nor intentionally omitted, so
+connector upgrades cannot silently drift away from the visual node contract.
+
 The Connection Center is the sole UI for connector credentials. The backend
 publishes typed connection forms, encrypts secrets at rest, and node schemas bind
 to saved connections through `connection-ref` fields. Legacy graphs are migrated
