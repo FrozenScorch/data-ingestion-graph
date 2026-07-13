@@ -94,6 +94,7 @@ class Settings(BaseSettings):
     egress_allowed_hosts: str = ""
     egress_allowed_cidrs: str = ""
     egress_max_redirects: int = Field(default=3, ge=0, le=5)
+    egress_max_response_bytes: int = Field(default=10 * 1024 * 1024, ge=1024, le=100 * 1024 * 1024)
 
     @model_validator(mode="after")
     def validate_worker_lease(self) -> "Settings":

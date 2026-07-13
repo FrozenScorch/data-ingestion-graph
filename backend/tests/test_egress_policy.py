@@ -2,12 +2,17 @@ from __future__ import annotations
 
 import asyncio
 import ipaddress
+import json
 import logging
+import socket
+import threading
+import time
 from collections import deque
 from collections.abc import Mapping, Sequence
 from typing import Any
 from unittest.mock import MagicMock, patch
 
+import app.nodes.http_request as http_request_module
 import httpcore
 import httpx
 import pytest
@@ -47,6 +52,7 @@ class FakeResponse:
         self.headers = dict(headers or {})
         self._payload = {} if payload is None else payload
         self.text = text
+        self.content = text.encode() if text else json.dumps(self._payload).encode()
 
     def json(self) -> Any:
         return self._payload
@@ -111,6 +117,7 @@ def test_settings_parse_exact_host_and_cidr_allowlists() -> None:
     assert configured.egress_allowed_hosts_list == ["db.lan", "nas.lan"]
     assert configured.egress_allowed_cidrs_list == ["10.0.0.0/24", "fd00::/64"]
     assert configured.egress_max_redirects == 2
+    assert configured.egress_max_response_bytes == 10 * 1024 * 1024
 
 
 @pytest.mark.asyncio
@@ -337,6 +344,40 @@ async def test_resolution_timeout_is_bounded_and_cancels_resolver() -> None:
 
 
 @pytest.mark.asyncio
+async def test_native_dns_timeouts_are_isolated_and_capacity_limited() -> None:
+    release = threading.Event()
+
+    def slow_getaddrinfo(*_args: Any, **_kwargs: Any) -> Any:
+        release.wait(timeout=2)
+        return [
+            (
+                socket.AF_INET,
+                socket.SOCK_STREAM,
+                socket.IPPROTO_TCP,
+                "",
+                ("93.184.216.34", 443),
+            )
+        ]
+
+    policy = EgressPolicy(resolution_timeout=0.02)
+    try:
+        with patch("socket.getaddrinfo", side_effect=slow_getaddrinfo):
+            results = await asyncio.gather(
+                *(policy.validate_url(f"https://slow-{index}.example/") for index in range(4)),
+                return_exceptions=True,
+            )
+            assert all(
+                isinstance(result, EgressPolicyError) and "timed out" in str(result)
+                for result in results
+            )
+            with pytest.raises(EgressPolicyError, match="capacity is exhausted"):
+                await policy.validate_url("https://one-too-many.example/")
+    finally:
+        release.set()
+        await asyncio.sleep(0.05)
+
+
+@pytest.mark.asyncio
 async def test_pinned_backend_shares_connect_deadline_across_addresses(monkeypatch) -> None:
     class Backend:
         def __init__(self) -> None:
@@ -383,6 +424,56 @@ async def test_http_node_timeout_bounds_dns_and_entire_request_lifecycle() -> No
     assert "timed out" in (result.error_message or "")
     assert elapsed < 1.5
     assert factory.targets == []
+
+
+@pytest.mark.asyncio
+async def test_timed_out_response_parsers_are_capacity_limited() -> None:
+    release = threading.Event()
+
+    def blocked_decode(_content: bytes, _content_type: str) -> Any:
+        release.wait(timeout=2)
+        return {"ok": True}
+
+    try:
+        with patch("app.nodes.http_request._decode_response_body", side_effect=blocked_decode):
+            results = await asyncio.gather(
+                *(
+                    asyncio.wait_for(
+                        http_request_module._parse_response_body(b"{}", "application/json"),
+                        timeout=0.02,
+                    )
+                    for _index in range(2)
+                ),
+                return_exceptions=True,
+            )
+            assert all(isinstance(result, TimeoutError) for result in results)
+            with pytest.raises(EgressPolicyError, match="parsing capacity is exhausted"):
+                await http_request_module._parse_response_body(b"{}", "application/json")
+    finally:
+        release.set()
+        await asyncio.sleep(0.05)
+
+
+@pytest.mark.asyncio
+async def test_http_node_timeout_preempts_bounded_response_parsing() -> None:
+    policy = EgressPolicy()
+    factory = ClientFactory(
+        [FakeResponse(200, payload={"ok": True}, headers={"content-type": "application/json"})]
+    )
+    node = HttpRequestNode(egress_policy=policy, client_factory=factory)
+
+    def slow_decode(_content: bytes, _content_type: str) -> Any:
+        time.sleep(1.2)
+        return {"ok": True}
+
+    started = asyncio.get_running_loop().time()
+    with patch("app.nodes.http_request._decode_response_body", side_effect=slow_decode):
+        result = await node.execute(context("https://93.184.216.34/", timeout=1))
+    elapsed = asyncio.get_running_loop().time() - started
+
+    assert result.success is False
+    assert "timed out" in (result.error_message or "")
+    assert elapsed < 1.15
 
 
 @pytest.mark.asyncio
@@ -526,10 +617,27 @@ async def test_pinned_response_stream_maps_httpcore_timeout_to_httpx() -> None:
             return None
 
     request = httpx.Request("GET", "https://redacted.invalid/")
-    stream = _PinnedResponseStream(TimeoutStream(), request)
+    stream = _PinnedResponseStream(TimeoutStream(), request, max_bytes=1024)
 
     with pytest.raises(httpx.TimeoutException):
         await anext(stream.__aiter__())
+
+
+@pytest.mark.asyncio
+async def test_pinned_response_stream_enforces_size_limit_while_reading() -> None:
+    class ChunkStream:
+        async def __aiter__(self):
+            yield b"1234"
+            yield b"5678"
+
+        async def aclose(self) -> None:
+            return None
+
+    request = httpx.Request("GET", "https://redacted.invalid/")
+    stream = _PinnedResponseStream(ChunkStream(), request, max_bytes=6)
+
+    with pytest.raises(httpx.RequestError, match="size limit"):
+        _chunks = [chunk async for chunk in stream]
 
 
 @pytest.mark.asyncio

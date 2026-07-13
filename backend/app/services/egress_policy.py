@@ -9,7 +9,9 @@ import math
 import re
 import socket
 import ssl
+import threading
 from collections.abc import Awaitable, Callable, Iterable, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any, Literal, TypeAlias
 from urllib.parse import SplitResult, urlsplit, urlunsplit
@@ -50,6 +52,9 @@ _METADATA_ADDRESSES = frozenset(
         ipaddress.ip_address("fd20:ce::254"),
     }
 )
+_DNS_WORKERS = 4
+_DNS_EXECUTOR = ThreadPoolExecutor(max_workers=_DNS_WORKERS, thread_name_prefix="egress-dns")
+_DNS_CAPACITY = threading.BoundedSemaphore(_DNS_WORKERS)
 
 
 class EgressPolicyError(ValueError):
@@ -151,6 +156,8 @@ class EgressPolicy:
                 )
             except TimeoutError:
                 raise EgressPolicyError("Outbound hostname resolution timed out") from None
+            except EgressPolicyError:
+                raise
             except Exception:
                 raise EgressPolicyError("Outbound hostname resolution failed") from None
             if not answers:
@@ -185,16 +192,25 @@ class EgressPolicy:
 
 
 async def resolve_all_addresses(host: str, port: int) -> Sequence[str]:
-    """Resolve every TCP A/AAAA answer without opening a socket."""
+    """Resolve every address in an isolated, capacity-limited native resolver pool."""
     loop = asyncio.get_running_loop()
+    if not _DNS_CAPACITY.acquire(blocking=False):
+        raise EgressPolicyError("Outbound hostname resolution capacity is exhausted")
     try:
-        answers = await loop.getaddrinfo(
+        future = _DNS_EXECUTOR.submit(
+            socket.getaddrinfo,
             host,
             port,
-            family=socket.AF_UNSPEC,
-            type=socket.SOCK_STREAM,
-            proto=socket.IPPROTO_TCP,
+            socket.AF_UNSPEC,
+            socket.SOCK_STREAM,
+            socket.IPPROTO_TCP,
         )
+    except Exception:
+        _DNS_CAPACITY.release()
+        raise EgressPolicyError("Outbound hostname resolution failed") from None
+    future.add_done_callback(lambda _finished: _DNS_CAPACITY.release())
+    try:
+        answers = await asyncio.shield(asyncio.wrap_future(future, loop=loop))
     except OSError:
         raise EgressPolicyError("Outbound hostname resolution failed") from None
     return tuple(str(answer[4][0]) for answer in answers)
@@ -359,7 +375,7 @@ class _PinnedNetworkBackend(httpcore.AsyncNetworkBackend):
             except httpcore.TimeoutException:
                 timed_out = True
                 continue
-            except httpcore.HTTPError:
+            except (httpcore.NetworkError, httpcore.ProtocolError):
                 continue
         if timed_out:
             raise httpcore.ConnectTimeout("Pinned outbound connection timed out") from None
@@ -379,19 +395,27 @@ class _PinnedNetworkBackend(httpcore.AsyncNetworkBackend):
 
 
 class _PinnedResponseStream(httpx.AsyncByteStream):
-    def __init__(self, stream: Any, request: httpx.Request) -> None:
+    def __init__(self, stream: Any, request: httpx.Request, max_bytes: int) -> None:
         self._stream = stream
         self._request = request
+        self._max_bytes = max_bytes
 
     async def __aiter__(self):
+        received = 0
         try:
             async for chunk in self._stream:
+                received += len(chunk)
+                if received > self._max_bytes:
+                    raise httpx.RequestError(
+                        "Pinned outbound response exceeded the size limit",
+                        request=self._request,
+                    )
                 yield chunk
         except httpcore.TimeoutException:
             raise httpx.TimeoutException(
                 "Pinned outbound response timed out", request=self._request
             ) from None
-        except httpcore.HTTPError:
+        except (httpcore.NetworkError, httpcore.ProtocolError):
             raise httpx.RequestError(
                 "Pinned outbound response failed", request=self._request
             ) from None
@@ -403,7 +427,8 @@ class _PinnedResponseStream(httpx.AsyncByteStream):
 class PinnedAsyncHTTPTransport(httpx.AsyncBaseTransport):
     """HTTPX transport that preserves TLS SNI while pinning the TCP address."""
 
-    def __init__(self, target: ValidatedTarget) -> None:
+    def __init__(self, target: ValidatedTarget, *, max_response_bytes: int) -> None:
+        self._max_response_bytes = max_response_bytes
         self._pool = httpcore.AsyncConnectionPool(
             ssl_context=ssl.create_default_context(),
             network_backend=_PinnedNetworkBackend(target),
@@ -432,12 +457,14 @@ class PinnedAsyncHTTPTransport(httpx.AsyncBaseTransport):
             raise httpx.TimeoutException(
                 "Pinned outbound request timed out", request=request
             ) from None
-        except httpcore.HTTPError:
+        except (httpcore.NetworkError, httpcore.ProtocolError):
             raise httpx.RequestError("Pinned outbound request failed", request=request) from None
         return httpx.Response(
             status_code=response.status,
             headers=response.headers,
-            stream=_PinnedResponseStream(response.stream, request),
+            stream=_PinnedResponseStream(
+                response.stream, request, max_bytes=self._max_response_bytes
+            ),
             extensions=response.extensions,
         )
 
@@ -448,7 +475,9 @@ class PinnedAsyncHTTPTransport(httpx.AsyncBaseTransport):
 def create_pinned_http_client(target: ValidatedTarget, timeout: float) -> httpx.AsyncClient:
     """Create a no-proxy, no-redirect HTTP client pinned to one policy decision."""
     return httpx.AsyncClient(
-        transport=PinnedAsyncHTTPTransport(target),
+        transport=PinnedAsyncHTTPTransport(
+            target, max_response_bytes=settings.egress_max_response_bytes
+        ),
         timeout=timeout,
         follow_redirects=False,
         trust_env=False,

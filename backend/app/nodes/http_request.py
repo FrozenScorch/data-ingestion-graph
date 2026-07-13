@@ -5,7 +5,9 @@ HttpRequest node: send HTTP requests.
 import asyncio
 import json
 import logging
+import threading
 from collections.abc import Callable, Mapping
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 from urllib.parse import urljoin
 
@@ -20,6 +22,37 @@ from app.services.egress_policy import (
 )
 
 logger = logging.getLogger(__name__)
+_RESPONSE_PARSE_WORKERS = 2
+_RESPONSE_PARSE_EXECUTOR = ThreadPoolExecutor(
+    max_workers=_RESPONSE_PARSE_WORKERS, thread_name_prefix="egress-response"
+)
+_RESPONSE_PARSE_CAPACITY = threading.BoundedSemaphore(_RESPONSE_PARSE_WORKERS)
+
+
+def _decode_response_body(content: bytes, content_type: str) -> Any:
+    if "application/json" in content_type:
+        return json.loads(content)
+    try:
+        return json.loads(content)
+    except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
+        return {"raw_text": content.decode("utf-8", errors="replace")}
+
+
+async def _parse_response_body(content: bytes, content_type: str) -> Any:
+    if len(content) > settings.egress_max_response_bytes:
+        raise EgressPolicyError("Outbound response exceeded the size limit")
+    if not _RESPONSE_PARSE_CAPACITY.acquire(blocking=False):
+        raise EgressPolicyError("Outbound response parsing capacity is exhausted")
+    try:
+        future = _RESPONSE_PARSE_EXECUTOR.submit(_decode_response_body, content, content_type)
+    except Exception:
+        _RESPONSE_PARSE_CAPACITY.release()
+        raise EgressPolicyError("Outbound response parsing failed") from None
+    future.add_done_callback(lambda _finished: _RESPONSE_PARSE_CAPACITY.release())
+    try:
+        return await asyncio.shield(asyncio.wrap_future(future))
+    except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
+        raise EgressPolicyError("Outbound response JSON is invalid") from None
 
 
 class HttpRequestNode(BaseNode):
@@ -190,15 +223,9 @@ class HttpRequestNode(BaseNode):
                     redirect_count += 1
                 response.raise_for_status()
 
-                # Try to parse response body as JSON; fall back to raw text
+                # Parse a size-bounded buffered body outside the event-loop thread.
                 content_type = response.headers.get("content-type", "")
-                if "application/json" in content_type:
-                    response_data = response.json()
-                else:
-                    try:
-                        response_data = response.json()
-                    except (json.JSONDecodeError, ValueError):
-                        response_data = {"raw_text": response.text}
+                response_data = await _parse_response_body(response.content, content_type)
 
                 return NodeResult(
                     success=True,

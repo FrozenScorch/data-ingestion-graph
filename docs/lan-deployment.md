@@ -39,6 +39,9 @@ and known cloud-metadata destinations. HTTP and PostgreSQL connections use the
 validated address directly; HTTPS retains the original hostname for TLS SNI and
 certificate validation. Redirects are disabled in the client and GET redirects
 are followed only after same-origin revalidation, up to `EGRESS_MAX_REDIRECTS`.
+DNS and response parsing use isolated capacity-limited workers, the configured
+request timeout is one total deadline, and streamed responses are capped by
+`EGRESS_MAX_RESPONSE_BYTES` (10 MiB by default).
 
 Private LAN connectors require an explicit comma-separated exact-host or CIDR
 allowlist in `.env`, for example:
