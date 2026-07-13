@@ -1,6 +1,18 @@
 """Public API for the headless ingestion-graph SDK."""
 
 from ingestion_graph.artifacts import ArtifactStore, LocalArtifactStore
+from ingestion_graph.conformance import (
+    ConformanceIssue,
+    ConformanceReport,
+    ConformanceSeverity,
+    ConnectorConformanceError,
+    inspect_destination_replay,
+    inspect_installed_manifest,
+    inspect_manifest,
+    inspect_secret_redaction,
+    inspect_source_messages,
+    inspect_source_read,
+)
 from ingestion_graph.connectors.base import (
     CheckResult,
     ConnectorCapabilities,
@@ -39,13 +51,23 @@ __all__ = [
     "BlobRef",
     "CheckResult",
     "ConnectorCapabilities",
+    "ConnectorConformanceError",
     "ConnectorSpec",
+    "ConformanceIssue",
+    "ConformanceReport",
+    "ConformanceSeverity",
     "Destination",
     "DocumentElement",
     "Envelope",
     "EnvSecretProvider",
     "LocalArtifactStore",
     "LocalDocumentsSource",
+    "inspect_destination_replay",
+    "inspect_installed_manifest",
+    "inspect_manifest",
+    "inspect_secret_redaction",
+    "inspect_source_messages",
+    "inspect_source_read",
     "load_connector_manifest",
     "LogMessage",
     "MemoryStateStore",

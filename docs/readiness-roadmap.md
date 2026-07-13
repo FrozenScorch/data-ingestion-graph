@@ -68,8 +68,8 @@ and HTTP actions, but several displayed capabilities are incomplete:
   git tag, GitHub Release, changelog, or release workflow exists yet.
 - Package metadata declares proprietary licensing, but the repository does not contain
   explicit license terms. A deliberate licensing decision is required before third-party distribution.
-- Installed-wheel typing tests cover the core consumer path but not custom connectors,
-  secret providers, plugin loading, or every public submodule.
+- Installed-wheel typing tests cover the core consumer path and public conformance
+  reporting, but not complete custom connectors, secret providers, or every public submodule.
 - The transform plugin contract and ordered, checkpoint-safe transform chain are implemented;
   plugin conformance and versioned transform-state migration remain.
 
@@ -138,8 +138,10 @@ Exit: PostgreSQL/files/Discord can run repeatedly without rereading everything o
 ### Milestone 2 — connector platform (6–12 additional weeks)
 
 1. Extend manifest-backed Studio node and connection-form generation to every connector.
-2. Add connector conformance tests for discovery, pagination, resume, rate limits,
-   duplicates, deletes, schema changes, and secret leakage.
+2. Done for portable SDK invariants: the reusable conformance kit checks manifests,
+   source identity/checkpoints/capabilities, destination flush/replay/delete cases,
+   and explicit secret representations. Connector packs must add injected pagination,
+   resume, rate-limit, permission, and schema-change scenarios.
 3. Ship high-value packs: filesystem/object storage, email/productivity,
    databases/warehouses, collaboration/messaging, and generic REST/webhook.
 4. Add mapping, normalization, snapshot+delta, delete propagation, and backfill UX.
@@ -165,7 +167,7 @@ Exit: multiple teams can operate audited, recoverable syncs on a LAN or private 
 
 1. Generate Studio nodes and Connection Center forms from every SDK connector
    manifest, keeping execution in the reusable SDK.
-2. Add database and object-storage source/destination packs plus connector
-   conformance tests shared by SDK and Studio.
+2. Add database and object-storage source/destination packs and require the shared
+   conformance kit plus connector-specific injected failure scenarios.
 3. Add service accounts/scoped API keys, outbound HTTP policy, and freshness,
    cursor, lag, and reconciliation views.

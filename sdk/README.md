@@ -128,6 +128,36 @@ valid runtime plugins, but are reported as not manifest-aware instead of being
 instantiated just to inspect their metadata. Duplicate installed entry-point names
 fail closed so connector selection is deterministic.
 
+## Connector conformance kit
+
+External connector packages can reuse the dependency-free conformance checks
+from ordinary async tests, `unittest`, or pytest:
+
+```python
+from ingestion_graph import inspect_destination_replay, inspect_source_messages
+
+# Capture a deterministic source page with a fake client, then check identity,
+# stream, capability, schema-message, and checkpoint ordering invariants.
+source_report = inspect_source_messages(source, stream, captured_messages)
+source_report.raise_for_errors()
+
+# Use a disposable destination: this performs a write, flush, and exact replay.
+destination_report = await inspect_destination_replay(destination, records)
+destination_report.raise_for_errors()
+```
+
+`inspect_manifest` checks an already loaded `ConnectorSpec`, while
+`inspect_installed_manifest` also exercises entry-point loading.
+`inspect_secret_redaction` checks caller-supplied secret values against the
+representations a connector test chooses (such as repr, errors, logs, state,
+and provenance); the SDK does not guess which fields are confidential.
+
+The kit intentionally checks protocol invariants rather than remote systems.
+It does not infer cursor monotonicity, test live pagination or rate limits, or
+require one physical tombstone strategy. Connector packages should inject fake
+clients and clocks for those cases, and keep separate opt-in integration tests
+for real services.
+
 ## Development
 
 ```shell

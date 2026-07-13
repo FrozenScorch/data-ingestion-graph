@@ -3,18 +3,21 @@
 from collections.abc import Sequence
 
 from ingestion_graph import (
+    ConformanceReport,
     ConnectorSpec,
     Envelope,
     QueryRequest,
     QueryResult,
     RecordPayload,
     Transform,
+    inspect_manifest,
     load_connector_manifest,
     stable_record_id,
 )
 
 manifest: ConnectorSpec = load_connector_manifest("sources", "discord")
 destination_manifest: ConnectorSpec = load_connector_manifest("destinations", "sqlite")
+conformance: ConformanceReport = inspect_manifest(manifest, expected_name="discord")
 
 record: Envelope = Envelope(
     id=stable_record_id("example", "items", "1"),
