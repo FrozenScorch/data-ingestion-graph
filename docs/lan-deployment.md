@@ -23,8 +23,10 @@ admin password before continuing: it seeds the first account and later `.env`
 changes do not replace that account's password.
 
 The origin is exact by design. If the host name, IP address, or port changes,
-regenerate `.env` with `--force` and restart the project. Restrict the host
-firewall to your trusted LAN or set `STUDIO_BIND=127.0.0.1` for local-only use.
+regenerate `.env` with `--force` and restart the project. Reconfiguration preserves
+all existing secrets and custom settings; it changes only the public endpoint/TLS
+fields. Restrict the host firewall to your trusted LAN or set
+`STUDIO_BIND=127.0.0.1` for local-only use.
 
 ## Private LAN TLS
 
@@ -44,15 +46,21 @@ this profile is intentionally for a private LAN.
 
 ## Schema and data lifecycle
 
-`ingestion-migrate` must finish before the API can start. An existing unversioned
-Studio database is materialized to the current model once and stamped at the
-Alembic head; versioned databases run ordered `alembic upgrade head` migrations.
+`ingestion-migrate` must finish before the API can start. A completely empty database
+is materialized to the current model and stamped at the Alembic head. An existing
+unversioned Studio database is based before migration `0001` and runs the ordered,
+legacy-safe migrations; versioned databases run ordinary `alembic upgrade head`.
 Failure stops API startup instead of serving traffic against a partial schema.
 
-Uploads, PostgreSQL, Redis, and Caddy authority state use named volumes. Normal
-`docker compose down` preserves them. Do not use `down -v` unless permanent data
-deletion is intended. Back up the PostgreSQL and upload volumes before upgrades;
-automated backup/restore and disaster-recovery validation remain enterprise gaps.
+The Compose file intentionally has no fixed project name, so an existing clone keeps
+its directory-derived PostgreSQL and Redis volume identity across this upgrade.
+Managed uploads and temporary files remain in `./data/uploads` and `./data/temp` for
+compatibility with earlier Studio releases; Caddy authority state uses named volumes.
+Run `docker compose down` before changing the checkout directory or Compose project
+name. Normal `docker compose down` preserves data. Do not use `down -v` unless named
+volume deletion is intended, and do not delete `./data/uploads`. Back up PostgreSQL
+and `./data/uploads` before upgrades; automated backup/restore and disaster-recovery
+validation remain enterprise gaps.
 
 ## Operational boundary
 

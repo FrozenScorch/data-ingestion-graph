@@ -1,5 +1,3 @@
-name: ingestion-graph
-
 x-api-environment: &api-environment
   DATABASE_URL: postgresql+asyncpg://ingestion:${POSTGRES_PASSWORD:?run scripts/init_lan_env.py first}@ingestion-postgres:5432/ingestion_db
   DATABASE_POOL_SIZE: 10
@@ -87,8 +85,8 @@ services:
     restart: unless-stopped
     environment: *api-environment
     volumes:
-      - ingestion_uploads:/app/data/uploads
-      - ingestion_temp:/app/data/temp
+      - ./data/uploads:/app/data/uploads
+      - ./data/temp:/app/data/temp
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import httpx; r = httpx.get('http://localhost:8040/health'); r.raise_for_status()\""]
       interval: 30s
@@ -154,7 +152,5 @@ networks:
 volumes:
   ingestion_postgres_data: {}
   ingestion_redis_data: {}
-  ingestion_uploads: {}
-  ingestion_temp: {}
   ingestion_caddy_data: {}
   ingestion_caddy_config: {}

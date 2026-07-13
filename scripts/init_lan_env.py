@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import re
 import secrets
+from collections.abc import Mapping
 from contextlib import suppress
 from pathlib import Path
 
@@ -18,23 +19,39 @@ def validate_host(value: str) -> str:
     return host
 
 
-def build_environment(host: str, *, tls: bool, http_port: int, https_port: int) -> dict[str, str]:
+def build_environment(
+    host: str,
+    *,
+    tls: bool,
+    http_port: int,
+    https_port: int,
+    existing: Mapping[str, str] | None = None,
+) -> dict[str, str]:
     public_port = https_port if tls else http_port
     scheme = "https" if tls else "http"
-    return {
-        "STUDIO_HOSTNAME": host,
-        "STUDIO_ORIGIN": f"{scheme}://{host}:{public_port}",
-        "STUDIO_BIND": "0.0.0.0",
-        "STUDIO_PORT": str(http_port),
-        "STUDIO_HTTPS_PORT": str(https_port),
-        "CADDY_CONFIG": "Caddyfile.tls" if tls else "Caddyfile.http",
-        "POSTGRES_PASSWORD": secrets.token_urlsafe(36),
-        "REDIS_PASSWORD": secrets.token_urlsafe(36),
-        "JWT_SECRET_KEY": secrets.token_urlsafe(48),
-        "CONNECTION_ENCRYPTION_KEY": secrets.token_urlsafe(48),
+    values = dict(existing or {})
+    values.update(
+        {
+            "STUDIO_HOSTNAME": host,
+            "STUDIO_ORIGIN": f"{scheme}://{host}:{public_port}",
+            "STUDIO_BIND": values.get("STUDIO_BIND", "0.0.0.0"),
+            "STUDIO_PORT": str(http_port),
+            "STUDIO_HTTPS_PORT": str(https_port),
+            "CADDY_CONFIG": "Caddyfile.tls" if tls else "Caddyfile.http",
+        }
+    )
+    for key, byte_count in (
+        ("POSTGRES_PASSWORD", 36),
+        ("REDIS_PASSWORD", 36),
+        ("JWT_SECRET_KEY", 48),
+        ("CONNECTION_ENCRYPTION_KEY", 48),
+        ("ADMIN_PASSWORD", 24),
+    ):
+        if not values.get(key):
+            values[key] = secrets.token_urlsafe(byte_count)
+    defaults = {
         "ADMIN_USERNAME": "admin",
         "ADMIN_EMAIL": "admin@ingestion-graph.local",
-        "ADMIN_PASSWORD": secrets.token_urlsafe(24),
         "OPENROUTER_API_KEY": "",
         "QUERY_ARTIFACT_TTL_HOURS": "168",
         "RUN_WORKER_CONCURRENCY": "1",
@@ -43,6 +60,20 @@ def build_environment(host: str, *, tls: bool, http_port: int, https_port: int) 
         "RUN_WORKER_HEARTBEAT_SECONDS": "15",
         "LOG_LEVEL": "INFO",
     }
+    for key, value in defaults.items():
+        values.setdefault(key, value)
+    return values
+
+
+def read_environment(path: Path) -> dict[str, str]:
+    values: dict[str, str] = {}
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        values[key] = value
+    return values
 
 
 def write_environment(path: Path, values: dict[str, str], *, force: bool) -> None:
@@ -70,11 +101,13 @@ def main() -> None:
         if not 1 <= port <= 65535:
             parser.error("ports must be between 1 and 65535")
 
+    existing = read_environment(args.output) if args.force and args.output.exists() else None
     values = build_environment(
         args.host,
         tls=args.tls,
         http_port=args.http_port,
         https_port=args.https_port,
+        existing=existing,
     )
     try:
         write_environment(args.output, values, force=args.force)

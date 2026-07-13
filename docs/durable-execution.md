@@ -42,6 +42,6 @@ worker cannot heartbeat or finish the job. CI provides PostgreSQL through a
 service container and sets `TEST_DATABASE_URL` for that test.
 
 Compose gates API startup on the one-shot `ingestion-migrate` service. Legacy
-unversioned databases are baselined once; versioned databases apply ordered
+unversioned legacy databases run idempotent ordered migrations; versioned databases apply ordered
 Alembic upgrades. Zero-downtime multi-replica upgrade/downgrade policy and
 automated backup/restore validation remain enterprise-readiness items.

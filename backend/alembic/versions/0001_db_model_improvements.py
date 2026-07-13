@@ -4,31 +4,53 @@ Revision ID: 0001_db_model_improvements
 Revises: None
 Create Date: 2026-03-20
 """
-from typing import Sequence, Union
 
-from alembic import op
+from collections.abc import Sequence
+
 import sqlalchemy as sa
+from alembic import op
 
 revision: str = "0001_db_model_improvements"
-down_revision: Union[str, None] = None
-branch_labels: Union[str, Sequence[str], None] = None
-depends_on: Union[str, Sequence[str], None] = None
+down_revision: str | None = None
+branch_labels: str | Sequence[str] | None = None
+depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
-    op.create_unique_constraint(
-        "uq_graph_version",
-        "graph_versions",
-        ["graph_id", "version_number"],
+    bind = op.get_bind()
+    inspector = sa.inspect(bind)
+    unique_names = {
+        constraint["name"] for constraint in inspector.get_unique_constraints("graph_versions")
+    }
+    if "uq_graph_version" not in unique_names:
+        op.create_unique_constraint(
+            "uq_graph_version",
+            "graph_versions",
+            ["graph_id", "version_number"],
+        )
+
+    indexes = (
+        ("ix_runs_graph_id_status", "runs", ["graph_id", "status"]),
+        ("ix_run_nodes_run_id_status", "run_nodes", ["run_id", "status"]),
+        ("ix_data_lineage_run_id", "data_lineage", ["run_id"]),
+        (
+            "ix_data_lineage_source_target",
+            "data_lineage",
+            ["source_node_id", "target_node_id"],
+        ),
+        (
+            "ix_dead_letter_queue_run_id_resolved",
+            "dead_letter_queue",
+            ["run_id", "resolved"],
+        ),
+        ("ix_execution_logs_run_id_level", "execution_logs", ["run_id", "level"]),
+        ("ix_graphs_owner_id_status", "graphs", ["owner_id", "status"]),
+        ("ix_run_costs_run_id", "run_costs", ["run_id"]),
     )
-    op.create_index("ix_runs_graph_id_status", "runs", ["graph_id", "status"])
-    op.create_index("ix_run_nodes_run_id_status", "run_nodes", ["run_id", "status"])
-    op.create_index("ix_data_lineage_run_id", "data_lineage", ["run_id"])
-    op.create_index("ix_data_lineage_source_target", "data_lineage", ["source_node_id", "target_node_id"])
-    op.create_index("ix_dead_letter_queue_run_id_resolved", "dead_letter_queue", ["run_id", "resolved"])
-    op.create_index("ix_execution_logs_run_id_level", "execution_logs", ["run_id", "level"])
-    op.create_index("ix_graphs_owner_id_status", "graphs", ["owner_id", "status"])
-    op.create_index("ix_run_costs_run_id", "run_costs", ["run_id"])
+    for name, table, columns in indexes:
+        existing = {index["name"] for index in sa.inspect(bind).get_indexes(table)}
+        if name not in existing:
+            op.create_index(name, table, columns)
 
 
 def downgrade() -> None:

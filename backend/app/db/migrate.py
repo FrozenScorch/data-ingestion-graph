@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from enum import StrEnum
 from pathlib import Path
 
 from alembic import command
@@ -14,20 +15,31 @@ from sqlalchemy import inspect
 logger = logging.getLogger(__name__)
 
 
-async def prepare_schema() -> bool:
-    """Return True after bootstrapping a legacy database without Alembic state."""
+class SchemaState(StrEnum):
+    FRESH = "fresh"
+    LEGACY = "legacy"
+    VERSIONED = "versioned"
+
+
+async def prepare_schema() -> SchemaState:
+    """Classify the database and materialize only a completely fresh schema."""
     async with engine.connect() as connection:
-        versioned = await connection.run_sync(
-            lambda sync_connection: inspect(sync_connection).has_table("alembic_version")
+        versioned, legacy = await connection.run_sync(
+            lambda sync_connection: (
+                inspect(sync_connection).has_table("alembic_version"),
+                inspect(sync_connection).has_table("graphs"),
+            )
         )
     if versioned:
-        return False
+        return SchemaState.VERSIONED
+    if legacy:
+        return SchemaState.LEGACY
 
-    # Historical Studio releases used metadata.create_all and shipped no base-table
-    # migration. Materialize the current model once, then establish the Alembic head;
-    # all subsequent releases run ordinary ordered migrations before API startup.
+    # Alembic has no migration that creates the original application tables. A fresh
+    # database is materialized from current metadata and stamped; an existing legacy
+    # schema must instead run every idempotent migration from the pre-0001 baseline.
     await init_db()
-    return True
+    return SchemaState.FRESH
 
 
 def alembic_config() -> Config:
@@ -39,12 +51,15 @@ def alembic_config() -> Config:
 
 def migrate() -> None:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
-    bootstrapped = asyncio.run(prepare_schema())
+    schema_state = asyncio.run(prepare_schema())
     config = alembic_config()
-    if bootstrapped:
+    if schema_state is SchemaState.FRESH:
         command.stamp(config, "head")
-        logger.info("Bootstrapped current schema and stamped the Alembic head")
+        logger.info("Bootstrapped a fresh schema and stamped the Alembic head")
     else:
+        if schema_state is SchemaState.LEGACY:
+            command.stamp(config, "base")
+            logger.info("Based an unversioned legacy schema before migration 0001")
         command.upgrade(config, "head")
         logger.info("Applied pending Alembic migrations")
 
