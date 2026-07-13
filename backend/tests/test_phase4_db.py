@@ -1111,9 +1111,7 @@ class TestConnectionTest:
         from app.services.connection_service import test_connection
         from app.services.egress_policy import EgressPolicy
 
-        mock_conn = AsyncMock()
-        mock_conn.execute = AsyncMock(return_value=None)
-        mock_conn.close = AsyncMock()
+        mock_conn = MagicMock()
 
         config = {
             "host": "localhost",
@@ -1124,9 +1122,7 @@ class TestConnectionTest:
         }
 
         # psycopg is imported inside the function, patch at module level
-        with patch(
-            "psycopg.AsyncConnection.connect", new_callable=AsyncMock, return_value=mock_conn
-        ):
+        with patch("psycopg.connect", return_value=mock_conn):
             result = await test_connection(
                 config,
                 "postgres",
@@ -1155,8 +1151,7 @@ class TestConnectionTest:
         }
 
         with patch(
-            "psycopg.AsyncConnection.connect",
-            new_callable=AsyncMock,
+            "psycopg.connect",
             side_effect=Exception("Connection refused"),
         ):
             result = await test_connection(
@@ -1182,9 +1177,8 @@ class TestConnectionTest:
         from app.services.connection_service import test_connection
         from app.services.egress_policy import EgressPolicy
 
-        mock_conn = AsyncMock()
-        mock_conn.execute = AsyncMock(side_effect=Exception("Auth failed"))
-        mock_conn.close = AsyncMock()
+        mock_conn = MagicMock()
+        mock_conn.execute.side_effect = Exception("Auth failed")
 
         config = {
             "host": "localhost",
@@ -1194,9 +1188,7 @@ class TestConnectionTest:
             "password": "p",
         }
 
-        with patch(
-            "psycopg.AsyncConnection.connect", new_callable=AsyncMock, return_value=mock_conn
-        ):
+        with patch("psycopg.connect", return_value=mock_conn):
             result = await test_connection(
                 config,
                 "postgres",

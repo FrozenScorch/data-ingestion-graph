@@ -5,6 +5,7 @@ Manages saved connections that nodes can reference by connection_id.
 Supports testing connections before saving.
 """
 
+import asyncio
 import logging
 import uuid
 from collections.abc import Callable
@@ -244,22 +245,31 @@ async def _test_postgres_connection(config: dict, policy: EgressPolicy) -> dict:
     except EgressPolicyError as exc:
         return {"success": False, "message": str(exc)}
 
-    conn = None
     try:
         pinned_addresses = tuple(str(address) for address in target.addresses)
         # libpq's hostaddr separates the validated dial address from the host
         # used for TLS SNI, certificate verification, and password matching.
         tls_hosts = ",".join(target.host for _address in pinned_addresses)
-        conn = await psycopg.AsyncConnection.connect(
-            host=tls_hosts,
-            hostaddr=",".join(pinned_addresses),
-            port=target.port,
-            dbname=database,
-            user=username,
-            password=password,
-            connect_timeout=10,
-        )
-        await conn.execute("SELECT 1")
+
+        def probe() -> None:
+            conn = psycopg.connect(
+                host=tls_hosts,
+                hostaddr=",".join(pinned_addresses),
+                port=target.port,
+                dbname=database,
+                user=username,
+                password=password,
+                connect_timeout=10,
+            )
+            try:
+                conn.execute("SELECT 1")
+            finally:
+                with suppress(Exception):
+                    conn.close()
+
+        # Psycopg's async connection is incompatible with Windows' default
+        # ProactorEventLoop; isolate the short blocking probe in a worker thread.
+        await asyncio.to_thread(probe)
         return {
             "success": True,
             "message": "PostgreSQL connection successful",
@@ -269,10 +279,6 @@ async def _test_postgres_connection(config: dict, policy: EgressPolicy) -> dict:
             "success": False,
             "message": f"PostgreSQL connection failed ({type(exc).__name__})",
         }
-    finally:
-        if conn is not None:
-            with suppress(Exception):
-                await conn.close()
 
 
 async def _test_discord_connection(

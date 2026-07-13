@@ -317,6 +317,7 @@ class _PinnedNetworkBackend(httpcore.AsyncNetworkBackend):
             raise httpcore.ConnectError("Pinned outbound host changed") from None
         if requested_host != self._target.host or port != self._target.port:
             raise httpcore.ConnectError("Pinned outbound destination changed")
+        timed_out = False
         for address in self._target.addresses:
             try:
                 return await self._backend.connect_tcp(
@@ -326,8 +327,13 @@ class _PinnedNetworkBackend(httpcore.AsyncNetworkBackend):
                     local_address=local_address,
                     socket_options=socket_options,
                 )
-            except Exception:
+            except httpcore.TimeoutException:
+                timed_out = True
                 continue
+            except httpcore.HTTPError:
+                continue
+        if timed_out:
+            raise httpcore.ConnectTimeout("Pinned outbound connection timed out") from None
         raise httpcore.ConnectError("Pinned outbound connection failed") from None
 
     async def connect_unix_socket(

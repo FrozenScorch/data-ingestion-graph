@@ -5,7 +5,7 @@ import logging
 from collections import deque
 from collections.abc import Mapping, Sequence
 from typing import Any
-from unittest.mock import AsyncMock, patch
+from unittest.mock import MagicMock, patch
 
 import httpcore
 import httpx
@@ -300,6 +300,22 @@ async def test_pinned_backend_connects_to_validated_ip_not_hostname(monkeypatch)
 
 
 @pytest.mark.asyncio
+async def test_pinned_backend_preserves_connect_timeout(monkeypatch) -> None:
+    class Backend:
+        async def connect_tcp(self, *_args: Any, **_kwargs: Any) -> Any:
+            raise httpcore.ConnectTimeout
+
+    target = await EgressPolicy(
+        resolver=Resolver({"public.example": ("93.184.216.34",)})
+    ).validate_url("https://public.example/")
+    backend = _PinnedNetworkBackend(target)
+    monkeypatch.setattr(backend, "_backend", Backend())
+
+    with pytest.raises(httpcore.ConnectTimeout):
+        await backend.connect_tcp("public.example", 443)
+
+
+@pytest.mark.asyncio
 async def test_http_node_blocks_before_instantiating_network_client() -> None:
     policy = EgressPolicy(resolver=Resolver({"internal.example": ("10.0.0.5",)}))
     factory = ClientFactory([])
@@ -457,22 +473,19 @@ async def test_postgres_connection_test_pins_ip_and_redacts_driver_errors() -> N
         "username": "user",
         "password": "top-secret",
     }
-    connection = AsyncMock()
+    connection = MagicMock()
     connection.execute.return_value = None
 
-    with patch(
-        "psycopg.AsyncConnection.connect", new_callable=AsyncMock, return_value=connection
-    ) as connect:
+    with patch("psycopg.connect", return_value=connection) as connect:
         result = await check_connection(config, "postgres", egress_policy=policy)
 
     assert result["success"] is True
-    assert connect.await_args.kwargs["host"] == "db.lan"
-    assert connect.await_args.kwargs["hostaddr"] == "10.20.30.40"
-    connection.close.assert_awaited_once()
+    assert connect.call_args.kwargs["host"] == "db.lan"
+    assert connect.call_args.kwargs["hostaddr"] == "10.20.30.40"
+    connection.close.assert_called_once()
 
     with patch(
-        "psycopg.AsyncConnection.connect",
-        new_callable=AsyncMock,
+        "psycopg.connect",
         side_effect=RuntimeError("top-secret at postgresql://user:top-secret@db.lan"),
     ):
         failed = await check_connection(config, "postgres", egress_policy=policy)
@@ -493,17 +506,15 @@ async def test_postgres_connection_test_passes_every_validated_ip_to_driver() ->
         "username": "user",
         "password": "top-secret",
     }
-    connection = AsyncMock()
+    connection = MagicMock()
     connection.execute.return_value = None
 
-    with patch(
-        "psycopg.AsyncConnection.connect", new_callable=AsyncMock, return_value=connection
-    ) as connect:
+    with patch("psycopg.connect", return_value=connection) as connect:
         result = await check_connection(config, "postgres", egress_policy=policy)
 
     assert result["success"] is True
-    assert connect.await_args.kwargs["host"] == "db.example,db.example"
-    assert connect.await_args.kwargs["hostaddr"] == "93.184.216.34,2606:4700:4700::1111"
+    assert connect.call_args.kwargs["host"] == "db.example,db.example"
+    assert connect.call_args.kwargs["hostaddr"] == "93.184.216.34,2606:4700:4700::1111"
 
 
 @pytest.mark.asyncio
@@ -532,10 +543,10 @@ async def test_blocked_postgres_and_discord_tests_never_create_clients() -> None
         "username": "user",
         "password": "secret",
     }
-    with patch("psycopg.AsyncConnection.connect", new_callable=AsyncMock) as connect:
+    with patch("psycopg.connect") as connect:
         result = await check_connection(postgres_config, "postgres", egress_policy=EgressPolicy())
     assert result["success"] is False
-    connect.assert_not_awaited()
+    connect.assert_not_called()
 
     factory = ClientFactory([])
     discord_policy = EgressPolicy(resolver=Resolver({"discord.com": ("127.0.0.1",)}))
