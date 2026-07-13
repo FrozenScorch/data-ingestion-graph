@@ -110,20 +110,23 @@ for hit in await collection.query(QueryRequest("Ada", limit=5)):
 
 ## Connector manifests
 
-Built-in sources publish configuration and capability metadata without requiring
-credentials, paths, or network clients:
+Built-in sources and destinations publish configuration and capability metadata
+without requiring credentials, paths, or network clients:
 
 ```python
+from ingestion_graph.destinations import SQLiteCollection
 from ingestion_graph.sources import DiscordSource
 
-manifest = DiscordSource.manifest()
-print(manifest.name, manifest.config_schema, manifest.capabilities.incremental)
+source_manifest = DiscordSource.manifest()
+destination_manifest = SQLiteCollection.manifest()
+print(source_manifest.name, destination_manifest.config_schema)
 ```
 
-Plugin hosts can call `load_connector_manifest("sources", name)` before creating a
-connector. Older third-party sources that only implement instance `spec()` remain
+Plugin hosts can call `load_connector_manifest(kind, name)` for either `sources`
+or `destinations` before creating a connector. Older third-party connectors remain
 valid runtime plugins, but are reported as not manifest-aware instead of being
-instantiated just to inspect their metadata.
+instantiated just to inspect their metadata. Duplicate installed entry-point names
+fail closed so connector selection is deterministic.
 
 ## Development
 

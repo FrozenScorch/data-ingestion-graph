@@ -13,7 +13,12 @@ from contextlib import closing
 from pathlib import Path
 from typing import Any
 
-from ingestion_graph.connectors.base import CheckResult, Destination
+from ingestion_graph.connectors.base import (
+    CheckResult,
+    ConnectorCapabilities,
+    ConnectorSpec,
+    Destination,
+)
 from ingestion_graph.models import Envelope, Operation
 from ingestion_graph.query import QueryHit, QueryRequest, QueryResult, QueryStore
 
@@ -26,6 +31,33 @@ class SQLiteCollection(Destination, QueryStore):
     """
 
     idempotent = True
+
+    @classmethod
+    def manifest(cls) -> ConnectorSpec:
+        return ConnectorSpec(
+            name="sqlite",
+            version="1.0.0",
+            config_schema={
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "minLength": 1,
+                        "default": ".ingestion/query.db",
+                        "description": "Path to the durable SQLite query collection.",
+                    }
+                },
+                "additionalProperties": False,
+            },
+            capabilities=ConnectorCapabilities(
+                incremental=True,
+                resumable_full_refresh=True,
+                deletes=True,
+            ),
+        )
+
+    def spec(self) -> ConnectorSpec:
+        return self.manifest()
 
     def __init__(self, path: str | Path = ".ingestion/query.db") -> None:
         self.path = Path(path)

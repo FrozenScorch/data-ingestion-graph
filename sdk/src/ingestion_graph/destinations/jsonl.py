@@ -10,12 +10,44 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
-from ingestion_graph.connectors.base import CheckResult, Destination
+from ingestion_graph.connectors.base import (
+    CheckResult,
+    ConnectorCapabilities,
+    ConnectorSpec,
+    Destination,
+)
 from ingestion_graph.models import Envelope
 
 
 class JsonlDestination(Destination):
     idempotent = True
+
+    @classmethod
+    def manifest(cls) -> ConnectorSpec:
+        return ConnectorSpec(
+            name="jsonl",
+            version="1.0.0",
+            config_schema={
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "minLength": 1,
+                        "description": "Path to the durable append-only JSONL output.",
+                    }
+                },
+                "required": ["path"],
+                "additionalProperties": False,
+            },
+            capabilities=ConnectorCapabilities(
+                incremental=True,
+                resumable_full_refresh=True,
+                deletes=True,
+            ),
+        )
+
+    def spec(self) -> ConnectorSpec:
+        return self.manifest()
 
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
