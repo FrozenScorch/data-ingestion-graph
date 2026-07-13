@@ -15,11 +15,11 @@ from ingestion_graph.connectors.base import (
     Source,
     StreamDescriptor,
 )
-from ingestion_graph.destinations import JsonlDestination, SQLiteCollection
+from ingestion_graph.destinations import JsonlDestination, PostgresDestination, SQLiteCollection
 from ingestion_graph.errors import PluginError
 from ingestion_graph.messages import SourceMessage
 from ingestion_graph.plugins import discover_plugins, load_connector_manifest
-from ingestion_graph.sources import DiscordSource, JsonlSource, LocalDocumentsSource
+from ingestion_graph.sources import DiscordSource, JsonlSource, LocalDocumentsSource, PostgresSource
 
 
 @pytest.mark.parametrize(
@@ -28,6 +28,7 @@ from ingestion_graph.sources import DiscordSource, JsonlSource, LocalDocumentsSo
         (DiscordSource, "discord"),
         (JsonlSource, "jsonl"),
         (LocalDocumentsSource, "local_documents"),
+        (PostgresSource, "postgres"),
     ],
 )
 def test_builtin_source_manifests_need_no_runtime_configuration(source_type, name):
@@ -41,7 +42,11 @@ def test_builtin_source_manifests_need_no_runtime_configuration(source_type, nam
 
 @pytest.mark.parametrize(
     ("destination_type", "name"),
-    [(JsonlDestination, "jsonl"), (SQLiteCollection, "sqlite")],
+    [
+        (JsonlDestination, "jsonl"),
+        (PostgresDestination, "postgres"),
+        (SQLiteCollection, "sqlite"),
+    ],
 )
 def test_builtin_destination_manifests_need_no_runtime_configuration(destination_type, name):
     manifest = destination_type.manifest()
@@ -121,8 +126,8 @@ def test_legacy_destination_remains_instantiable_but_has_no_manifest():
 @pytest.mark.parametrize(
     ("kind", "expected"),
     [
-        ("sources", {"discord", "jsonl", "local_documents"}),
-        ("destinations", {"jsonl", "sqlite"}),
+        ("sources", {"discord", "jsonl", "local_documents", "postgres"}),
+        ("destinations", {"jsonl", "postgres", "sqlite"}),
     ],
 )
 def test_installed_entry_points_load_matching_manifests(kind, expected):

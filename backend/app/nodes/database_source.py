@@ -1,28 +1,39 @@
-"""
-DatabaseSource node: PostgreSQL reader node.
+"""Studio adapter for the reusable SDK PostgreSQL query source."""
 
-Reads data from a PostgreSQL database using a SQL query.
-Uses SQLAlchemy async with asyncpg for database access.
-Input: none (source node)
-Output: {rows: [...], row_count: N, columns: [...]}
-"""
+from __future__ import annotations
 
 import logging
-import re
+from collections.abc import Mapping
 from typing import Any
 
-from sqlalchemy import URL, text
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-
-from app.nodes.base import BaseNode, NodeContext, NodeResult, PortDef, PortDataType
+from app.nodes.base import BaseNode, NodeContext, NodeResult, PortDataType, PortDef
+from app.nodes.sdk_manifest import (
+    ManifestFieldProjection,
+    project_manifest_config_schema,
+    serialize_connector_manifest,
+)
+from app.nodes.sdk_postgres import saved_postgres_connection
+from ingestion_graph.errors import ConfigurationError
+from ingestion_graph.messages import RecordMessage
+from ingestion_graph.models import RecordPayload
+from ingestion_graph.sources import PostgresSource
 
 logger = logging.getLogger(__name__)
 
-# SQL identifier regex: only simple identifiers like table_name or "schema"."table"
-_SQL_IDENTIFIER_RE = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*(\.[a-zA-Z_][a-zA-Z0-9_]*)?$")
-
 
 class DatabaseSourceNode(BaseNode):
+    @property
+    def implementation(self) -> str:
+        return "sdk-adapter"
+
+    @property
+    def sdk_component(self) -> str:
+        return "ingestion_graph.sources.PostgresSource"
+
+    @property
+    def connector_manifest(self) -> dict[str, Any]:
+        return serialize_connector_manifest(PostgresSource.manifest())
+
     @property
     def node_type(self) -> str:
         return "database_source"
@@ -37,7 +48,7 @@ class DatabaseSourceNode(BaseNode):
 
     @property
     def description(self) -> str:
-        return "Read data from a PostgreSQL database using a SQL query"
+        return "Read a bounded PostgreSQL SELECT through the reusable SDK"
 
     @property
     def inputs(self) -> list[PortDef]:
@@ -49,165 +60,148 @@ class DatabaseSourceNode(BaseNode):
 
     @property
     def config_schema(self) -> dict[str, Any]:
-        return {
-            "type": "object",
-            "properties": {
+        return project_manifest_config_schema(
+            PostgresSource.manifest(),
+            fields=(
+                ManifestFieldProjection(
+                    source_field="query",
+                    target_field="query",
+                    overrides={
+                        "default": "SELECT * FROM table LIMIT 1000",
+                        "description": "SQL query to execute (SELECT only)",
+                    },
+                ),
+                ManifestFieldProjection(
+                    source_field="max_records",
+                    target_field="batch_size",
+                    overrides={
+                        "type": "integer",
+                        "default": 1000,
+                        "description": "Maximum rows returned by this Studio preview",
+                    },
+                ),
+            ),
+            omitted={
+                "host": "Studio resolves host from an encrypted saved connection",
+                "port": "Studio resolves port from an encrypted saved connection",
+                "database": "Studio resolves database from an encrypted saved connection",
+                "username": "Studio resolves username from an encrypted saved connection",
+                "password": "Studio resolves password from an encrypted saved connection",
+                "stream": "Studio uses a stable adapter-owned preview stream",
+                "primary_key": "This legacy-compatible node is a bounded preview",
+                "cursor_field": "This legacy-compatible node is a bounded preview",
+                "page_size": "The Studio batch_size is the complete preview bound",
+            },
+            studio_properties={
                 "connection_id": {
                     "type": "string",
                     "format": "connection-ref",
                     "connection_type": "postgres",
                     "description": "Saved PostgreSQL connection ID",
-                },
-                "query": {
-                    "type": "string",
-                    "format": "textarea",
-                    "default": "SELECT * FROM table LIMIT 1000",
-                    "description": "SQL query to execute (SELECT only)",
-                },
-                "batch_size": {
-                    "type": "integer",
-                    "default": 1000,
-                    "minimum": 1,
-                    "description": "Number of rows per batch",
-                },
+                }
             },
-            "required": ["connection_id", "query"],
-        }
+            studio_required=("connection_id",),
+        )
 
     @staticmethod
     def _validate_query(query: str) -> None:
-        """Validate that the query is SELECT-only to prevent data modification."""
-        stripped = query.strip().rstrip(";").strip()
-        upper = stripped.upper()
-        # CTEs are intentionally rejected: PostgreSQL permits data-modifying
-        # INSERT/UPDATE/DELETE statements inside WITH clauses.
-        if not upper.startswith("SELECT"):
-            raise ValueError(
-                "Only SELECT queries are allowed in database_source node. "
-                f"Query starts with: {stripped[:20]}"
+        # Retained for callers of the legacy validation helper; the SDK performs
+        # the authoritative validation during connector construction.
+        try:
+            PostgresSource(
+                "validation.invalid",
+                5432,
+                "validation",
+                "validation",
+                _validation_secret(),
+                query=query,
+                primary_key=(),
+                max_records=1,
             )
-        if ";" in stripped:
-            raise ValueError("Multiple SQL statements are not allowed")
+        except ConfigurationError as exc:
+            if "SELECT" in str(exc):
+                raise ValueError("Only SELECT queries are allowed") from exc
+            if "one SQL statement" in str(exc):
+                raise ValueError("Multiple SQL statements are not allowed") from exc
+            raise ValueError(str(exc)) from exc
 
     def _build_connection_url(self, context: NodeContext) -> str:
-        """Build a URL from the saved connection authorized for this node."""
-        config = context.config
-        connection_id = config.get("connection_id")
-        saved_connections = context.state.get("connections", {})
-        connection = saved_connections.get(connection_id) if connection_id else None
-
-        if connection and connection.get("host") and connection.get("database"):
-            return URL.create(
-                "postgresql+asyncpg",
-                username=connection.get("username") or connection.get("user"),
-                password=connection.get("password"),
-                host=connection["host"],
-                port=int(connection.get("port", 5432)),
-                database=connection["database"],
-            ).render_as_string(hide_password=False)
-
-        if not connection_id:
-            raise ValueError(
-                "Database source requires connection_id; select an encrypted saved connection"
-            )
-        raise ValueError(f"Saved connection not available: {connection_id}")
+        # Compatibility diagnostic for older callers. Runtime execution never
+        # serializes a password-bearing URL.
+        connection, _, _ = saved_postgres_connection(
+            context.config, context.state, node_label="Database source"
+        )
+        return (
+            f"postgresql://{connection.get('username') or connection.get('user')}@"
+            f"{connection['host']}:{int(connection.get('port', 5432))}/{connection['database']}"
+        )
 
     async def execute(self, context: NodeContext) -> NodeResult:
-        """
-        Execute the database source node.
-
-        Reads data from PostgreSQL using the configured SQL query.
-        Returns rows, row_count, and column names.
-        """
-        config = context.config
-        query = config.get("query", "SELECT * FROM table LIMIT 1000")
-        batch_size = config.get("batch_size", 1000)
-
-        # Validate query is SELECT-only
+        query = context.config.get("query", "SELECT * FROM table LIMIT 1000")
         try:
-            self._validate_query(query)
-        except ValueError as e:
-            return NodeResult(
-                success=False,
-                error_message=str(e),
+            batch_size = int(context.config.get("batch_size", 1000))
+            connection, provider, password = saved_postgres_connection(
+                context.config, context.state, node_label="Database source"
             )
-
-        try:
-            connection_url = self._build_connection_url(context)
-        except Exception as e:
-            return NodeResult(
-                success=False,
-                error_message=f"Failed to build connection URL: {e}",
+            connector = PostgresSource(
+                str(connection["host"]),
+                int(connection.get("port", 5432)),
+                str(connection["database"]),
+                str(connection.get("username") or connection.get("user")),
+                password,
+                query=str(query),
+                stream="studio_query",
+                primary_key=(),
+                max_records=batch_size,
+                secret_provider=provider,
             )
-
-        engine = None
-        try:
-            # Create a temporary engine for this read operation
-            engine = create_async_engine(
-                connection_url,
-                pool_pre_ping=True,
-                connect_args={"server_settings": {"default_transaction_read_only": "on"}},
-            )
-            session_factory = async_sessionmaker(
-                bind=engine,
-                class_=AsyncSession,
-                expire_on_commit=False,
-            )
-
-            async with session_factory() as session:
-                # Execute the query
-                result = await session.execute(text(query))
-
-                # Get column names from result metadata
-                if result.returns_rows:
-                    columns = list(result.keys())
-                    rows = []
-                    for row in result:
-                        rows.append(dict(row._mapping))
-                        # Respect batch_size limit
-                        if len(rows) >= batch_size:
-                            break
-                else:
-                    # Non-SELECT query (INSERT, UPDATE, etc.)
-                    await session.commit()
-                    return NodeResult(
-                        success=True,
-                        output_data={
-                            "rows": [],
-                            "row_count": 0,
-                            "columns": [],
-                        },
-                        items_processed=0,
-                        metadata={"query_type": "non_select"},
+            check = await connector.check()
+            if not check.ok:
+                return NodeResult(success=False, error_message="Database query check failed")
+            descriptor = (await connector.discover())[0]
+            rows: list[dict[str, Any]] = []
+            postgres_type_hints: list[dict[str, Any]] = []
+            async for message in connector.read(descriptor, {}):
+                if isinstance(message, RecordMessage):
+                    payload = message.envelope.payload
+                    if not isinstance(payload, RecordPayload):
+                        raise TypeError("PostgreSQL source emitted a non-row payload")
+                    rows.append(dict(payload.data))
+                    raw_type_hints = message.envelope.metadata.get(
+                        "ingestion_graph.postgres_types", {}
                     )
-
+                    if not isinstance(raw_type_hints, Mapping):
+                        raise TypeError("PostgreSQL source emitted invalid type hints")
+                    postgres_type_hints.append(dict(raw_type_hints))
+            columns = list(descriptor.json_schema.get("properties", {}))
             return NodeResult(
                 success=True,
                 output_data={
                     "rows": rows,
                     "row_count": len(rows),
                     "columns": columns,
+                    "postgres_type_hints": postgres_type_hints,
                 },
                 items_processed=len(rows),
-                metadata={
-                    "query": query,
-                    "batch_size": batch_size,
-                },
+                metadata={"query": str(query), "batch_size": batch_size},
             )
-
-        except Exception as e:
-            logger.error(f"DatabaseSourceNode error: {e}", exc_info=True)
-            # Sanitize error message to avoid leaking connection credentials
+        except (ConfigurationError, ValueError) as exc:
+            return NodeResult(success=False, error_message=str(exc))
+        except Exception as exc:
+            logger.error("DatabaseSourceNode SDK adapter failed: %s", type(exc).__name__)
             return NodeResult(
                 success=False,
-                error_message=f"Database query failed: {type(e).__name__}",
+                error_message=f"Database query failed: {type(exc).__name__}",
             )
-        finally:
-            if engine is not None:
-                await engine.dispose()
 
 
-def register():
+def _validation_secret():
+    from ingestion_graph.secrets import SecretRef
+
+    return SecretRef("VALIDATION_ONLY")
+
+
+def register() -> None:
     from app.nodes.registry import register_node
 
     register_node(DatabaseSourceNode())

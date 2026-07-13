@@ -13,12 +13,14 @@ import uuid
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-
+from app.engine.executor import DAGExecutor
+from app.nodes.base import NodeContext, PortDataType
 from app.nodes.database_source import DatabaseSourceNode
 from app.nodes.db_writer import DatabaseWriterNode
 from app.nodes.vector_store import VectorStoreNode
-from app.nodes.base import NodeContext, PortDataType
-
+from ingestion_graph.connectors import CheckResult, StreamDescriptor
+from ingestion_graph.messages import RecordMessage, StateMessage
+from ingestion_graph.models import Envelope, RecordPayload
 
 # ---------------------------------------------------------------------------
 # Helper fixtures
@@ -50,23 +52,49 @@ def base_context(sample_connection_config):
     )
 
 
-def _make_mock_db_result(rows_data, columns):
-    """
-    Create a mock SQLAlchemy Result object that behaves correctly.
+def _mock_postgres_source(rows_data, columns, type_hints=None):
+    connector = MagicMock()
+    connector.check = AsyncMock(return_value=CheckResult(True))
+    connector.discover = AsyncMock(
+        return_value=[
+            StreamDescriptor(
+                "studio_query",
+                json_schema={
+                    "type": "object",
+                    "properties": {column: {} for column in columns},
+                },
+            )
+        ]
+    )
 
-    keys() must be sync, __iter__ must be sync, __aiter__ must return an async iter.
-    """
-    mock_result = MagicMock()
-    mock_result.keys.return_value = columns
-    mock_result.returns_rows = True
-    # Make iteration work: for row in result uses __iter__
-    mock_rows = []
-    for row_dict in rows_data:
-        mock_row = MagicMock()
-        mock_row._mapping = row_dict
-        mock_rows.append(mock_row)
-    mock_result.__iter__ = MagicMock(return_value=iter(mock_rows))
-    return mock_result
+    async def read(stream, state):
+        del stream, state
+        for index, row in enumerate(rows_data):
+            yield RecordMessage(
+                Envelope(
+                    id=str(index),
+                    source="postgres",
+                    stream="studio_query",
+                    payload=RecordPayload(row),
+                    metadata={
+                        "ingestion_graph.postgres_types": (
+                            type_hints[index] if type_hints is not None else {}
+                        )
+                    },
+                )
+            )
+        yield StateMessage("studio_query", {})
+
+    connector.read = read
+    return connector
+
+
+def _mock_postgres_destination(*, written=0):
+    connector = MagicMock()
+    connector.write = AsyncMock(return_value=written)
+    connector.replace = AsyncMock(return_value=written)
+    connector.flush = AsyncMock()
+    return connector
 
 
 # ===========================================================================
@@ -130,29 +158,11 @@ class TestDatabaseSourceNode:
         base_context.config["query"] = "SELECT id, name FROM users LIMIT 10"
         base_context.config["batch_size"] = 100
 
-        mock_result = _make_mock_db_result(
+        connector = _mock_postgres_source(
             [{"id": 1, "name": "Alice"}],
             ["id", "name"],
         )
-
-        mock_session = AsyncMock()
-        mock_session.execute = AsyncMock(return_value=mock_result)
-        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
-        mock_session.__aexit__ = AsyncMock(return_value=False)
-
-        mock_engine = AsyncMock()
-        mock_engine.dispose = AsyncMock()
-
-        with (
-            patch(
-                "app.nodes.database_source.create_async_engine",
-                return_value=mock_engine,
-            ),
-            patch(
-                "app.nodes.database_source.async_sessionmaker",
-                return_value=lambda: mock_session,
-            ),
-        ):
+        with patch("app.nodes.database_source.PostgresSource", return_value=connector):
             result = await node.execute(base_context)
 
         assert result.success is True
@@ -168,33 +178,29 @@ class TestDatabaseSourceNode:
         base_context.config["query"] = "SELECT id FROM items"
         base_context.config["batch_size"] = 2
 
-        # Create 5 mock rows but limit to 2 via batch_size
-        rows_data = [{"id": i} for i in range(5)]
-        mock_result = _make_mock_db_result(rows_data, ["id"])
-
-        mock_session = AsyncMock()
-        mock_session.execute = AsyncMock(return_value=mock_result)
-        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
-        mock_session.__aexit__ = AsyncMock(return_value=False)
-
-        mock_engine = AsyncMock()
-        mock_engine.dispose = AsyncMock()
-
-        with (
-            patch(
-                "app.nodes.database_source.create_async_engine",
-                return_value=mock_engine,
-            ),
-            patch(
-                "app.nodes.database_source.async_sessionmaker",
-                return_value=lambda: mock_session,
-            ),
-        ):
+        connector = _mock_postgres_source([{"id": 0}, {"id": 1}], ["id"])
+        with patch("app.nodes.database_source.PostgresSource", return_value=connector) as sdk:
             result = await node.execute(base_context)
 
         assert result.success is True
         assert result.output_data["row_count"] == 2
         assert result.items_processed == 2
+        assert sdk.call_args.kwargs["max_records"] == 2
+
+    @pytest.mark.asyncio
+    async def test_execute_preserves_postgres_type_hint_sidecar(self, base_context):
+        node = DatabaseSourceNode()
+        base_context.config["query"] = "SELECT occurred_at FROM items"
+        connector = _mock_postgres_source(
+            [{"occurred_at": "2026-01-02T03:04:05+00:00"}],
+            ["occurred_at"],
+            [{"occurred_at": "datetime"}],
+        )
+
+        with patch("app.nodes.database_source.PostgresSource", return_value=connector):
+            result = await node.execute(base_context)
+
+        assert result.output_data["postgres_type_hints"] == [{"occurred_at": "datetime"}]
 
     @pytest.mark.asyncio
     async def test_execute_non_select_query(self, base_context):
@@ -213,19 +219,9 @@ class TestDatabaseSourceNode:
         node = DatabaseSourceNode()
         base_context.config["query"] = "SELECT 1"
 
-        mock_engine = AsyncMock()
-        mock_engine.dispose = AsyncMock()
-
-        with (
-            patch(
-                "app.nodes.database_source.create_async_engine",
-                return_value=mock_engine,
-            ),
-            patch(
-                "app.nodes.database_source.async_sessionmaker",
-                side_effect=Exception("Connection refused"),
-            ),
-        ):
+        connector = _mock_postgres_source([], [])
+        connector.check = AsyncMock(side_effect=Exception("Connection refused with password"))
+        with patch("app.nodes.database_source.PostgresSource", return_value=connector):
             result = await node.execute(base_context)
 
         assert result.success is False
@@ -247,32 +243,12 @@ class TestDatabaseSourceNode:
             }
         }
 
-        mock_result = _make_mock_db_result([], ["col1"])
-
-        mock_session = AsyncMock()
-        mock_session.execute = AsyncMock(return_value=mock_result)
-        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
-        mock_session.__aexit__ = AsyncMock(return_value=False)
-
-        mock_engine = AsyncMock()
-        mock_engine.dispose = AsyncMock()
-
-        with (
-            patch(
-                "app.nodes.database_source.create_async_engine",
-                return_value=mock_engine,
-            ) as mock_create_engine,
-            patch(
-                "app.nodes.database_source.async_sessionmaker",
-                return_value=lambda: mock_session,
-            ),
-        ):
+        connector = _mock_postgres_source([], ["col1"])
+        with patch("app.nodes.database_source.PostgresSource", return_value=connector) as sdk:
             await node.execute(base_context)
 
-        # Verify the engine was created with the saved connection config
-        call_args = mock_create_engine.call_args
-        assert "saved-host" in call_args[0][0]
-        assert "saved_db" in call_args[0][0]
+        assert sdk.call_args.args[:4] == ("saved-host", 5433, "saved_db", "saved_user")
+        assert "saved_pass" not in repr(sdk.call_args)
 
     @pytest.mark.asyncio
     async def test_validate_config(self):
@@ -317,7 +293,7 @@ class TestDatabaseWriterNode:
         result = await node.execute(base_context)
 
         assert result.success is False
-        assert "Invalid input column" in result.error_message
+        assert "Invalid PostgreSQL column" in result.error_message
 
     def test_node_metadata(self):
         """Test node type, category, and port definitions."""
@@ -357,34 +333,66 @@ class TestDatabaseWriterNode:
             ]
         }
 
-        mock_session = AsyncMock()
-        mock_session.execute = AsyncMock()
-        mock_session.commit = AsyncMock()
-        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
-        mock_session.__aexit__ = AsyncMock(return_value=False)
-
-        mock_engine = AsyncMock()
-        mock_engine.dispose = AsyncMock()
-
-        with (
-            patch(
-                "app.nodes.db_writer.create_async_engine",
-                return_value=mock_engine,
-            ),
-            patch(
-                "app.nodes.db_writer.async_sessionmaker",
-                return_value=lambda: mock_session,
-            ),
-        ):
+        connector = _mock_postgres_destination(written=2)
+        with patch("app.nodes.db_writer.PostgresDestination", return_value=connector):
             result = await node.execute(base_context)
 
         assert result.success is True
         assert result.output_data["rows_affected"] == 2
         assert result.output_data["table"] == "output_table"
         assert result.items_processed == 2
-        # 2 rows inserted (one per row for simple insert mode)
-        assert mock_session.execute.call_count == 2
-        mock_session.commit.assert_called()
+        connector.write.assert_awaited_once()
+        assert len(connector.write.await_args.args[0]) == 2
+
+    @pytest.mark.asyncio
+    async def test_execute_forwards_postgres_type_hint_sidecar(self, base_context):
+        node = DatabaseWriterNode()
+        base_context.config["table_name"] = "output_table"
+        base_context.input_data = {
+            "rows": [{"occurred_at": "2026-01-02T03:04:05+00:00"}],
+            "postgres_type_hints": [{"occurred_at": "datetime"}],
+        }
+        connector = _mock_postgres_destination(written=1)
+
+        with patch("app.nodes.db_writer.PostgresDestination", return_value=connector):
+            result = await node.execute(base_context)
+
+        assert result.success is True
+        envelope = connector.write.await_args.args[0][0]
+        assert envelope.metadata["ingestion_graph.postgres_types"] == {"occurred_at": "datetime"}
+
+    @pytest.mark.asyncio
+    async def test_executor_table_edge_unwraps_source_bundle_and_sidecar(self, base_context):
+        source_bundle = {
+            "rows": [{"occurred_at": "2026-01-02T03:04:05+00:00"}],
+            "row_count": 1,
+            "columns": ["occurred_at"],
+            "postgres_type_hints": [{"occurred_at": "datetime"}],
+        }
+        inputs, _lineage = DAGExecutor(MagicMock())._collect_inputs(
+            "writer",
+            [
+                {
+                    "source": "source",
+                    "target": "writer",
+                    "source_port": "table",
+                    "target_port": "table",
+                }
+            ],
+            {"outputs": {"source": source_bundle}},
+        )
+        base_context.node_id = "writer"
+        base_context.config["table_name"] = "output_table"
+        base_context.input_data = inputs
+        connector = _mock_postgres_destination(written=1)
+
+        with patch("app.nodes.db_writer.PostgresDestination", return_value=connector):
+            result = await DatabaseWriterNode().execute(base_context)
+
+        assert result.success is True
+        envelope = connector.write.await_args.args[0][0]
+        assert envelope.payload.data == source_bundle["rows"][0]
+        assert envelope.metadata["ingestion_graph.postgres_types"] == {"occurred_at": "datetime"}
 
     @pytest.mark.asyncio
     async def test_execute_replace_mode(self, base_context):
@@ -394,30 +402,13 @@ class TestDatabaseWriterNode:
         base_context.config["mode"] = "replace"
         base_context.input_data = {"rows": [{"id": 1, "name": "Test"}]}
 
-        mock_session = AsyncMock()
-        mock_session.execute = AsyncMock()
-        mock_session.commit = AsyncMock()
-        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
-        mock_session.__aexit__ = AsyncMock(return_value=False)
-
-        mock_engine = AsyncMock()
-        mock_engine.dispose = AsyncMock()
-
-        with (
-            patch(
-                "app.nodes.db_writer.create_async_engine",
-                return_value=mock_engine,
-            ),
-            patch(
-                "app.nodes.db_writer.async_sessionmaker",
-                return_value=lambda: mock_session,
-            ),
-        ):
+        connector = _mock_postgres_destination(written=1)
+        with patch("app.nodes.db_writer.PostgresDestination", return_value=connector):
             result = await node.execute(base_context)
 
         assert result.success is True
-        # Should have TRUNCATE + INSERT calls
-        assert mock_session.execute.call_count >= 2
+        connector.replace.assert_awaited_once()
+        connector.write.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_execute_empty_rows(self, base_context):
@@ -450,19 +441,9 @@ class TestDatabaseWriterNode:
         base_context.config["table_name"] = "output_table"
         base_context.input_data = {"rows": [{"id": 1}]}
 
-        mock_engine = AsyncMock()
-        mock_engine.dispose = AsyncMock()
-
-        with (
-            patch(
-                "app.nodes.db_writer.create_async_engine",
-                return_value=mock_engine,
-            ),
-            patch(
-                "app.nodes.db_writer.async_sessionmaker",
-                side_effect=Exception("Table does not exist"),
-            ),
-        ):
+        connector = _mock_postgres_destination()
+        connector.write = AsyncMock(side_effect=Exception("Table does not exist with password"))
+        with patch("app.nodes.db_writer.PostgresDestination", return_value=connector):
             result = await node.execute(base_context)
 
         assert result.success is False
