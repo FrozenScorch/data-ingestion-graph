@@ -27,6 +27,7 @@ Documentation = "https://github.com/FrozenScorch/data-ingestion-graph/tree/main/
 discord = ["httpx>=0.28"]
 documents = ["openpyxl>=3.1", "pypdf>=5.1", "python-docx>=1.1"]
 postgres = ["asyncpg>=0.30"]
+rest = ["httpx>=0.28"]
 dev = [
   "asyncpg>=0.30",
   "build>=1.2",
@@ -48,6 +49,7 @@ discord = "ingestion_graph.sources:DiscordSource"
 jsonl = "ingestion_graph.sources:JsonlSource"
 local_documents = "ingestion_graph.sources:LocalDocumentsSource"
 postgres = "ingestion_graph.sources:PostgresSource"
+rest = "ingestion_graph.sources:RestSource"
 
 [project.entry-points."ingestion_graph.destinations"]
 jsonl = "ingestion_graph.destinations:JsonlDestination"

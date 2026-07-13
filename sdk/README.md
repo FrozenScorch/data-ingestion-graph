@@ -32,6 +32,9 @@ For PDF, Word, and Excel parsing, install the document extra:
 python -m pip install "ingestion-graph[documents] @ git+https://github.com/FrozenScorch/data-ingestion-graph.git@main#subdirectory=sdk"
 ```
 
+For generic paginated HTTPS JSON APIs, install the `rest` extra and see the
+[REST source guide](docs/rest-source.md).
+
 ```python
 from ingestion_graph import LocalDocumentsSource, Pipeline
 from ingestion_graph.destinations import SQLiteCollection
