@@ -27,6 +27,7 @@ from ingestion_graph.models import (
     stable_record_id,
 )
 from ingestion_graph.pipeline import Pipeline, PipelineResult
+from ingestion_graph.plugins import load_connector_manifest
 from ingestion_graph.query import Query, QueryHit, QueryRequest, QueryResult, QueryStore
 from ingestion_graph.secrets import EnvSecretProvider, SecretProvider, SecretRef, SecretValue
 from ingestion_graph.sources import LocalDocumentsSource
@@ -45,6 +46,7 @@ __all__ = [
     "EnvSecretProvider",
     "LocalArtifactStore",
     "LocalDocumentsSource",
+    "load_connector_manifest",
     "LogMessage",
     "MemoryStateStore",
     "Operation",
@@ -72,4 +74,4 @@ __all__ = [
     "stable_record_id",
 ]
 
-__version__ = "0.5.0"
+__version__ = "0.6.0"

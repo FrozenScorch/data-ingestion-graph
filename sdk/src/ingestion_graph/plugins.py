@@ -3,6 +3,7 @@
 from importlib.metadata import EntryPoint, entry_points
 from typing import Any
 
+from ingestion_graph.connectors.base import ConnectorSpec
 from ingestion_graph.errors import PluginError
 
 PLUGIN_GROUPS = {
@@ -28,3 +29,24 @@ def load_plugin(kind: str, name: str) -> Any:
         raise PluginError(f"No {kind} plugin named {name!r} is installed") from exc
     except Exception as exc:
         raise PluginError(f"Failed to load {kind} plugin {name!r}: {exc}") from exc
+
+
+def load_connector_manifest(kind: str, name: str) -> ConnectorSpec:
+    """Load constructor-free metadata for a manifest-aware connector plugin."""
+    plugin = load_plugin(kind, name)
+    manifest = getattr(plugin, "manifest", None)
+    if not callable(manifest):
+        raise PluginError(f"{kind} plugin {name!r} does not expose manifest()")
+    try:
+        spec = manifest()
+    except NotImplementedError as exc:
+        raise PluginError(f"{kind} plugin {name!r} does not expose manifest()") from exc
+    except Exception as exc:
+        raise PluginError(f"Failed to load {kind} plugin {name!r} manifest: {exc}") from exc
+    if not isinstance(spec, ConnectorSpec):
+        raise PluginError(f"{kind} plugin {name!r} manifest() did not return ConnectorSpec")
+    if spec.name != name:
+        raise PluginError(
+            f"{kind} plugin entry point {name!r} returned manifest name {spec.name!r}"
+        )
+    return spec

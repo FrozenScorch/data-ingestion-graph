@@ -162,7 +162,8 @@ class LocalDocumentsSource(Source):
         self.max_archive_uncompressed_bytes = max_archive_uncompressed_bytes
         self._streams: dict[str, Path] = {}
 
-    def spec(self) -> ConnectorSpec:
+    @classmethod
+    def manifest(cls) -> ConnectorSpec:
         return ConnectorSpec(
             name="local_documents",
             version="1.0.0",
@@ -223,6 +224,9 @@ class LocalDocumentsSource(Source):
                 schema_discovery=True,
             ),
         )
+
+    def spec(self) -> ConnectorSpec:
+        return self.manifest()
 
     async def check(self) -> CheckResult:
         missing = [str(path) for path in self.paths if not path.exists()]

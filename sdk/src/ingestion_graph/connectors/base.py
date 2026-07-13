@@ -44,6 +44,16 @@ class StreamDescriptor:
 
 
 class Source(ABC):
+    @classmethod
+    def manifest(cls) -> ConnectorSpec:
+        """Return constructor-free connector metadata when the source supports it.
+
+        Existing third-party sources that only implement ``spec()`` remain valid.
+        Manifest-aware registries should treat ``NotImplementedError`` as an
+        explicit legacy-plugin boundary rather than instantiate the connector.
+        """
+        raise NotImplementedError(f"{cls.__name__} does not expose a connector manifest")
+
     @abstractmethod
     def spec(self) -> ConnectorSpec: ...
 
