@@ -1,14 +1,15 @@
 """
 Execution models: runs, run_nodes, checkpoints, execution_logs, run_costs.
 """
+
 import enum
 import uuid
-from datetime import datetime
-from sqlalchemy import String, Integer, Float, DateTime, ForeignKey, Text, Index
-from sqlalchemy.dialects.postgresql import UUID, JSONB
-from sqlalchemy.orm import Mapped, mapped_column, relationship
+from datetime import datetime, timezone
 
 from app.models.base import Base, TimestampMixin, UUIDMixin
+from sqlalchemy import DateTime, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint
+from sqlalchemy.dialects.postgresql import JSONB, UUID
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 
 class TriggerType(str, enum.Enum):
@@ -48,16 +49,34 @@ class LogLevel(str, enum.Enum):
     CRITICAL = "critical"
 
 
+class RunJobType(str, enum.Enum):
+    FULL = "full"
+    RETRY_FAILED = "retry_failed"
+
+
+class RunJobStatus(str, enum.Enum):
+    QUEUED = "queued"
+    LEASED = "leased"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
 class Run(UUIDMixin, TimestampMixin, Base):
     __tablename__ = "runs"
-    __table_args__ = (
-        Index("ix_runs_graph_id_status", "graph_id", "status"),
-    )
+    __table_args__ = (Index("ix_runs_graph_id_status", "graph_id", "status"),)
 
-    graph_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("graphs.id"), nullable=False)
-    graph_version_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("graph_versions.id"), nullable=True)
-    trigger_type: Mapped[str] = mapped_column(String(50), default=TriggerType.MANUAL.value, nullable=False)
-    triggered_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
+    graph_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("graphs.id"), nullable=False
+    )
+    graph_version_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("graph_versions.id"), nullable=True
+    )
+    trigger_type: Mapped[str] = mapped_column(
+        String(50), default=TriggerType.MANUAL.value, nullable=False
+    )
+    triggered_by: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id"), nullable=True
+    )
     status: Mapped[str] = mapped_column(String(50), default=RunStatus.PENDING.value, nullable=False)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
 
@@ -65,7 +84,9 @@ class Run(UUIDMixin, TimestampMixin, Base):
     # Use explicit selectinload() in queries that need these.
     graph = relationship("Graph", back_populates="runs", lazy="noload")
     graph_version = relationship("GraphVersion", back_populates="runs", lazy="noload")
-    triggered_by_user = relationship("User", back_populates="runs", foreign_keys=[triggered_by], lazy="noload")
+    triggered_by_user = relationship(
+        "User", back_populates="runs", foreign_keys=[triggered_by], lazy="noload"
+    )
     run_nodes = relationship("RunNode", back_populates="run", lazy="noload")
     checkpoints = relationship("Checkpoint", back_populates="run", lazy="noload")
     execution_logs = relationship("ExecutionLog", back_populates="run", lazy="noload")
@@ -77,16 +98,54 @@ class Run(UUIDMixin, TimestampMixin, Base):
         return f"<Run id={self.id} status={self.status}>"
 
 
-class RunNode(UUIDMixin, TimestampMixin, Base):
-    __tablename__ = "run_nodes"
+class RunJob(UUIDMixin, TimestampMixin, Base):
+    """Durable dispatch record for a graph run.
+
+    One row is reused when an existing failed run is retried. A lease makes
+    claims mutually exclusive across API/worker processes and expires after a
+    crashed worker stops heartbeating.
+    """
+
+    __tablename__ = "run_jobs"
     __table_args__ = (
-        Index("ix_run_nodes_run_id_status", "run_id", "status"),
+        UniqueConstraint("run_id", name="uq_run_jobs_run_id"),
+        Index("ix_run_jobs_claim", "status", "available_at", "lease_expires_at"),
     )
 
-    run_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("runs.id"), nullable=False)
+    run_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("runs.id", ondelete="CASCADE"), nullable=False
+    )
+    job_type: Mapped[str] = mapped_column(String(50), default=RunJobType.FULL.value, nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(50), default=RunJobStatus.QUEUED.value, nullable=False
+    )
+    available_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False
+    )
+    lease_owner: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    def __repr__(self) -> str:
+        return f"<RunJob id={self.id} run_id={self.run_id} status={self.status}>"
+
+
+class RunNode(UUIDMixin, TimestampMixin, Base):
+    __tablename__ = "run_nodes"
+    __table_args__ = (Index("ix_run_nodes_run_id_status", "run_id", "status"),)
+
+    run_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("runs.id"), nullable=False
+    )
     node_id: Mapped[str] = mapped_column(String(255), nullable=False)
     node_type: Mapped[str] = mapped_column(String(100), nullable=False)
-    status: Mapped[str] = mapped_column(String(50), default=NodeStatus.PENDING.value, nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(50), default=NodeStatus.PENDING.value, nullable=False
+    )
     attempt_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     max_retries: Mapped[int] = mapped_column(Integer, default=3, nullable=False)
     input_data: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
@@ -105,7 +164,9 @@ class RunNode(UUIDMixin, TimestampMixin, Base):
 class Checkpoint(UUIDMixin, Base):
     __tablename__ = "checkpoints"
 
-    run_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("runs.id"), nullable=False)
+    run_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("runs.id"), nullable=False
+    )
     node_id: Mapped[str] = mapped_column(String(255), nullable=False)
     checkpoint_type: Mapped[str] = mapped_column(String(50), nullable=False)
     state_data: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
@@ -125,12 +186,14 @@ class Checkpoint(UUIDMixin, Base):
 
 class ExecutionLog(UUIDMixin, Base):
     __tablename__ = "execution_logs"
-    __table_args__ = (
-        Index("ix_execution_logs_run_id_level", "run_id", "level"),
-    )
+    __table_args__ = (Index("ix_execution_logs_run_id_level", "run_id", "level"),)
 
-    run_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("runs.id"), nullable=False)
-    run_node_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("run_nodes.id"), nullable=True)
+    run_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("runs.id"), nullable=False
+    )
+    run_node_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("run_nodes.id"), nullable=True
+    )
     node_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     level: Mapped[str] = mapped_column(String(20), default=LogLevel.INFO.value, nullable=False)
     message: Mapped[str] = mapped_column(Text, nullable=False)
@@ -150,12 +213,14 @@ class ExecutionLog(UUIDMixin, Base):
 
 class RunCost(UUIDMixin, Base):
     __tablename__ = "run_costs"
-    __table_args__ = (
-        Index("ix_run_costs_run_id", "run_id"),
-    )
+    __table_args__ = (Index("ix_run_costs_run_id", "run_id"),)
 
-    run_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("runs.id"), nullable=False)
-    run_node_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("run_nodes.id"), nullable=True)
+    run_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("runs.id"), nullable=False
+    )
+    run_node_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("run_nodes.id"), nullable=True
+    )
     provider: Mapped[str] = mapped_column(String(100), nullable=False)
     model_id: Mapped[str] = mapped_column(String(255), nullable=False)
     input_tokens: Mapped[int] = mapped_column(Integer, default=0, nullable=False)

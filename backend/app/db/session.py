@@ -1,10 +1,9 @@
 """
 SQLAlchemy async engine and session factory.
 """
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-from sqlalchemy.pool import NullPool
 
 from app.config import settings
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 # Create async engine
 engine = create_async_engine(
@@ -41,6 +40,8 @@ async def init_db() -> None:
     Initialize database by creating all tables.
     Called during app startup lifespan.
     """
+    import app.models  # noqa: F401
     from app.models.base import Base
+
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)

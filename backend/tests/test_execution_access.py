@@ -54,7 +54,6 @@ async def test_other_user_cannot_retry_victim_upload_run():
     ):
         await retry_failed_run(
             run_id=run.id,
-            background_tasks=MagicMock(),
             db=db,
             current_user={"user_id": attacker, "role": "user"},
         )

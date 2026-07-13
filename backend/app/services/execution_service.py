@@ -5,7 +5,7 @@ Execution service: run creation, management, and control.
 import logging
 from uuid import UUID
 
-from app.models.execution import Run, RunStatus, TriggerType
+from app.models.execution import Run, RunJobType, RunStatus, TriggerType
 from app.models.graph import Graph
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -20,8 +20,9 @@ async def create_run(
     triggered_by: UUID,
     trigger_type: str = TriggerType.MANUAL.value,
     graph_version_id: UUID | None = None,
+    enqueue_job_type: str | None = None,
 ) -> Run:
-    """Create a new run for a graph."""
+    """Create a new run, optionally with an atomic durable dispatch row."""
     run = Run(
         graph_id=graph_id,
         graph_version_id=graph_version_id,
@@ -30,6 +31,16 @@ async def create_run(
         status=RunStatus.PENDING.value,
     )
     db.add(run)
+    if enqueue_job_type is not None:
+        from app.services.run_queue_service import enqueue_run_job
+
+        await db.flush()
+        await enqueue_run_job(
+            db,
+            run.id,
+            job_type=enqueue_job_type or RunJobType.FULL.value,
+            commit=False,
+        )
     await db.commit()
     await db.refresh(run)
     return run
