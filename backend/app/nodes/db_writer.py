@@ -129,13 +129,16 @@ class DatabaseWriterNode(BaseNode):
             batch_size = int(context.config.get("batch_size", 500))
             if mode not in {"insert", "upsert", "replace"}:
                 raise ValueError("Invalid database write mode")
-            raw_rows = context.input_data.get("rows", [])
+            table_input = context.input_data.get("table", context.input_data)
+            if not isinstance(table_input, Mapping):
+                raise ValueError("Database writer table input must be an object")
+            raw_rows = table_input.get("rows", [])
             if not isinstance(raw_rows, list) or any(
                 not isinstance(row, Mapping) for row in raw_rows
             ):
                 raise ValueError("Database writer input rows must be objects")
             rows = [dict(row) for row in raw_rows]
-            raw_type_hints = context.input_data.get("postgres_type_hints")
+            raw_type_hints = table_input.get("postgres_type_hints")
             if raw_type_hints is None:
                 postgres_type_hints: list[dict[str, Any]] = [{} for _ in rows]
             elif (

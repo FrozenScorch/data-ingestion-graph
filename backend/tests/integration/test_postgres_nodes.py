@@ -259,7 +259,7 @@ async def test_database_source_writer_and_vector_store_against_postgres():
                     "table_name": typed_target,
                     "mode": "insert",
                 },
-                input_data=studio_typed_source.output_data,
+                input_data={"table": studio_typed_source.output_data},
                 state=state,
             )
         )

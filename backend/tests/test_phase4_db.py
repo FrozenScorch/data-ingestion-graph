@@ -13,6 +13,7 @@ import uuid
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from app.engine.executor import DAGExecutor
 from app.nodes.base import NodeContext, PortDataType
 from app.nodes.database_source import DatabaseSourceNode
 from app.nodes.db_writer import DatabaseWriterNode
@@ -358,6 +359,39 @@ class TestDatabaseWriterNode:
 
         assert result.success is True
         envelope = connector.write.await_args.args[0][0]
+        assert envelope.metadata["ingestion_graph.postgres_types"] == {"occurred_at": "datetime"}
+
+    @pytest.mark.asyncio
+    async def test_executor_table_edge_unwraps_source_bundle_and_sidecar(self, base_context):
+        source_bundle = {
+            "rows": [{"occurred_at": "2026-01-02T03:04:05+00:00"}],
+            "row_count": 1,
+            "columns": ["occurred_at"],
+            "postgres_type_hints": [{"occurred_at": "datetime"}],
+        }
+        inputs, _lineage = DAGExecutor(MagicMock())._collect_inputs(
+            "writer",
+            [
+                {
+                    "source": "source",
+                    "target": "writer",
+                    "source_port": "table",
+                    "target_port": "table",
+                }
+            ],
+            {"outputs": {"source": source_bundle}},
+        )
+        base_context.node_id = "writer"
+        base_context.config["table_name"] = "output_table"
+        base_context.input_data = inputs
+        connector = _mock_postgres_destination(written=1)
+
+        with patch("app.nodes.db_writer.PostgresDestination", return_value=connector):
+            result = await DatabaseWriterNode().execute(base_context)
+
+        assert result.success is True
+        envelope = connector.write.await_args.args[0][0]
+        assert envelope.payload.data == source_bundle["rows"][0]
         assert envelope.metadata["ingestion_graph.postgres_types"] == {"occurred_at": "datetime"}
 
     @pytest.mark.asyncio
