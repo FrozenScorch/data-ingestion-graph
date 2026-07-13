@@ -24,6 +24,7 @@ from app.models import (  # noqa: F401
     RunJob,
     RunNode,
     SDKSourceState,
+    SDKSourceStateCandidate,
     User,
 )
 from app.models.base import Base

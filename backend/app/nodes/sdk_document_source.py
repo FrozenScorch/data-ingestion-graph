@@ -9,7 +9,10 @@ from uuid import UUID
 
 from app.nodes.base import BaseNode, NodeContext, NodeResult, PortDataType, PortDef
 from app.services import upload_service
-from app.services.sdk_source_state_service import StudioSDKSourceStateStore
+from app.services.sdk_source_state_service import (
+    SDKSourceStateLeaseError,
+    StudioSDKSourceStateStore,
+)
 from ingestion_graph.messages import RecordMessage, StateMessage
 from ingestion_graph.sources import LocalDocumentsSource
 from ingestion_graph.sources.documents import SUPPORTED_EXTENSIONS
@@ -28,6 +31,8 @@ class _StudioStateStore(Protocol):
     pipeline_key: str
 
     async def acquire_lock(self) -> None: ...
+
+    async def revalidate_lease(self) -> None: ...
 
     async def load(self, pipeline: str, source: str, stream: str) -> Mapping[str, Any]: ...
 
@@ -183,9 +188,12 @@ class SDKDocumentSourceNode(BaseNode):
                 _StudioStateStore,
                 StudioSDKSourceStateStore(
                     context.db_session,
+                    run_id=UUID(context.run_id),
                     owner_id=owner_id,
                     graph_id=graph_id,
                     node_id=context.node_id,
+                    job_id=UUID(context.job_id) if context.job_id is not None else None,
+                    lease_owner=context.lease_owner,
                 ),
             )
         pipeline = store.pipeline_key
@@ -212,14 +220,14 @@ class SDKDocumentSourceNode(BaseNode):
                 configured.append((artifact_id, stream, path))
 
             for stream in sorted(saved_streams - set(selected_streams)):
-                artifact_id = _artifact_id(stream)
-                if artifact_id is None:
+                prior_artifact_id = _artifact_id(stream)
+                if prior_artifact_id is None:
                     continue
                 configured.append(
                     (
-                        artifact_id,
+                        prior_artifact_id,
                         stream,
-                        upload_service.upload_reconciliation_path(owner_id, artifact_id),
+                        upload_service.upload_reconciliation_path(owner_id, prior_artifact_id),
                     )
                 )
 
@@ -246,16 +254,16 @@ class SDKDocumentSourceNode(BaseNode):
             output_bytes = 0
             pending_states: dict[str, Mapping[str, Any]] = {}
             streams = await connector.discover()
-            for stream in streams:
-                saved_state = await store.load(pipeline, SOURCE_NAME, stream.name)
+            for descriptor in streams:
+                saved_state = await store.load(pipeline, SOURCE_NAME, descriptor.name)
                 final_state: Mapping[str, Any] | None = None
-                async for message in connector.read(stream, saved_state):
+                async for message in connector.read(descriptor, saved_state):
                     if isinstance(message, RecordMessage):
                         if len(items) >= max_output_items:
                             raise _OutputLimitExceeded("max_output_items")
                         item = _sanitized_envelope(
                             message.envelope,
-                            artifact_by_stream[stream.name],
+                            artifact_by_stream[descriptor.name],
                         )
                         item_bytes = len(
                             json.dumps(
@@ -272,10 +280,10 @@ class SDKDocumentSourceNode(BaseNode):
                         final_state = dict(message.state)
                 if final_state is None:
                     raise RuntimeError("Document SDK source ended without a state message")
-                pending_states[stream.name] = final_state
+                pending_states[descriptor.name] = final_state
 
-            # Do not stage any state until every configured SDK stream completed.
-            # The runner commits these writes atomically with the successful output.
+            # Do not stage any candidate until every configured SDK stream completed.
+            # POST_EXEC makes the candidate durable; whole-run completion promotes it.
             if production_store:
                 async with context.db_session.begin_nested():
                     await _stage_states(
@@ -284,6 +292,7 @@ class SDKDocumentSourceNode(BaseNode):
                         selected_streams=set(selected_streams),
                         pending_states=pending_states,
                     )
+                    await store.revalidate_lease()
             else:
                 await _stage_states(
                     store,
@@ -307,6 +316,8 @@ class SDKDocumentSourceNode(BaseNode):
                     "operations": operations,
                 },
             )
+        except SDKSourceStateLeaseError:
+            raise
         except _OutputLimitExceeded as exc:
             return self._failure(
                 f"Document delta exceeds {exc}; narrow the selection or raise the limit"

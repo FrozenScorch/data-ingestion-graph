@@ -9,8 +9,10 @@ from uuid import uuid4
 
 import pytest
 from app.models.execution import RunJobStatus
+from app.services.execution_service import pause_run, resume_run
 from app.services.run_queue_service import (
     claim_run_job,
+    finalize_run_job,
     finish_run_job,
     heartbeat_run_job,
     mark_run_failed_if_owned,
@@ -161,6 +163,80 @@ async def test_postgres_claim_is_exclusive_and_expired_lease_is_reclaimed():
                 job_id=job_id,
                 worker_id=replacement_owner,
             )
+
+        paused_run_id = uuid4()
+        paused_job_id = uuid4()
+        async with admin_engine.begin() as conn:
+            await conn.execute(
+                text(
+                    f"""
+                    INSERT INTO "{schema}".runs
+                        (id, graph_id, graph_version_id, status)
+                    VALUES (:run_id, :graph_id, :graph_version_id, 'paused')
+                    """
+                ),
+                {
+                    "run_id": paused_run_id,
+                    "graph_id": uuid4(),
+                    "graph_version_id": uuid4(),
+                },
+            )
+            await conn.execute(
+                text(
+                    f"""
+                    INSERT INTO "{schema}".run_jobs
+                        (id, run_id, job_type, status, available_at)
+                    VALUES (:job_id, :run_id, 'full', 'queued', :available_at)
+                    """
+                ),
+                {"job_id": paused_job_id, "run_id": paused_run_id, "available_at": now},
+            )
+
+        async with sessions() as db:
+            assert await claim_run_job(
+                db,
+                worker_id="paused-worker",
+                lease_seconds=60,
+                now=now,
+            ) is None
+
+        async with sessions() as db:
+            resumed = await resume_run(db, paused_run_id)
+            assert resumed is not None and resumed.status == "running"
+        async with sessions() as db:
+            resumed_job = await claim_run_job(
+                db,
+                worker_id="resumed-worker",
+                lease_seconds=60,
+                now=utc_now(),
+            )
+            assert resumed_job is not None and resumed_job.id == paused_job_id
+
+        async with sessions() as db:
+            paused = await pause_run(db, paused_run_id)
+            assert paused is not None and paused.status == "paused"
+        async with sessions() as db:
+            assert await finalize_run_job(
+                db,
+                job_id=paused_job_id,
+                run_id=paused_run_id,
+                worker_id="resumed-worker",
+            ) == "requeued"
+        async with admin_engine.connect() as conn:
+            paused_state = (
+                await conn.execute(
+                    text(
+                        f"""
+                        SELECT r.status, j.status, j.lease_owner
+                        FROM "{schema}".runs r
+                        JOIN "{schema}".run_jobs j ON j.run_id = r.id
+                        WHERE r.id = :run_id
+                        """
+                    ),
+                    {"run_id": paused_run_id},
+                )
+            ).one()
+        assert paused_state == ("paused", "queued", None)
 
         orphaned_run_id = uuid4()
         async with admin_engine.begin() as conn:

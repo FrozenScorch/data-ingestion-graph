@@ -2,7 +2,14 @@
  * Execution (run) types matching backend API.
  */
 
-export type RunStatus = 'pending' | 'running' | 'completed' | 'failed' | 'cancelled';
+export type RunStatus =
+  | 'pending'
+  | 'running'
+  | 'paused'
+  | 'completed'
+  | 'failed'
+  | 'cancelled'
+  | 'superseded';
 export type TriggerType = 'manual' | 'webhook' | 'schedule';
 export type NodeRunStatus = 'pending' | 'running' | 'completed' | 'failed' | 'cancelled' | 'skipped';
 

@@ -19,6 +19,10 @@ from app.models.execution import (
     RunStatus,
 )
 from app.models.graph import Graph, GraphVersion
+from app.services.sdk_source_state_service import (
+    complete_run_with_source_state_promotion,
+    revalidate_source_state_staging_lease,
+)
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -27,12 +31,17 @@ async def execute_run_job(db: AsyncSession, job: RunJob, ws_manager: Any = None)
     run = await db.get(Run, job.run_id)
     if run is None:
         raise RuntimeError("Queued run no longer exists")
-    if run.status in (RunStatus.CANCELLED.value, RunStatus.COMPLETED.value):
+    if run.status in (
+        RunStatus.PAUSED.value,
+        RunStatus.CANCELLED.value,
+        RunStatus.COMPLETED.value,
+        RunStatus.SUPERSEDED.value,
+    ):
         return
     if job.job_type == RunJobType.RETRY_FAILED.value:
-        await _execute_failed_nodes(db, run, ws_manager)
+        await _execute_failed_nodes(db, run, job, ws_manager)
     else:
-        await _execute_full_run(db, run, ws_manager)
+        await _execute_full_run(db, run, job, ws_manager)
 
 
 async def _load_version(
@@ -49,12 +58,21 @@ async def _load_version(
     return nodes, edges, version.node_configs or {}
 
 
-async def _execute_full_run(db: AsyncSession, run: Run, ws_manager: Any) -> None:
+async def _execute_full_run(
+    db: AsyncSession, run: Run, job: RunJob, ws_manager: Any
+) -> None:
     nodes, edges, node_configs = await _load_version(db, run)
-    await DAGExecutor(db, ws_manager).execute(run, nodes, edges, node_configs)
+    await DAGExecutor(
+        db,
+        ws_manager,
+        completion_job_id=job.id,
+        completion_lease_owner=job.lease_owner,
+    ).execute(run, nodes, edges, node_configs)
 
 
-async def _execute_failed_nodes(db: AsyncSession, run: Run, ws_manager: Any) -> None:
+async def _execute_failed_nodes(
+    db: AsyncSession, run: Run, job: RunJob, ws_manager: Any
+) -> None:
     nodes, edges, node_configs = await _load_version(db, run)
     checkpoints = await get_checkpoints(db, run.id)
     restored_outputs: dict[str, Any] = {}
@@ -78,7 +96,7 @@ async def _execute_failed_nodes(db: AsyncSession, run: Run, ws_manager: Any) -> 
         if run_node.status == NodeStatus.FAILED.value
     }
     if not failed_node_ids:
-        await _execute_full_run(db, run, ws_manager)
+        await _execute_full_run(db, run, job, ws_manager)
         return
 
     downstream: dict[str, set[str]] = {}
@@ -100,7 +118,12 @@ async def _execute_failed_nodes(db: AsyncSession, run: Run, ws_manager: Any) -> 
     owner_id = owner_result.scalar_one_or_none()
     if owner_id is None:
         raise RuntimeError("Graph owner not found")
-    executor = DAGExecutor(db, ws_manager)
+    executor = DAGExecutor(
+        db,
+        ws_manager,
+        completion_job_id=job.id,
+        completion_lease_owner=job.lease_owner,
+    )
     connections = await executor._resolve_connections(owner_id, node_configs)
     exec_state: dict[str, Any] = {
         "outputs": restored_outputs,
@@ -109,13 +132,28 @@ async def _execute_failed_nodes(db: AsyncSession, run: Run, ws_manager: Any) -> 
         "graph_id": str(run.graph_id),
     }
 
-    run.status = RunStatus.RUNNING.value
+    locked_run_result = await db.execute(
+        select(Run)
+        .where(Run.id == run.id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    locked_run = locked_run_result.scalar_one_or_none()
+    if locked_run is None:
+        await db.rollback()
+        raise RuntimeError("Run no longer exists")
+    run = locked_run
+    if run.status in (RunStatus.PENDING.value, RunStatus.FAILED.value):
+        run.status = RunStatus.RUNNING.value
+    if run.status != RunStatus.RUNNING.value:
+        await db.commit()
+        return
     run.error_message = None
     await db.commit()
 
     for level_nodes in topological_sort(nodes, edges):
         await db.refresh(run)
-        if run.status == RunStatus.CANCELLED.value:
+        if run.status in (RunStatus.PAUSED.value, RunStatus.CANCELLED.value):
             return
         for node_id in (node for node in level_nodes if node in nodes_to_reexecute):
             node_def = nodes[node_id]
@@ -131,14 +169,28 @@ async def _execute_failed_nodes(db: AsyncSession, run: Run, ws_manager: Any) -> 
                 input_data=inputs,
                 state=executor._state_for_node(node_id, node_configs, exec_state),
                 defer_completion_commit=True,
+                job_id=job.id,
+                lease_owner=job.lease_owner,
             )
+            if run_node.status == NodeStatus.SKIPPED.value:
+                return
             if run_node.status != NodeStatus.COMPLETED.value:
-                run.status = RunStatus.FAILED.value
-                run.error_message = f"Retry failed at node {node_id}: {run_node.error_message}"
-                await db.commit()
+                error = f"Retry failed at node {node_id}: {run_node.error_message}"
+                await executor._fail_run(
+                    run,
+                    error,
+                    {"node_id": node_id, "error": run_node.error_message},
+                )
                 return
             if run_node.output_data:
                 exec_state["outputs"][node_id] = run_node.output_data
+            if node_type == "sdk_document_source":
+                await revalidate_source_state_staging_lease(
+                    db,
+                    run.id,
+                    job_id=job.id,
+                    lease_owner=job.lease_owner,
+                )
             await save_checkpoint(
                 db,
                 run.id,
@@ -148,5 +200,9 @@ async def _execute_failed_nodes(db: AsyncSession, run: Run, ws_manager: Any) -> 
                 node_output=run_node.output_data,
             )
 
-    run.status = RunStatus.COMPLETED.value
-    await db.commit()
+    await complete_run_with_source_state_promotion(
+        db,
+        run.id,
+        job_id=job.id,
+        lease_owner=job.lease_owner,
+    )

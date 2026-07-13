@@ -10,6 +10,29 @@ At startup, the worker also queues legacy pending or running runs that have an
 immutable graph version but no job record. Completed and cancelled runs are
 never re-executed when an expired lease is reclaimed.
 
+SDK source adapters stage run-scoped state candidates at source POST_EXEC. The
+worker promotes them only after all graph nodes succeed. A long connector read
+holds only the deterministic run and source-scope transaction advisory fences;
+its lease checks do not lock the job row, so heartbeats can renew concurrently.
+Candidate staging then locks the job row followed by the forced-refresh run row
+for the short POST_EXEC transaction. Completion takes the run advisory fence,
+sorted source scopes, job row, and run row. Thus every mixed database row-lock
+path remains job-then-run while advisory fences preserve a stable candidate
+snapshot. The lease is rechecked after waits and immediately before commits.
+Direct execution uses the same advisory fences without requiring a job lease.
+A downstream failure keeps candidates for same-run failed-node retry; a crash or
+lease loss cannot expose them as committed source state. Cancellation atomically
+deletes its candidates because it is terminal. Paused runs retain candidates,
+while a new full run locks prior failed jobs and then their runs for the same owner and
+graph. Queued or leased retries survive; inactive failures become terminally
+`superseded` and lose their candidates atomically before the new run is created.
+
+Queue claims join the run and accept only `pending` or `running` work. Pausing
+serializes the job row before the run row; a cooperative worker requeues rather
+than completes that job. Resume changes `paused` to `running` and resets the
+single job to `queued` in the same transaction, clearing the old lease so a stale
+worker cannot stage state or acknowledge failure/completion.
+
 ## Runtime settings
 
 ```dotenv
@@ -25,6 +48,11 @@ lease for connectors that can block the Python event loop for long periods.
 Multiple Studio processes may safely claim from the same PostgreSQL database;
 each process starts its configured number of worker slots.
 
+Run failure recording locks and validates the worker's current job lease before
+using a forced-refresh run-row lock. A late node failure
+can change only `running` to `failed`, so it cannot overwrite a concurrently
+committed cancellation, pause, completion, or supersession.
+
 ## Delivery guarantee
 
 Recovery is **at least once**. A worker can perform an external side effect and
@@ -33,6 +61,11 @@ must use stable source keys, destination upserts, idempotency keys, or
 transactional writes. Non-idempotent destinations should not be used for
 automatically recovered production runs until they implement one of those
 guards.
+
+Source-state promotion observes the node success boundary; it does not strengthen
+a destination that returns success before its data is durable. Destination nodes
+participating in flush-before-acknowledgement must finish their durable write or
+flush before returning success.
 
 ## Verification
 

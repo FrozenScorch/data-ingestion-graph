@@ -9,18 +9,22 @@ import sys
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
-
 from app.db.session import AsyncSessionLocal
-from app.engine.scheduler import topological_sort, validate_dag
-from app.engine.state import can_transition, ExecutionState
-from app.engine.runner import run_node_with_retry
 from app.engine.checkpoint import save_checkpoint
-from app.engine.retry import RetryConfig
-from app.models.execution import Run, RunStatus, CheckpointType
+from app.engine.runner import run_node_with_retry
+from app.engine.scheduler import topological_sort, validate_dag
+from app.engine.state import can_transition
+from app.models.execution import CheckpointType, Run, RunStatus
 from app.models.graph import Connection, Graph
 from app.services.connection_crypto import decrypt_connection_config
+from app.services.execution_service import fail_run_if_running
+from app.services.sdk_source_state_service import (
+    SDKSourceStateLeaseError,
+    complete_run_with_source_state_promotion,
+    revalidate_source_state_staging_lease,
+)
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 logger = logging.getLogger(__name__)
 
@@ -40,9 +44,18 @@ class DAGExecutor:
     5. Tracking lineage and costs
     """
 
-    def __init__(self, db: AsyncSession, ws_manager=None):
+    def __init__(
+        self,
+        db: AsyncSession,
+        ws_manager=None,
+        *,
+        completion_job_id: UUID | None = None,
+        completion_lease_owner: str | None = None,
+    ):
         self.db = db
         self.ws_manager = ws_manager
+        self.completion_job_id = completion_job_id
+        self.completion_lease_owner = completion_lease_owner
 
     async def execute(
         self,
@@ -63,31 +76,42 @@ class DAGExecutor:
         Returns:
             Updated Run record with final status.
         """
+        # Force-refresh the identity-mapped run under lock before acting on it.
+        # A cancellation, pause, or completion committed by another session wins.
+        run_result = await self.db.execute(
+            select(Run)
+            .where(Run.id == run.id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        locked_run = run_result.scalar_one_or_none()
+        if locked_run is None:
+            await self.db.rollback()
+            raise RuntimeError("Run no longer exists")
+        run = locked_run
+        if run.status == RunStatus.PENDING.value:
+            run.status = RunStatus.RUNNING.value
+        if run.status != RunStatus.RUNNING.value:
+            await self.db.commit()
+            return run
+        await self.db.commit()
+
         # Validate DAG
         errors = validate_dag(nodes_data, edges_data)
         if errors:
-            run.status = RunStatus.FAILED.value
-            run.error_message = f"Invalid DAG: {'; '.join(errors)}"
-            await self.db.commit()
-            await self._emit_event(run.id, "run_failed", {"errors": errors})
-            return run
+            return await self._fail_run(
+                run,
+                f"Invalid DAG: {'; '.join(errors)}",
+                {"errors": errors},
+            )
 
-        # Update run status with state machine validation
-        if can_transition(run.status, RunStatus.RUNNING.value):
-            run.status = RunStatus.RUNNING.value
-            await self.db.commit()
         await self._emit_event(run.id, "run_started", {})
 
         # Compute execution levels (topological sort)
         try:
             levels = topological_sort(nodes_data, edges_data)
         except ValueError as e:
-            if can_transition(run.status, RunStatus.FAILED.value):
-                run.status = RunStatus.FAILED.value
-                run.error_message = str(e)
-                await self.db.commit()
-            await self._emit_event(run.id, "run_failed", {"error": str(e)})
-            return run
+            return await self._fail_run(run, str(e), {"error": str(e)})
 
         # Resolve only graph-owner connections referenced by this immutable graph
         # version. Credentials remain server-side and are never copied into node configs.
@@ -95,11 +119,8 @@ class DAGExecutor:
             owner_id = await self._graph_owner(run.graph_id)
             connections = await self._resolve_connections(owner_id, node_configs or {})
         except ValueError:
-            run.status = RunStatus.FAILED.value
-            run.error_message = "Invalid or unauthorized graph resource reference"
-            await self.db.commit()
-            await self._emit_event(run.id, "run_failed", {"error": run.error_message})
-            return run
+            error = "Invalid or unauthorized graph resource reference"
+            return await self._fail_run(run, error, {"error": error})
 
         # Shared orchestration state. Credentials are scoped into a per-node copy
         # immediately before execution and are never exposed to unrelated nodes.
@@ -114,8 +135,8 @@ class DAGExecutor:
         for level_idx, level_nodes in enumerate(levels):
             # Check if run is still running (could have been cancelled)
             await self.db.refresh(run)
-            if run.status == RunStatus.CANCELLED.value:
-                break
+            if run.status in (RunStatus.PAUSED.value, RunStatus.CANCELLED.value):
+                return run
 
             logger.info(f"Executing level {level_idx} with {len(level_nodes)} nodes")
 
@@ -130,25 +151,21 @@ class DAGExecutor:
                     node_configs,
                     exec_state,
                 )
+                await self.db.refresh(run)
+                if run.status in (RunStatus.PAUSED.value, RunStatus.CANCELLED.value):
+                    return run
                 # Check for failures in parallel results
                 for node_id, run_node in results.items():
                     if run_node.status == "failed":
-                        if can_transition(run.status, RunStatus.FAILED.value):
-                            run.status = RunStatus.FAILED.value
-                            node_type = nodes_data[node_id].get("type", "unknown")
-                            run.error_message = (
-                                f"Node {node_id} ({node_type}) failed: {run_node.error_message}"
-                            )
-                            await self.db.commit()
-                        await self._emit_event(
-                            run.id,
-                            "run_failed",
-                            {
-                                "node_id": node_id,
-                                "error": run_node.error_message,
-                            },
+                        node_type = nodes_data[node_id].get("type", "unknown")
+                        error = (
+                            f"Node {node_id} ({node_type}) failed: {run_node.error_message}"
                         )
-                        return run
+                        return await self._fail_run(
+                            run,
+                            error,
+                            {"node_id": node_id, "error": run_node.error_message},
+                        )
             else:
                 # Sequential fallback for small groups
                 result = await self._execute_level_sequential(
@@ -163,14 +180,39 @@ class DAGExecutor:
                 if result is not None:
                     return result  # A failure occurred
 
+        await self.db.refresh(run)
         # Mark run as completed if no failures (with state machine validation)
-        if run.status == RunStatus.RUNNING.value:
-            if can_transition(run.status, RunStatus.COMPLETED.value):
-                run.status = RunStatus.COMPLETED.value
-                await self.db.commit()
-            await self._emit_event(run.id, "run_completed", {})
+        if run.status == RunStatus.RUNNING.value and can_transition(
+            run.status, RunStatus.COMPLETED.value
+        ):
+            completed = await complete_run_with_source_state_promotion(
+                self.db,
+                run.id,
+                job_id=self.completion_job_id,
+                lease_owner=self.completion_lease_owner,
+            )
+            if completed:
+                await self._emit_event(run.id, "run_completed", {})
 
         return run
+
+    async def _fail_run(
+        self,
+        run: Run,
+        error_message: str,
+        event_data: dict[str, Any],
+    ) -> Run:
+        current_run, transitioned = await fail_run_if_running(
+            self.db,
+            run.id,
+            error_message,
+            job_id=self.completion_job_id,
+            lease_owner=self.completion_lease_owner,
+        )
+        resolved_run = current_run or run
+        if transitioned:
+            await self._emit_event(resolved_run.id, "run_failed", event_data)
+        return resolved_run
 
     async def _graph_owner(self, graph_id: UUID) -> UUID:
         result = await self.db.execute(select(Graph.owner_id).where(Graph.id == graph_id))
@@ -255,8 +297,12 @@ class DAGExecutor:
                     from app.models.execution import Run
 
                     node_run = await node_db.get(Run, run.id)
-                    if node_run and node_run.status == RunStatus.CANCELLED.value:
-                        from app.models.execution import RunNode as RN, NodeStatus
+                    if node_run and node_run.status in (
+                        RunStatus.PAUSED.value,
+                        RunStatus.CANCELLED.value,
+                    ):
+                        from app.models.execution import NodeStatus
+                        from app.models.execution import RunNode as RN
 
                         return node_id, RN(
                             run_id=run.id,
@@ -292,7 +338,11 @@ class DAGExecutor:
                         input_data=input_data,
                         state=self._state_for_node(node_id, node_configs, exec_state),
                         defer_completion_commit=True,
+                        job_id=self.completion_job_id,
+                        lease_owner=self.completion_lease_owner,
                     )
+                    if run_node.status == "skipped":
+                        return node_id, run_node
 
                     # Store output in execution state (only on success)
                     if run_node.output_data and run_node.status == "completed":
@@ -311,6 +361,13 @@ class DAGExecutor:
                             )
 
                     # Save post-execution checkpoint
+                    if node_type == "sdk_document_source":
+                        await revalidate_source_state_staging_lease(
+                            node_db,
+                            run.id,
+                            job_id=self.completion_job_id,
+                            lease_owner=self.completion_lease_owner,
+                        )
                     await save_checkpoint(
                         db=node_db,
                         run_id=run.id,
@@ -357,9 +414,12 @@ class DAGExecutor:
                         )
 
                     return node_id, run_node
+                except SDKSourceStateLeaseError:
+                    raise
                 except Exception:
                     logger.exception(f"Unexpected error in parallel node {node_id}")
-                    from app.models.execution import RunNode as RN, NodeStatus
+                    from app.models.execution import NodeStatus
+                    from app.models.execution import RunNode as RN
 
                     return node_id, RN(
                         run_id=run.id,
@@ -394,8 +454,8 @@ class DAGExecutor:
         """
         for node_id in level_nodes:
             await self.db.refresh(run)
-            if run.status == RunStatus.CANCELLED.value:
-                return None
+            if run.status in (RunStatus.PAUSED.value, RunStatus.CANCELLED.value):
+                return run
 
             node_def = nodes_data[node_id]
             node_type = node_def.get("type", node_def.get("node_type", "unknown"))
@@ -423,7 +483,12 @@ class DAGExecutor:
                 input_data=input_data,
                 state=self._state_for_node(node_id, node_configs, exec_state),
                 defer_completion_commit=True,
+                job_id=self.completion_job_id,
+                lease_owner=self.completion_lease_owner,
             )
+            if run_node.status == "skipped":
+                await self.db.refresh(run)
+                return run
 
             # Store output in execution state
             if run_node.output_data:
@@ -442,6 +507,13 @@ class DAGExecutor:
                     )
 
             # Save post-execution checkpoint
+            if node_type == "sdk_document_source":
+                await revalidate_source_state_staging_lease(
+                    self.db,
+                    run.id,
+                    job_id=self.completion_job_id,
+                    lease_owner=self.completion_lease_owner,
+                )
             await save_checkpoint(
                 db=self.db,
                 run_id=run.id,
@@ -485,21 +557,12 @@ class DAGExecutor:
                     },
                 )
                 # Fail the entire run on node failure (with state machine validation)
-                if can_transition(run.status, RunStatus.FAILED.value):
-                    run.status = RunStatus.FAILED.value
-                    run.error_message = (
-                        f"Node {node_id} ({node_type}) failed: {run_node.error_message}"
-                    )
-                    await self.db.commit()
-                await self._emit_event(
-                    run.id,
-                    "run_failed",
-                    {
-                        "node_id": node_id,
-                        "error": run_node.error_message,
-                    },
+                error = f"Node {node_id} ({node_type}) failed: {run_node.error_message}"
+                return await self._fail_run(
+                    run,
+                    error,
+                    {"node_id": node_id, "error": run_node.error_message},
                 )
-                return run
 
         return None
 
@@ -555,14 +618,15 @@ class DAGExecutor:
     ) -> None:
         """Record a lineage entry for data flowing from source to target node."""
         try:
-            from app.models.lineage import DataLineage
             import json
+
+            from app.models.lineage import DataLineage
 
             session = db or self.db
 
             # Calculate approximate metrics
             items_count = None
-            items_sample = None
+            items_sample: Any = None
             bytes_transferred = None
 
             if isinstance(data, (list, tuple)):

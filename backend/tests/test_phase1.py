@@ -98,12 +98,14 @@ class TestStateMachine:
         assert can_transition('running', 'cancelled') is True
         assert can_transition('paused', 'running') is True
         assert can_transition('failed', 'running') is True  # retry
+        assert can_transition('failed', 'superseded') is True
 
     def test_invalid_transitions(self):
         assert can_transition('pending', 'completed') is False
         assert can_transition('completed', 'running') is False
         assert can_transition('cancelled', 'running') is False
         assert can_transition('completed', 'failed') is False
+        assert can_transition('superseded', 'running') is False
 
 
 class TestAuthService:

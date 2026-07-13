@@ -45,8 +45,10 @@
     switch (status) {
       case 'completed': return 'text-green-400';
       case 'running': return 'text-indigo-400';
+      case 'paused': return 'text-amber-400';
       case 'failed': return 'text-red-400';
       case 'cancelled': return 'text-gray-400';
+      case 'superseded': return 'text-gray-500';
       default: return 'text-gray-500';
     }
   }
@@ -60,6 +62,7 @@
         <div class="flex items-center gap-2">
           <div class="w-2 h-2 rounded-full
             {execution.currentRun.run.status === 'running' ? 'bg-indigo-400 animate-pulse' : ''}
+            {execution.currentRun.run.status === 'paused' ? 'bg-amber-400' : ''}
             {execution.currentRun.run.status === 'completed' ? 'bg-green-400' : ''}
             {execution.currentRun.run.status === 'failed' ? 'bg-red-400' : ''}
             {execution.currentRun.run.status === 'cancelled' ? 'bg-gray-400' : ''}

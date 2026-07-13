@@ -51,19 +51,39 @@ If execution stops between steps 2 and 4, replay may resend the page. Stable
 record IDs and an idempotent destination make that replay safe. A source ending
 after records without a state message is a protocol error.
 
-The Studio document adapter binds the SDK `StateStore` contract to PostgreSQL
-rows keyed by owner, graph, node, source, and stream. An advisory lock serializes
-concurrent runs for the same graph node. The adapter buffers all state messages
-until every stream completes. The node runner flushes successful bounded output
-and staged source state without committing; the executor's POST_EXEC checkpoint
-then commits all three in one database transaction. Failed or over-limit reads and
-checkpoint failures cannot advance state.
+The Studio document adapter binds the SDK `StateStore` contract to committed
+PostgreSQL rows keyed by owner, graph, node, source, and stream. Source writes go
+to a separate run-scoped candidate table containing the base revision/state and a
+save-or-delete intent. The adapter buffers all state messages until every stream
+completes. The source POST_EXEC checkpoint commits its successful bounded output
+and candidates together, but committed SDK reads do not see those candidates.
+
+During a source read, the durable worker holds only run/source advisory fences,
+allowing its job heartbeat to renew. Candidate staging briefly locks the job then
+the run. After every graph node reports success, completion takes the run advisory
+fence and sorted affected source scopes, then locks the job and run, rejects stale
+base revisions, and
+promotes all candidates in the same transaction that marks the run completed.
+Downstream failure, cancellation, lease loss, or a crash before that transaction
+leaves committed source state unchanged. Failed runs retain candidates so
+failed-node retry can restore the source POST_EXEC output and promote them after
+its downstream nodes succeed, without rerunning the source. Cancellation is
+terminal and deletes that run's candidates atomically. Starting a new full run
+locks prior failed jobs and then their runs for that owner/graph. A queued or leased
+retry wins and keeps its run/candidates; otherwise the old run becomes terminally
+`superseded` and its candidates are deleted before the new run is created. A
+concurrent retry then sees either `pending` or `superseded`, never an unlocked
+intermediate state. Paused runs retain candidates; their jobs are not claimable
+until resume atomically invalidates the prior lease and requeues the job. Revisions and retained delete
+tombstones prevent an older concurrent run from recreating or regressing state.
 
 This makes each Document Source run an incremental delta: unchanged uploads emit
 nothing, changed files emit stable upserts and deletes, and deselecting a prior
-artifact emits tombstones. Downstream Studio nodes are not yet part of that same
-flush-before-checkpoint transaction. The per-run Queryable Test Store is therefore
-a delta inspector, not a persistent current view across runs.
+artifact emits tombstones. Promotion relies on each downstream node's existing
+success contract. It does not make a generic Studio destination durable: a
+destination provides flush-before-acknowledgement only when it reports success
+after its own durable write/flush. The per-run Queryable Test Store remains a
+delta inspector, not a persistent current view across runs.
 
 ## Connector conformance requirements
 

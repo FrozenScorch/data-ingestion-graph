@@ -213,6 +213,9 @@ async def test_runner_defaults_to_configured_temp_dir(tmp_path):
 
     db = AsyncMock()
     db.add = MagicMock()
+    status_result = MagicMock()
+    status_result.scalar_one_or_none.return_value = "running"
+    db.execute.return_value = status_result
     with (
         patch("app.engine.runner.registry_get_node", return_value=CaptureNode()),
         patch("app.engine.runner.settings.temp_dir", str(tmp_path)),
@@ -244,6 +247,9 @@ async def test_runner_can_defer_completion_commit_until_checkpoint(tmp_path):
 
     db = AsyncMock()
     db.add = MagicMock()
+    status_result = MagicMock()
+    status_result.scalar_one_or_none.return_value = "running"
+    db.execute.return_value = status_result
     with patch("app.engine.runner.registry_get_node", return_value=SuccessfulNode()):
         result = await run_node_with_retry(
             db=db,

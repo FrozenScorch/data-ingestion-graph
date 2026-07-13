@@ -1022,6 +1022,9 @@ class TestRunRetry:
 
         mock_db = AsyncMock()
         run = _make_run(status=RunStatus.COMPLETED.value)
+        mock_run_result = MagicMock()
+        mock_run_result.scalar_one_or_none.return_value = run
+        mock_db.execute = AsyncMock(return_value=mock_run_result)
 
         with patch("app.api.executions.get_run", new_callable=AsyncMock, return_value=run):
             with pytest.raises(HTTPException) as exc_info:
@@ -1032,6 +1035,7 @@ class TestRunRetry:
                 )
 
         assert exc_info.value.status_code == 400
+        mock_db.rollback.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_retry_run_not_found(self):

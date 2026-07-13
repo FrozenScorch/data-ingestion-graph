@@ -67,6 +67,8 @@ class NodeContext:
     working_dir: str = "./data/temp"
     redis_client: Any = None  # redis.Redis, not typed to avoid import
     db_session: Any = None  # Execution-scoped AsyncSession for atomic control-plane adapters
+    job_id: str | None = None  # Durable dispatch identity, absent for direct execution
+    lease_owner: str | None = None  # Worker lease paired with job_id
 
 
 class BaseNode(ABC):

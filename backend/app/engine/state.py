@@ -2,7 +2,6 @@
 Execution state machine for run and node status management.
 """
 from enum import Enum
-from typing import Optional
 
 
 class ExecutionState(str, Enum):
@@ -13,6 +12,7 @@ class ExecutionState(str, Enum):
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
+    SUPERSEDED = "superseded"
 
 
 class NodeExecutionState(str, Enum):
@@ -28,18 +28,36 @@ class NodeExecutionState(str, Enum):
 # Valid state transitions for runs: current_state -> set of allowed next states
 VALID_TRANSITIONS: dict[ExecutionState, set[ExecutionState]] = {
     ExecutionState.PENDING: {ExecutionState.RUNNING, ExecutionState.CANCELLED},
-    ExecutionState.RUNNING: {ExecutionState.PAUSED, ExecutionState.COMPLETED, ExecutionState.FAILED, ExecutionState.CANCELLED},
+    ExecutionState.RUNNING: {
+        ExecutionState.PAUSED,
+        ExecutionState.COMPLETED,
+        ExecutionState.FAILED,
+        ExecutionState.CANCELLED,
+    },
     ExecutionState.PAUSED: {ExecutionState.RUNNING, ExecutionState.CANCELLED},
     ExecutionState.COMPLETED: set(),  # Terminal state
-    ExecutionState.FAILED: {ExecutionState.RUNNING},  # Can retry/replay
+    ExecutionState.FAILED: {
+        ExecutionState.RUNNING,
+        ExecutionState.SUPERSEDED,
+    },  # Retry or abandon for a new full run
     ExecutionState.CANCELLED: set(),  # Terminal state
+    ExecutionState.SUPERSEDED: set(),  # Terminal state
 }
 
 # Valid state transitions for nodes: current_state -> set of allowed next states
 VALID_NODE_TRANSITIONS: dict[NodeExecutionState, set[NodeExecutionState]] = {
     NodeExecutionState.PENDING: {NodeExecutionState.RUNNING, NodeExecutionState.SKIPPED},
-    NodeExecutionState.RUNNING: {NodeExecutionState.COMPLETED, NodeExecutionState.FAILED, NodeExecutionState.RETRYING, NodeExecutionState.SKIPPED},
-    NodeExecutionState.RETRYING: {NodeExecutionState.RUNNING, NodeExecutionState.FAILED, NodeExecutionState.SKIPPED},
+    NodeExecutionState.RUNNING: {
+        NodeExecutionState.COMPLETED,
+        NodeExecutionState.FAILED,
+        NodeExecutionState.RETRYING,
+        NodeExecutionState.SKIPPED,
+    },
+    NodeExecutionState.RETRYING: {
+        NodeExecutionState.RUNNING,
+        NodeExecutionState.FAILED,
+        NodeExecutionState.SKIPPED,
+    },
     NodeExecutionState.COMPLETED: set(),  # Terminal state
     NodeExecutionState.FAILED: {NodeExecutionState.RUNNING},  # Can retry
     NodeExecutionState.SKIPPED: set(),  # Terminal state
@@ -75,4 +93,5 @@ def get_terminal_states() -> list[str]:
     return [
         ExecutionState.COMPLETED.value,
         ExecutionState.CANCELLED.value,
+        ExecutionState.SUPERSEDED.value,
     ]
