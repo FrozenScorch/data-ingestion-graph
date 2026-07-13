@@ -16,7 +16,7 @@ job lease and run row lock, in the same transaction that marks the run completed
 A downstream failure keeps candidates for same-run failed-node retry; a crash or
 lease loss cannot expose them as committed source state. Cancellation atomically
 deletes its candidates because it is terminal. Paused runs retain candidates,
-while a new full run locks prior failed runs and their jobs for the same owner and
+while a new full run locks prior failed jobs and then their runs for the same owner and
 graph. Queued or leased retries survive; inactive failures become terminally
 `superseded` and lose their candidates atomically before the new run is created.
 
@@ -35,7 +35,8 @@ lease for connectors that can block the Python event loop for long periods.
 Multiple Studio processes may safely claim from the same PostgreSQL database;
 each process starts its configured number of worker slots.
 
-Run failure recording also uses a forced-refresh row lock. A late node failure
+Run failure recording locks and validates the worker's current job lease before
+using a forced-refresh run-row lock. A late node failure
 can change only `running` to `failed`, so it cannot overwrite a concurrently
 committed cancellation, pause, completion, or supersession.
 

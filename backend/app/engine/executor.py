@@ -198,6 +198,8 @@ class DAGExecutor:
             self.db,
             run.id,
             error_message,
+            job_id=self.completion_job_id,
+            lease_owner=self.completion_lease_owner,
         )
         resolved_run = current_run or run
         if transitioned:

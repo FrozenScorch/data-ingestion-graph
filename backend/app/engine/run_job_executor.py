@@ -20,7 +20,6 @@ from app.models.execution import (
     RunStatus,
 )
 from app.models.graph import Graph, GraphVersion
-from app.services.execution_service import fail_run_if_running
 from app.services.sdk_source_state_service import complete_run_with_source_state_promotion
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -116,7 +115,12 @@ async def _execute_failed_nodes(
     owner_id = owner_result.scalar_one_or_none()
     if owner_id is None:
         raise RuntimeError("Graph owner not found")
-    executor = DAGExecutor(db, ws_manager)
+    executor = DAGExecutor(
+        db,
+        ws_manager,
+        completion_job_id=job.id,
+        completion_lease_owner=job.lease_owner,
+    )
     connections = await executor._resolve_connections(owner_id, node_configs)
     exec_state: dict[str, Any] = {
         "outputs": restored_outputs,
@@ -165,15 +169,11 @@ async def _execute_failed_nodes(
             )
             if run_node.status != NodeStatus.COMPLETED.value:
                 error = f"Retry failed at node {node_id}: {run_node.error_message}"
-                current_run, transitioned = await fail_run_if_running(db, run.id, error)
-                if current_run is not None:
-                    run = current_run
-                if transitioned:
-                    await executor._emit_event(
-                        run.id,
-                        "run_failed",
-                        {"node_id": node_id, "error": run_node.error_message},
-                    )
+                await executor._fail_run(
+                    run,
+                    error,
+                    {"node_id": node_id, "error": run_node.error_message},
+                )
                 return
             if run_node.output_data:
                 exec_state["outputs"][node_id] = run_node.output_data

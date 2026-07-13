@@ -7,7 +7,7 @@ from uuid import UUID
 from app.db.session import get_session
 from app.engine.graph_data import unpack_version_data
 from app.middleware.auth import get_current_user
-from app.models.execution import Run, RunJobType
+from app.models.execution import Run, RunJob, RunJobType
 from app.schemas.execution import (
     RunCreate,
     RunDetailResponse,
@@ -207,6 +207,14 @@ async def retry_failed_run(
     if not run:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found")
     await _check_run_access(run, current_user, db)
+
+    job_lock_result = await db.execute(
+        select(RunJob)
+        .where(RunJob.run_id == run_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    job_lock_result.scalar_one_or_none()
 
     locked_result = await db.execute(
         select(Run)

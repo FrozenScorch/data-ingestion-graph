@@ -101,6 +101,38 @@ async def test_executor_locked_reload_does_not_resurrect_cached_cancelled_run(mo
 
 
 @pytest.mark.asyncio
+async def test_executor_failure_transition_passes_durable_lease_fence(monkeypatch):
+    run = Run(id=uuid4(), graph_id=uuid4(), status="running")
+    job_id = uuid4()
+    db = AsyncMock()
+    fail_run = AsyncMock(return_value=(run, True))
+    monkeypatch.setattr(executor_module, "fail_run_if_running", fail_run)
+    executor = DAGExecutor(
+        db,
+        completion_job_id=job_id,
+        completion_lease_owner="worker-1",
+    )
+    emit_event = AsyncMock()
+    monkeypatch.setattr(executor, "_emit_event", emit_event)
+
+    returned = await executor._fail_run(run, "node failed", {"node_id": "writer"})
+
+    assert returned is run
+    fail_run.assert_awaited_once_with(
+        db,
+        run.id,
+        "node failed",
+        job_id=job_id,
+        lease_owner="worker-1",
+    )
+    emit_event.assert_awaited_once_with(
+        run.id,
+        "run_failed",
+        {"node_id": "writer"},
+    )
+
+
+@pytest.mark.asyncio
 async def test_failed_node_retry_restores_source_output_and_promotes_without_rerun(monkeypatch):
     graph_id, run_id, version_id = uuid4(), uuid4(), uuid4()
     run = Run(id=run_id, graph_id=graph_id, graph_version_id=version_id, status="failed")
@@ -143,7 +175,8 @@ async def test_failed_node_retry_restores_source_output_and_promotes_without_rer
     executor = MagicMock()
     executor._resolve_connections = AsyncMock(return_value={})
     executor._collect_inputs.return_value = ({"items": [{"id": "restored"}]}, [])
-    monkeypatch.setattr(run_job_executor, "DAGExecutor", MagicMock(return_value=executor))
+    executor_factory = MagicMock(return_value=executor)
+    monkeypatch.setattr(run_job_executor, "DAGExecutor", executor_factory)
     monkeypatch.setattr(run_job_executor, "get_checkpoints", AsyncMock(return_value=[checkpoint]))
     run_node = AsyncMock(return_value=completed_node)
     monkeypatch.setattr(run_job_executor, "run_node_with_retry", run_node)
@@ -156,6 +189,12 @@ async def test_failed_node_retry_restores_source_output_and_promotes_without_rer
     assert run_node.await_count == 1
     assert run_node.await_args.kwargs["node_id"] == "destination"
     assert run_node.await_args.kwargs["input_data"] == {"items": [{"id": "restored"}]}
+    executor_factory.assert_called_once_with(
+        db,
+        None,
+        completion_job_id=job.id,
+        completion_lease_owner="worker-1",
+    )
     promote.assert_awaited_once_with(
         db,
         run_id,

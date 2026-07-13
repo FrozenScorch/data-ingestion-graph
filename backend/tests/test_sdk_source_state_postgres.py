@@ -9,7 +9,11 @@ from uuid import UUID, uuid4
 import pytest
 from app.models.execution import Run
 from app.models.sdk_source_state import SDKSourceState, SDKSourceStateCandidate
-from app.services.execution_service import cancel_run, fail_run_if_running
+from app.services.execution_service import (
+    RunFailureLeaseError,
+    cancel_run,
+    fail_run_if_running,
+)
 from app.services.sdk_source_state_service import (
     StaleSDKSourceStateCandidateError,
     StudioSDKSourceStateStore,
@@ -268,6 +272,60 @@ async def test_stale_failure_cannot_overwrite_cancelled_run():
         async with sessions() as verification_session:
             run = await verification_session.get(Run, run_id)
             assert run is not None and run.status == "cancelled"
+    finally:
+        await engine.dispose()
+        async with admin_engine.begin() as connection:
+            await connection.execute(text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
+        await admin_engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_replaced_worker_lease_cannot_transition_run_to_failed():
+    schema = f"sdk_failure_lease_{uuid4().hex}"
+    engine = create_async_engine(
+        TEST_DATABASE_URL,
+        connect_args={"server_settings": {"search_path": schema}},
+    )
+    admin_engine = create_async_engine(TEST_DATABASE_URL)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    owner_id, graph_id, run_id, job_id = uuid4(), uuid4(), uuid4(), uuid4()
+
+    try:
+        await _create_schema(admin_engine, schema)
+        async with sessions() as seed_session:
+            await _seed_run(
+                seed_session,
+                owner_id=owner_id,
+                graph_id=graph_id,
+                run_id=run_id,
+                job_id=job_id,
+                worker="stale-worker",
+            )
+
+        async with sessions() as replacement_session:
+            await replacement_session.execute(
+                text(
+                    "UPDATE run_jobs SET lease_owner = 'replacement-worker' "
+                    "WHERE id = :job_id"
+                ),
+                {"job_id": job_id},
+            )
+            await replacement_session.commit()
+
+        async with sessions() as stale_failure_session:
+            with pytest.raises(RunFailureLeaseError, match="lease was lost"):
+                await fail_run_if_running(
+                    stale_failure_session,
+                    run_id,
+                    "stale worker failure",
+                    job_id=job_id,
+                    lease_owner="stale-worker",
+                )
+
+        async with sessions() as verification_session:
+            run = await verification_session.get(Run, run_id)
+            assert run is not None and run.status == "running"
+            assert run.error_message is None
     finally:
         await engine.dispose()
         async with admin_engine.begin() as connection:

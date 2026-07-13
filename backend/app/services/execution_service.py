@@ -3,6 +3,7 @@ Execution service: run creation, management, and control.
 """
 
 import logging
+from datetime import UTC, datetime
 from uuid import UUID
 
 from app.models.execution import (
@@ -20,6 +21,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 logger = logging.getLogger(__name__)
+
+
+class RunFailureLeaseError(RuntimeError):
+    """The worker no longer owns the lease required to fail a run."""
 
 
 async def create_run(
@@ -144,8 +149,36 @@ async def fail_run_if_running(
     db: AsyncSession,
     run_id: UUID,
     error_message: str,
+    *,
+    job_id: UUID | None = None,
+    lease_owner: str | None = None,
 ) -> tuple[Run | None, bool]:
-    """Fail a run only if a locked, forced refresh still reports RUNNING."""
+    """Fail a still-running run, fencing durable workers by their current lease."""
+    if job_id is not None:
+        job_result = await db.execute(
+            select(RunJob)
+            .where(RunJob.id == job_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        job = job_result.scalar_one_or_none()
+        now = datetime.now(UTC)
+        if (
+            job is None
+            or lease_owner is None
+            or job.id != job_id
+            or job.run_id != run_id
+            or job.status != RunJobStatus.LEASED.value
+            or job.lease_owner != lease_owner
+            or job.lease_expires_at is None
+            or job.lease_expires_at <= now
+        ):
+            await db.rollback()
+            raise RunFailureLeaseError("Run job lease was lost before failure transition")
+    elif lease_owner is not None:
+        await db.rollback()
+        raise RunFailureLeaseError("Run failure lease owner requires a job id")
+
     result = await db.execute(
         select(Run)
         .where(Run.id == run_id)
@@ -196,32 +229,43 @@ async def _delete_run_source_state_candidates(db: AsyncSession, run: Run) -> Non
 
 
 async def _supersede_inactive_failed_runs(db: AsyncSession, graph_id: UUID) -> None:
+    candidate_result = await db.execute(
+        select(Run.id)
+        .where(
+            Run.graph_id == graph_id,
+            Run.status == RunStatus.FAILED.value,
+        )
+        .order_by(Run.id.asc())
+    )
+    candidate_run_ids = list(candidate_result.scalars().all())
+    if not candidate_run_ids:
+        return
+
+    job_result = await db.execute(
+        select(RunJob)
+        .where(RunJob.run_id.in_(candidate_run_ids))
+        .order_by(RunJob.run_id.asc(), RunJob.id.asc())
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    jobs_by_run_id = {job.run_id: job for job in job_result.scalars().all()}
+
     run_result = await db.execute(
         select(Run)
         .where(
             Run.graph_id == graph_id,
-            Run.status == RunStatus.FAILED.value,
+            Run.id.in_(candidate_run_ids),
         )
         .order_by(Run.id.asc())
         .with_for_update()
         .execution_options(populate_existing=True)
     )
     failed_runs = list(run_result.scalars().all())
-    if not failed_runs:
-        return
-
-    failed_run_ids = [run.id for run in failed_runs]
-    job_result = await db.execute(
-        select(RunJob)
-        .where(RunJob.run_id.in_(failed_run_ids))
-        .order_by(RunJob.run_id.asc(), RunJob.id.asc())
-        .with_for_update()
-        .execution_options(populate_existing=True)
-    )
-    jobs_by_run_id = {job.run_id: job for job in job_result.scalars().all()}
     active_job_statuses = {RunJobStatus.QUEUED.value, RunJobStatus.LEASED.value}
     superseded_run_ids: list[UUID] = []
     for run in failed_runs:
+        if run.status != RunStatus.FAILED.value:
+            continue
         job = jobs_by_run_id.get(run.id)
         if job is not None and job.status in active_job_statuses:
             continue
