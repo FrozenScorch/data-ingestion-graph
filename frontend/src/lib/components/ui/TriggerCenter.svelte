@@ -62,7 +62,6 @@
   let createType = $state<ManagedTriggerType>('schedule');
   let createName = $state('');
   let createEnabled = $state(true);
-  let createPinVersion = $state(false);
   let createScheduleKind = $state<ScheduleKind>('interval');
   let createIntervalAmount = $state(15);
   let createIntervalUnit = $state<IntervalUnit>('minutes');
@@ -185,7 +184,6 @@
     createType = type;
     createName = type === 'schedule' ? 'Scheduled ingestion' : 'Inbound webhook';
     createEnabled = true;
-    createPinVersion = Boolean(currentVersionId);
     createScheduleKind = 'interval';
     createIntervalAmount = 15;
     createIntervalUnit = 'minutes';
@@ -266,15 +264,17 @@
       createError = 'Give this trigger a name.';
       return;
     }
+    if (!currentVersionId) {
+      createError = 'Save the graph before creating a trigger.';
+      return;
+    }
 
     const payload: TriggerCreate = {
       name,
       trigger_type: createType,
-      enabled: createEnabled
+      enabled: createEnabled,
+      graph_version_id: currentVersionId
     };
-    if (createPinVersion && currentVersionId) {
-      payload.graph_version_id = currentVersionId;
-    }
 
     if (createType === 'schedule') {
       const result = scheduleFields(
@@ -774,24 +774,19 @@
                 </label>
               </div>
 
-              <label class="flex items-start gap-3 rounded-lg border border-gray-800 bg-gray-950 px-3 py-3 text-xs text-gray-400">
-                <input
-                  type="checkbox"
-                  bind:checked={createPinVersion}
-                  disabled={!currentVersionId}
-                  class="mt-0.5 h-4 w-4 rounded border-gray-600 bg-gray-900 text-indigo-600 focus:ring-indigo-500 disabled:opacity-40"
-                />
+              <div class="flex items-start gap-3 rounded-lg border border-gray-800 bg-gray-950 px-3 py-3 text-xs text-gray-400">
                 <span>
-                  <span class="block font-medium text-gray-300">Pin to current saved version</span>
+                  <span class="block font-medium text-gray-300">Pinned graph version</span>
                   {#if currentVersionId}
                     <span class="mt-0.5 block text-gray-600">
                       {currentVersionNumber ? 'Version ' + currentVersionNumber + ' · ' : ''}{currentVersionId}
                     </span>
                   {:else}
-                    <span class="mt-0.5 block text-amber-500/80">Save the graph first to pin it. Unpinned triggers use the latest saved version.</span>
+                    <span class="mt-0.5 block text-amber-500/80">Save the graph before creating a trigger.</span>
                   {/if}
+                  <span class="mt-1 block text-gray-600">Triggers keep this immutable version until you explicitly update them.</span>
                 </span>
-              </label>
+              </div>
 
               {#if createType === 'schedule'}
                 <fieldset class="space-y-3">
