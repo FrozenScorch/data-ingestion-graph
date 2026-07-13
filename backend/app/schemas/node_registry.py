@@ -1,6 +1,7 @@
 """
 Pydantic schemas for node registry.
 """
+
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -21,6 +22,7 @@ class NodeTypeDefSchema(BaseModel):
     description: str
     implementation: str = "studio"
     sdk_component: str | None = None
+    connector_manifest: dict[str, Any] | None = None
     inputs: list[PortDefSchema]
     outputs: list[PortDefSchema]
     config_schema: dict[str, Any]

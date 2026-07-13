@@ -53,7 +53,8 @@ class JsonlSource(Source):
         if batch_size < 1:
             raise ConfigurationError("JSONL batch_size must be positive")
 
-    def spec(self) -> ConnectorSpec:
+    @classmethod
+    def manifest(cls) -> ConnectorSpec:
         return ConnectorSpec(
             name="jsonl",
             version="1.0.0",
@@ -75,6 +76,9 @@ class JsonlSource(Source):
                 schema_discovery=False,
             ),
         )
+
+    def spec(self) -> ConnectorSpec:
+        return self.manifest()
 
     async def check(self) -> CheckResult:
         if not self.path.is_file():

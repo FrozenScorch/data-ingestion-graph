@@ -108,6 +108,23 @@ for hit in await collection.query(QueryRequest("Ada", limit=5)):
 - Serialized pipeline definitions contain `SecretRef`, not resolved credentials.
 - Connectors use standard Python entry-point groups.
 
+## Connector manifests
+
+Built-in sources publish configuration and capability metadata without requiring
+credentials, paths, or network clients:
+
+```python
+from ingestion_graph.sources import DiscordSource
+
+manifest = DiscordSource.manifest()
+print(manifest.name, manifest.config_schema, manifest.capabilities.incremental)
+```
+
+Plugin hosts can call `load_connector_manifest("sources", name)` before creating a
+connector. Older third-party sources that only implement instance `spec()` remain
+valid runtime plugins, but are reported as not manifest-aware instead of being
+instantiated just to inspect their metadata.
+
 ## Development
 
 ```shell

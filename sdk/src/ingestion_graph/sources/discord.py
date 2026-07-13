@@ -74,7 +74,8 @@ class DiscordSource(Source):
         self._client = client
         self._owns_client = client is None
 
-    def spec(self) -> ConnectorSpec:
+    @classmethod
+    def manifest(cls) -> ConnectorSpec:
         return ConnectorSpec(
             name="discord",
             version="1.0.0",
@@ -98,6 +99,9 @@ class DiscordSource(Source):
                 rate_limits=True,
             ),
         )
+
+    def spec(self) -> ConnectorSpec:
+        return self.manifest()
 
     async def _get_client(self) -> Any:
         if self._client is None:

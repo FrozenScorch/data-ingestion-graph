@@ -3,13 +3,17 @@
 from collections.abc import Sequence
 
 from ingestion_graph import (
+    ConnectorSpec,
     Envelope,
     QueryRequest,
     QueryResult,
     RecordPayload,
     Transform,
+    load_connector_manifest,
     stable_record_id,
 )
+
+manifest: ConnectorSpec = load_connector_manifest("sources", "discord")
 
 record: Envelope = Envelope(
     id=stable_record_id("example", "items", "1"),

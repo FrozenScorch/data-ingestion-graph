@@ -19,6 +19,14 @@ from emitted metadata and provenance. Stable `upload-<artifact-id>` stream names
 preserve SDK record identity across runs. Remaining native database nodes can
 migrate without changing the Studio graph format.
 
+Manifest-aware SDK sources expose constructor-free `ConnectorSpec` metadata.
+Manifest-backed Studio adapters project those schemas into control-plane-safe fields,
+explicitly replacing raw secrets with saved connections today; managed-artifact path
+projection follows the same boundary as document adapters adopt manifests. Registry
+startup materializes every node contract and fails if an SDK field is neither projected
+nor intentionally omitted, so connector upgrades cannot silently drift away from the
+visual node contract.
+
 The Connection Center is the sole UI for connector credentials. The backend
 publishes typed connection forms, encrypts secrets at rest, and node schemas bind
 to saved connections through `connection-ref` fields. Legacy graphs are migrated
