@@ -79,8 +79,8 @@ and HTTP actions, but several displayed capabilities are incomplete:
 - Document state is staged durably with source POST_EXEC output and promoted only
   when every downstream node succeeds. Failed-node retry reuses that run-scoped
   candidate, and concurrent stale runs cannot regress the committed checkpoint.
-  Cancellation deletes terminal candidates; new full runs prune abandoned failed
-  or cancelled candidates, while paused runs retain them.
+  Cancellation deletes terminal candidates. New full runs atomically supersede
+  inactive failures, while queued/leased retries and paused runs retain candidates.
   This boundary depends on destinations returning success only after their own
   durable write/flush; the starter query collection remains a per-run delta view.
 - `schedule` and `webhook` are labels, not implemented trigger services.

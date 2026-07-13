@@ -17,6 +17,7 @@ from app.engine.state import can_transition
 from app.models.execution import CheckpointType, Run, RunStatus
 from app.models.graph import Connection, Graph
 from app.services.connection_crypto import decrypt_connection_config
+from app.services.execution_service import fail_run_if_running
 from app.services.sdk_source_state_service import complete_run_with_source_state_promotion
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -94,11 +95,11 @@ class DAGExecutor:
         # Validate DAG
         errors = validate_dag(nodes_data, edges_data)
         if errors:
-            run.status = RunStatus.FAILED.value
-            run.error_message = f"Invalid DAG: {'; '.join(errors)}"
-            await self.db.commit()
-            await self._emit_event(run.id, "run_failed", {"errors": errors})
-            return run
+            return await self._fail_run(
+                run,
+                f"Invalid DAG: {'; '.join(errors)}",
+                {"errors": errors},
+            )
 
         await self._emit_event(run.id, "run_started", {})
 
@@ -106,12 +107,7 @@ class DAGExecutor:
         try:
             levels = topological_sort(nodes_data, edges_data)
         except ValueError as e:
-            if can_transition(run.status, RunStatus.FAILED.value):
-                run.status = RunStatus.FAILED.value
-                run.error_message = str(e)
-                await self.db.commit()
-            await self._emit_event(run.id, "run_failed", {"error": str(e)})
-            return run
+            return await self._fail_run(run, str(e), {"error": str(e)})
 
         # Resolve only graph-owner connections referenced by this immutable graph
         # version. Credentials remain server-side and are never copied into node configs.
@@ -119,11 +115,8 @@ class DAGExecutor:
             owner_id = await self._graph_owner(run.graph_id)
             connections = await self._resolve_connections(owner_id, node_configs or {})
         except ValueError:
-            run.status = RunStatus.FAILED.value
-            run.error_message = "Invalid or unauthorized graph resource reference"
-            await self.db.commit()
-            await self._emit_event(run.id, "run_failed", {"error": run.error_message})
-            return run
+            error = "Invalid or unauthorized graph resource reference"
+            return await self._fail_run(run, error, {"error": error})
 
         # Shared orchestration state. Credentials are scoped into a per-node copy
         # immediately before execution and are never exposed to unrelated nodes.
@@ -157,22 +150,15 @@ class DAGExecutor:
                 # Check for failures in parallel results
                 for node_id, run_node in results.items():
                     if run_node.status == "failed":
-                        if can_transition(run.status, RunStatus.FAILED.value):
-                            run.status = RunStatus.FAILED.value
-                            node_type = nodes_data[node_id].get("type", "unknown")
-                            run.error_message = (
-                                f"Node {node_id} ({node_type}) failed: {run_node.error_message}"
-                            )
-                            await self.db.commit()
-                        await self._emit_event(
-                            run.id,
-                            "run_failed",
-                            {
-                                "node_id": node_id,
-                                "error": run_node.error_message,
-                            },
+                        node_type = nodes_data[node_id].get("type", "unknown")
+                        error = (
+                            f"Node {node_id} ({node_type}) failed: {run_node.error_message}"
                         )
-                        return run
+                        return await self._fail_run(
+                            run,
+                            error,
+                            {"node_id": node_id, "error": run_node.error_message},
+                        )
             else:
                 # Sequential fallback for small groups
                 result = await self._execute_level_sequential(
@@ -201,6 +187,22 @@ class DAGExecutor:
                 await self._emit_event(run.id, "run_completed", {})
 
         return run
+
+    async def _fail_run(
+        self,
+        run: Run,
+        error_message: str,
+        event_data: dict[str, Any],
+    ) -> Run:
+        current_run, transitioned = await fail_run_if_running(
+            self.db,
+            run.id,
+            error_message,
+        )
+        resolved_run = current_run or run
+        if transitioned:
+            await self._emit_event(resolved_run.id, "run_failed", event_data)
+        return resolved_run
 
     async def _graph_owner(self, graph_id: UUID) -> UUID:
         result = await self.db.execute(select(Graph.owner_id).where(Graph.id == graph_id))
@@ -517,21 +519,12 @@ class DAGExecutor:
                     },
                 )
                 # Fail the entire run on node failure (with state machine validation)
-                if can_transition(run.status, RunStatus.FAILED.value):
-                    run.status = RunStatus.FAILED.value
-                    run.error_message = (
-                        f"Node {node_id} ({node_type}) failed: {run_node.error_message}"
-                    )
-                    await self.db.commit()
-                await self._emit_event(
-                    run.id,
-                    "run_failed",
-                    {
-                        "node_id": node_id,
-                        "error": run_node.error_message,
-                    },
+                error = f"Node {node_id} ({node_type}) failed: {run_node.error_message}"
+                return await self._fail_run(
+                    run,
+                    error,
+                    {"node_id": node_id, "error": run_node.error_message},
                 )
-                return run
 
         return None
 

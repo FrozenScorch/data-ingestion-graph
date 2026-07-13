@@ -20,6 +20,7 @@ from app.models.execution import (
     RunStatus,
 )
 from app.models.graph import Graph, GraphVersion
+from app.services.execution_service import fail_run_if_running
 from app.services.sdk_source_state_service import complete_run_with_source_state_promotion
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -29,7 +30,11 @@ async def execute_run_job(db: AsyncSession, job: RunJob, ws_manager: Any = None)
     run = await db.get(Run, job.run_id)
     if run is None:
         raise RuntimeError("Queued run no longer exists")
-    if run.status in (RunStatus.CANCELLED.value, RunStatus.COMPLETED.value):
+    if run.status in (
+        RunStatus.CANCELLED.value,
+        RunStatus.COMPLETED.value,
+        RunStatus.SUPERSEDED.value,
+    ):
         return
     if job.job_type == RunJobType.RETRY_FAILED.value:
         await _execute_failed_nodes(db, run, job, ws_manager)
@@ -159,9 +164,16 @@ async def _execute_failed_nodes(
                 defer_completion_commit=True,
             )
             if run_node.status != NodeStatus.COMPLETED.value:
-                run.status = RunStatus.FAILED.value
-                run.error_message = f"Retry failed at node {node_id}: {run_node.error_message}"
-                await db.commit()
+                error = f"Retry failed at node {node_id}: {run_node.error_message}"
+                current_run, transitioned = await fail_run_if_running(db, run.id, error)
+                if current_run is not None:
+                    run = current_run
+                if transitioned:
+                    await executor._emit_event(
+                        run.id,
+                        "run_failed",
+                        {"node_id": node_id, "error": run_node.error_message},
+                    )
                 return
             if run_node.output_data:
                 exec_state["outputs"][node_id] = run_node.output_data

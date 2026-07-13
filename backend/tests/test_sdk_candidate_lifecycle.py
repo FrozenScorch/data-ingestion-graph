@@ -7,12 +7,15 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
-from app.models.execution import Run, RunJobType
+from app.api.executions import retry_failed_run
+from app.models.execution import Run, RunJob, RunJobStatus, RunJobType, RunStatus
 from app.services.execution_service import (
     cancel_run,
     create_run,
+    fail_run_if_running,
     update_run_status,
 )
+from fastapi import HTTPException
 from sqlalchemy.dialects import postgresql
 
 
@@ -81,11 +84,78 @@ async def test_retryable_and_paused_runs_keep_candidates(initial_status, target_
 
 
 @pytest.mark.asyncio
-async def test_new_full_run_prunes_only_prior_failed_and_cancelled_graph_candidates():
+@pytest.mark.parametrize("current_status", ["cancelled", "paused", "completed", "superseded"])
+async def test_failure_transition_forced_refresh_preserves_non_running_status(current_status):
+    cached_run = Run(id=uuid4(), graph_id=uuid4(), status="running")
+    db = AsyncMock()
+
+    async def locked_reload(statement):
+        assert "FOR UPDATE" in str(statement)
+        assert statement.get_execution_options()["populate_existing"] is True
+        cached_run.status = current_status
+        return _scalar_result(cached_run)
+
+    db.execute.side_effect = locked_reload
+
+    returned, transitioned = await fail_run_if_running(db, cached_run.id, "late failure")
+
+    assert returned is cached_run
+    assert transitioned is False
+    assert cached_run.status == current_status
+    assert cached_run.error_message is None
+    db.commit.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_failure_transition_changes_only_locked_running_run():
+    run = Run(id=uuid4(), graph_id=uuid4(), status="running")
+    db = AsyncMock()
+    db.execute.return_value = _scalar_result(run)
+
+    returned, transitioned = await fail_run_if_running(db, run.id, "node failed")
+
+    assert returned is run
+    assert transitioned is True
+    assert run.status == "failed"
+    assert run.error_message == "node failed"
+    db.commit.assert_awaited_once()
+    db.refresh.assert_awaited_once_with(run)
+
+
+@pytest.mark.asyncio
+async def test_new_full_run_supersedes_only_inactive_locked_failed_runs():
     graph_id = uuid4()
+    no_job = Run(id=uuid4(), graph_id=graph_id, status=RunStatus.FAILED.value)
+    failed_job_run = Run(id=uuid4(), graph_id=graph_id, status=RunStatus.FAILED.value)
+    queued_run = Run(id=uuid4(), graph_id=graph_id, status=RunStatus.FAILED.value)
+    leased_run = Run(id=uuid4(), graph_id=graph_id, status=RunStatus.FAILED.value)
+    failed_job = RunJob(
+        id=uuid4(),
+        run_id=failed_job_run.id,
+        status=RunJobStatus.FAILED.value,
+    )
+    queued_job = RunJob(
+        id=uuid4(),
+        run_id=queued_run.id,
+        status=RunJobStatus.QUEUED.value,
+    )
+    leased_job = RunJob(
+        id=uuid4(),
+        run_id=leased_run.id,
+        status=RunJobStatus.LEASED.value,
+    )
+    run_result = MagicMock()
+    run_result.scalars.return_value.all.return_value = [
+        no_job,
+        failed_job_run,
+        queued_run,
+        leased_run,
+    ]
+    job_result = MagicMock()
+    job_result.scalars.return_value.all.return_value = [failed_job, queued_job, leased_job]
     db = AsyncMock()
     db.add = MagicMock()
-    db.execute.return_value = SimpleNamespace(rowcount=2)
+    db.execute.side_effect = [run_result, job_result, SimpleNamespace(rowcount=2)]
 
     async def assign_run_id():
         db.add.call_args.args[0].id = uuid4()
@@ -103,23 +173,96 @@ async def test_new_full_run_prunes_only_prior_failed_and_cancelled_graph_candida
             enqueue_job_type=RunJobType.FULL.value,
         )
 
-    prune_statement = db.execute.await_args.args[0]
-    sql = str(prune_statement)
-    raw_params = prune_statement.compile().params.values()
+    run_lock = db.execute.await_args_list[0].args[0]
+    job_lock = db.execute.await_args_list[1].args[0]
+    delete_statement = db.execute.await_args_list[2].args[0]
+    assert "FOR UPDATE" in str(run_lock)
+    assert "ORDER BY runs.id" in str(run_lock)
+    assert run_lock.get_execution_options()["populate_existing"] is True
+    assert "FOR UPDATE" in str(job_lock)
+    assert "ORDER BY run_jobs.run_id ASC, run_jobs.id ASC" in str(job_lock)
+    assert job_lock.get_execution_options()["populate_existing"] is True
+    raw_params = delete_statement.compile().params.values()
     params = {
         item
         for value in raw_params
         for item in (value if isinstance(value, (list, tuple)) else (value,))
     }
-    assert "DELETE FROM sdk_source_state_candidates" in sql
-    assert "graphs.owner_id" in sql
-    assert "run_jobs" in sql
-    assert "NOT (EXISTS" in sql
+    assert "DELETE FROM sdk_source_state_candidates" in str(delete_statement)
+    assert "graphs.owner_id" in str(delete_statement)
     assert graph_id in params
-    assert {"failed", "cancelled"} <= params
-    assert {"queued", "leased"} <= params
-    assert "paused" not in params
+    assert {no_job.id, failed_job_run.id} <= params
+    assert queued_run.id not in params
+    assert leased_run.id not in params
+    assert no_job.status == failed_job_run.status == RunStatus.SUPERSEDED.value
+    assert queued_run.status == leased_run.status == RunStatus.FAILED.value
     db.commit.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_retry_locked_refresh_wins_and_queues_in_same_transaction():
+    run = Run(
+        id=uuid4(),
+        graph_id=uuid4(),
+        graph_version_id=uuid4(),
+        status=RunStatus.FAILED.value,
+    )
+    db = AsyncMock()
+    db.execute.return_value = _scalar_result(run)
+    with (
+        patch("app.api.executions.get_run", new=AsyncMock(return_value=run)),
+        patch("app.api.executions.enqueue_run_job", new=AsyncMock()) as enqueue,
+    ):
+        returned = await retry_failed_run(
+            run_id=run.id,
+            db=db,
+            current_user={"user_id": uuid4(), "role": "admin"},
+        )
+
+    lock_statement = db.execute.await_args.args[0]
+    assert "FOR UPDATE" in str(lock_statement)
+    assert lock_statement.get_execution_options()["populate_existing"] is True
+    assert returned.status == RunStatus.PENDING.value
+    enqueue.assert_awaited_once_with(
+        db,
+        run.id,
+        job_type=RunJobType.RETRY_FAILED.value,
+        commit=False,
+    )
+    db.commit.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_new_full_run_wins_then_locked_retry_rejects_superseded_run():
+    stale_access_run = Run(
+        id=uuid4(),
+        graph_id=uuid4(),
+        graph_version_id=uuid4(),
+        status=RunStatus.FAILED.value,
+    )
+    locked_run = Run(
+        id=stale_access_run.id,
+        graph_id=stale_access_run.graph_id,
+        graph_version_id=stale_access_run.graph_version_id,
+        status=RunStatus.SUPERSEDED.value,
+    )
+    db = AsyncMock()
+    db.execute.return_value = _scalar_result(locked_run)
+    with (
+        patch("app.api.executions.get_run", new=AsyncMock(return_value=stale_access_run)),
+        patch("app.api.executions.enqueue_run_job", new=AsyncMock()) as enqueue,
+        pytest.raises(HTTPException, match="superseded") as exc_info,
+    ):
+        await retry_failed_run(
+            run_id=locked_run.id,
+            db=db,
+            current_user={"user_id": uuid4(), "role": "admin"},
+        )
+
+    assert exc_info.value.status_code == 400
+    enqueue.assert_not_awaited()
+    db.rollback.assert_awaited_once()
+    db.commit.assert_not_awaited()
 
 
 def test_0004_downgrade_deletes_tombstones_before_dropping_marker_column():

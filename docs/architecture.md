@@ -66,9 +66,12 @@ leaves committed source state unchanged. Failed runs retain candidates so
 failed-node retry can restore the source POST_EXEC output and promote them after
 its downstream nodes succeed, without rerunning the source. Cancellation is
 terminal and deletes that run's candidates atomically. Starting a new full run
-also prunes candidates from prior failed or cancelled runs for that owner/graph;
-paused runs retain candidates. Revisions and retained delete tombstones prevent
-an older concurrent run from recreating or regressing state.
+locks prior failed runs and their jobs for that owner/graph. A queued or leased
+retry wins and keeps its run/candidates; otherwise the old run becomes terminally
+`superseded` and its candidates are deleted before the new run is created. A
+concurrent retry then sees either `pending` or `superseded`, never an unlocked
+intermediate state. Paused runs retain candidates. Revisions and retained delete
+tombstones prevent an older concurrent run from recreating or regressing state.
 
 This makes each Document Source run an incremental delta: unchanged uploads emit
 nothing, changed files emit stable upserts and deletes, and deselecting a prior

@@ -9,7 +9,7 @@ from uuid import UUID, uuid4
 import pytest
 from app.models.execution import Run
 from app.models.sdk_source_state import SDKSourceState, SDKSourceStateCandidate
-from app.services.execution_service import cancel_run
+from app.services.execution_service import cancel_run, fail_run_if_running
 from app.services.sdk_source_state_service import (
     StaleSDKSourceStateCandidateError,
     StudioSDKSourceStateStore,
@@ -217,6 +217,57 @@ async def test_stale_identity_map_cancellation_cannot_overwrite_completed_run():
         async with sessions() as verification_session:
             run = await verification_session.get(Run, run_id)
             assert run is not None and run.status == "completed"
+    finally:
+        await engine.dispose()
+        async with admin_engine.begin() as connection:
+            await connection.execute(text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
+        await admin_engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_stale_failure_cannot_overwrite_cancelled_run():
+    schema = f"sdk_failure_race_{uuid4().hex}"
+    engine = create_async_engine(
+        TEST_DATABASE_URL,
+        connect_args={"server_settings": {"search_path": schema}},
+    )
+    admin_engine = create_async_engine(TEST_DATABASE_URL)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    owner_id, graph_id, run_id, job_id = uuid4(), uuid4(), uuid4(), uuid4()
+
+    try:
+        await _create_schema(admin_engine, schema)
+        async with sessions() as seed_session:
+            await _seed_run(
+                seed_session,
+                owner_id=owner_id,
+                graph_id=graph_id,
+                run_id=run_id,
+                job_id=job_id,
+                worker="worker-1",
+            )
+
+        async with sessions() as stale_failure_session:
+            cached_run = await stale_failure_session.get(Run, run_id)
+            assert cached_run is not None and cached_run.status == "running"
+
+            async with sessions() as cancellation_session:
+                cancelled = await cancel_run(cancellation_session, run_id)
+                assert cancelled is not None and cancelled.status == "cancelled"
+
+            current_run, transitioned = await fail_run_if_running(
+                stale_failure_session,
+                run_id,
+                "late node failure",
+            )
+            assert current_run is cached_run
+            assert transitioned is False
+            assert cached_run.status == "cancelled"
+            assert cached_run.error_message is None
+
+        async with sessions() as verification_session:
+            run = await verification_session.get(Run, run_id)
+            assert run is not None and run.status == "cancelled"
     finally:
         await engine.dispose()
         async with admin_engine.begin() as connection:

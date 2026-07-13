@@ -15,7 +15,7 @@ from app.models.execution import (
 )
 from app.models.graph import Graph
 from app.models.sdk_source_state import SDKSourceStateCandidate
-from sqlalchemy import delete, exists, func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -32,7 +32,7 @@ async def create_run(
 ) -> Run:
     """Create a new run, optionally with an atomic durable dispatch row."""
     if enqueue_job_type == RunJobType.FULL.value:
-        await _prune_abandoned_source_state_candidates(db, graph_id)
+        await _supersede_inactive_failed_runs(db, graph_id)
     run = Run(
         graph_id=graph_id,
         graph_version_id=graph_version_id,
@@ -140,6 +140,32 @@ async def update_run_status(
     return run
 
 
+async def fail_run_if_running(
+    db: AsyncSession,
+    run_id: UUID,
+    error_message: str,
+) -> tuple[Run | None, bool]:
+    """Fail a run only if a locked, forced refresh still reports RUNNING."""
+    result = await db.execute(
+        select(Run)
+        .where(Run.id == run_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    run = result.scalar_one_or_none()
+    if run is None:
+        await db.rollback()
+        return None, False
+    transitioned = run.status == RunStatus.RUNNING.value
+    if transitioned:
+        run.status = RunStatus.FAILED.value
+        run.error_message = error_message
+    await db.commit()
+    if transitioned:
+        await db.refresh(run)
+    return run, transitioned
+
+
 async def cancel_run(db: AsyncSession, run_id: UUID) -> Run | None:
     """Cancel a run."""
     return await update_run_status(db, run_id, RunStatus.CANCELLED.value)
@@ -169,25 +195,45 @@ async def _delete_run_source_state_candidates(db: AsyncSession, run: Run) -> Non
     )
 
 
-async def _prune_abandoned_source_state_candidates(
-    db: AsyncSession, graph_id: UUID
-) -> None:
-    abandoned_runs = select(Run.id).where(
-        Run.graph_id == graph_id,
-        Run.status.in_((RunStatus.FAILED.value, RunStatus.CANCELLED.value)),
-        ~exists(
-            select(RunJob.id).where(
-                RunJob.run_id == Run.id,
-                RunJob.status.in_(
-                    (RunJobStatus.QUEUED.value, RunJobStatus.LEASED.value)
-                ),
-            )
-        ),
+async def _supersede_inactive_failed_runs(db: AsyncSession, graph_id: UUID) -> None:
+    run_result = await db.execute(
+        select(Run)
+        .where(
+            Run.graph_id == graph_id,
+            Run.status == RunStatus.FAILED.value,
+        )
+        .order_by(Run.id.asc())
+        .with_for_update()
+        .execution_options(populate_existing=True)
     )
+    failed_runs = list(run_result.scalars().all())
+    if not failed_runs:
+        return
+
+    failed_run_ids = [run.id for run in failed_runs]
+    job_result = await db.execute(
+        select(RunJob)
+        .where(RunJob.run_id.in_(failed_run_ids))
+        .order_by(RunJob.run_id.asc(), RunJob.id.asc())
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    jobs_by_run_id = {job.run_id: job for job in job_result.scalars().all()}
+    active_job_statuses = {RunJobStatus.QUEUED.value, RunJobStatus.LEASED.value}
+    superseded_run_ids: list[UUID] = []
+    for run in failed_runs:
+        job = jobs_by_run_id.get(run.id)
+        if job is not None and job.status in active_job_statuses:
+            continue
+        run.status = RunStatus.SUPERSEDED.value
+        superseded_run_ids.append(run.id)
+
+    if not superseded_run_ids:
+        return
     await db.execute(
         delete(SDKSourceStateCandidate).where(
             SDKSourceStateCandidate.graph_id == graph_id,
             SDKSourceStateCandidate.owner_id == _graph_owner_id(graph_id),
-            SDKSourceStateCandidate.run_id.in_(abandoned_runs),
+            SDKSourceStateCandidate.run_id.in_(superseded_run_ids),
         )
     )

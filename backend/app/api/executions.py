@@ -7,7 +7,7 @@ from uuid import UUID
 from app.db.session import get_session
 from app.engine.graph_data import unpack_version_data
 from app.middleware.auth import get_current_user
-from app.models.execution import RunJobType
+from app.models.execution import Run, RunJobType
 from app.schemas.execution import (
     RunCreate,
     RunDetailResponse,
@@ -208,16 +208,30 @@ async def retry_failed_run(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found")
     await _check_run_access(run, current_user, db)
 
+    locked_result = await db.execute(
+        select(Run)
+        .where(Run.id == run_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    run = locked_result.scalar_one_or_none()
+    if run is None:
+        await db.rollback()
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found")
+
     if run.status != "failed":
+        current_status = run.status
+        await db.rollback()
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=(
-                f"Cannot retry run in '{run.status}' status. "
+                f"Cannot retry run in '{current_status}' status. "
                 "Only failed runs can retry failed nodes; replay a cancelled run instead."
             ),
         )
 
     if run.graph_version_id is None:
+        await db.rollback()
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Run has no graph version, cannot retry",

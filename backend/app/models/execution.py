@@ -25,6 +25,7 @@ class RunStatus(str, enum.Enum):
     FAILED = "failed"
     CANCELLED = "cancelled"
     PAUSED = "paused"
+    SUPERSEDED = "superseded"
 
 
 class NodeStatus(str, enum.Enum):
