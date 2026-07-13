@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from typing import Any, Literal, TypeAlias
-from urllib.parse import parse_qsl, unquote, urlencode, urljoin, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, unquote, unquote_plus, urlencode, urljoin, urlsplit, urlunsplit
 
 from ingestion_graph.connectors.base import (
     CheckResult,
@@ -403,20 +403,22 @@ class RestSource(Source):
 
     async def _get_client(self) -> Any:
         if self._client is None:
-            if httpx is None:
-                raise ConfigurationError(
-                    "REST support requires the optional dependency: "
-                    "pip install 'ingestion-graph[rest]'"
-                )
-            self._client = httpx.AsyncClient(
-                timeout=self.request_timeout,
-                follow_redirects=False,
-                headers={
-                    "Accept": "application/json",
-                    "User-Agent": "ingestion-graph/rest-1.0",
-                },
-            )
+            self._client = self._new_client()
         return self._client
+
+    def _new_client(self) -> Any:
+        if httpx is None:
+            raise ConfigurationError(
+                "REST support requires the optional dependency: pip install 'ingestion-graph[rest]'"
+            )
+        return httpx.AsyncClient(
+            timeout=self.request_timeout,
+            follow_redirects=False,
+            headers={
+                "Accept": "application/json",
+                "User-Agent": "ingestion-graph/rest-1.0",
+            },
+        )
 
     def _auth_headers(self, request_url: str) -> dict[str, str]:
         if self.auth_type == "none" or not _same_origin(request_url, self.base_url):
@@ -442,13 +444,14 @@ class RestSource(Source):
             return
         credential = self._resolve_credential()
         parsed = urlsplit(request_url)
-        decoded_query = (
-            component
-            for pair in parse_qsl(parsed.query, keep_blank_values=True)
-            for component in pair
-        )
-        if credential in unquote(parsed.path) or any(
-            credential in component for component in decoded_query
+        if any(
+            _decoded_component_contains(component, credential, plus=plus)
+            for component, plus in (
+                (parsed.netloc, False),
+                (parsed.path, False),
+                (parsed.query, True),
+                (parsed.fragment, False),
+            )
         ):
             raise ProtocolError("REST request URL must not contain the authentication secret")
 
@@ -464,8 +467,10 @@ class RestSource(Source):
             allow_pagination_tokens=self.pagination == "link",
         )
         self._reject_credential_url(request_url)
-        client = await self._get_client()
+        cross_origin = not _same_origin(request_url, self.base_url)
         for attempt in range(self.max_retries + 1):
+            temporary_client = self._new_client() if cross_origin else None
+            client = temporary_client or await self._get_client()
             try:
                 response = await client.request(
                     "GET",
@@ -479,6 +484,9 @@ class RestSource(Source):
                 raise ConfigurationError(
                     "REST request failed before receiving a response"
                 ) from None
+            finally:
+                if temporary_client is not None:
+                    await temporary_client.aclose()
 
             status = int(response.status_code)
             if status == 401:
@@ -694,6 +702,20 @@ def _validate_parameter_name(value: str, field_name: str) -> str:
     if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.-]*", value):
         raise ConfigurationError(f"REST {field_name} is not a safe query parameter name")
     return value
+
+
+def _decoded_component_contains(value: str, credential: str, *, plus: bool) -> bool:
+    """Find a credential through nested URL encoding, failing closed at the depth limit."""
+    decode = unquote_plus if plus else unquote
+    current = value
+    for _depth in range(8):
+        if credential in current:
+            return True
+        decoded = decode(current)
+        if decoded == current:
+            return False
+        current = decoded
+    return True
 
 
 def _validate_query_params(
