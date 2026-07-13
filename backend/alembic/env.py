@@ -23,6 +23,7 @@ from app.models import (  # noqa: F401
     RunCost,
     RunJob,
     RunNode,
+    SDKSourceState,
     User,
 )
 from app.models.base import Base

@@ -63,6 +63,16 @@
       event.dataTransfer.effectAllowed = 'move';
     }
   }
+
+  function sdkManifestTitle(node: NodeTypeDef): string {
+    const manifest = node.connector_manifest;
+    if (!manifest) return node.sdk_component ?? 'SDK adapter';
+    const capabilities = Object.entries(manifest.capabilities)
+      .filter(([, enabled]) => enabled)
+      .map(([name]) => name.replaceAll('_', ' '))
+      .join(', ');
+    return `${manifest.name} v${manifest.version}${capabilities ? ` — ${capabilities}` : ''}`;
+  }
 </script>
 
 <aside class="w-56 bg-gray-900 border-r border-gray-800 flex flex-col overflow-hidden shrink-0">
@@ -99,7 +109,7 @@
                 <div class="w-1.5 h-1.5 rounded-full {getDotColor(group.color)} shrink-0"></div>
                 <span class="truncate">{node.display_name}</span>
                 {#if node.implementation === 'sdk-adapter'}
-                  <span class="ml-auto rounded bg-cyan-500/15 px-1 py-0.5 text-[9px] font-semibold text-cyan-300" title={node.sdk_component ?? 'SDK adapter'}>SDK</span>
+                  <span class="ml-auto rounded bg-cyan-500/15 px-1 py-0.5 text-[9px] font-semibold text-cyan-300" title={sdkManifestTitle(node)}>SDK</span>
                 {/if}
               </div>
             {/each}

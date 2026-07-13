@@ -66,6 +66,7 @@ class NodeContext:
     state: dict[str, Any] = field(default_factory=dict)  # Shared state across nodes in a run
     working_dir: str = "./data/temp"
     redis_client: Any = None  # redis.Redis, not typed to avoid import
+    db_session: Any = None  # Execution-scoped AsyncSession for atomic control-plane adapters
 
 
 class BaseNode(ABC):
@@ -91,6 +92,11 @@ class BaseNode(ABC):
     @property
     def sdk_component(self) -> str | None:
         """Public SDK component used by this node, when applicable."""
+        return None
+
+    @property
+    def connector_manifest(self) -> dict[str, Any] | None:
+        """Constructor-free SDK connector metadata used to build this node."""
         return None
 
     @property
@@ -171,6 +177,7 @@ class BaseNode(ABC):
             "description": self.description,
             "implementation": self.implementation,
             "sdk_component": self.sdk_component,
+            "connector_manifest": self.connector_manifest,
             "inputs": [
                 {
                     "name": p.name,

@@ -6,6 +6,11 @@ from collections.abc import Mapping
 from typing import Any
 
 from app.nodes.base import BaseNode, NodeContext, NodeResult, PortDataType, PortDef
+from app.nodes.sdk_manifest import (
+    ManifestFieldProjection,
+    project_manifest_config_schema,
+    serialize_connector_manifest,
+)
 from ingestion_graph.messages import RecordMessage, StateMessage
 from ingestion_graph.models import RecordPayload
 from ingestion_graph.secrets import SecretRef, SecretValue
@@ -35,6 +40,10 @@ class DiscordSourceNode(BaseNode):
         return "ingestion_graph.sources.DiscordSource"
 
     @property
+    def connector_manifest(self) -> dict[str, Any]:
+        return serialize_connector_manifest(DiscordSource.manifest())
+
+    @property
     def node_type(self) -> str:
         return "discord_source"
 
@@ -60,19 +69,23 @@ class DiscordSourceNode(BaseNode):
 
     @property
     def config_schema(self) -> dict[str, Any]:
-        return {
-            "type": "object",
-            "properties": {
+        return project_manifest_config_schema(
+            DiscordSource.manifest(),
+            fields=(
+                ManifestFieldProjection(
+                    source_field="channel_ids",
+                    target_field="channel_id",
+                    source_path=("items",),
+                    overrides={"description": "Discord channel ID to preview"},
+                ),
+            ),
+            omitted={"token": "Studio resolves tokens from an encrypted saved connection"},
+            studio_properties={
                 "connection_id": {
                     "type": "string",
                     "format": "connection-ref",
                     "connection_type": "discord",
                     "description": "Encrypted saved Discord connection ID",
-                },
-                "channel_id": {
-                    "type": "string",
-                    "pattern": "^[0-9]+$",
-                    "description": "Discord channel ID to preview",
                 },
                 "message_limit": {
                     "type": "integer",
@@ -82,8 +95,8 @@ class DiscordSourceNode(BaseNode):
                     "description": "Maximum messages in this bounded Studio preview",
                 },
             },
-            "required": ["connection_id", "channel_id"],
-        }
+            studio_required=("connection_id",),
+        )
 
     async def execute(self, context: NodeContext) -> NodeResult:
         connection_id = context.config.get("connection_id")

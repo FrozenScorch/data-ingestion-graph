@@ -3,12 +3,19 @@
   import { artifactService } from '$lib/services/artifactService.js';
   import type { IngestionFile } from '$lib/types/artifact.js';
 
-  let { value = [], onValueChange }: { value?: string[]; onValueChange: (ids: string[]) => void } = $props();
+  const DEFAULT_EXTENSIONS = ['.pdf', '.doc', '.docx', '.xlsx', '.csv', '.eml', '.txt', '.md', '.json', '.xml', '.html', '.htm'];
+  let { value = [], acceptedExtensions = DEFAULT_EXTENSIONS, onValueChange }: {
+    value?: string[];
+    acceptedExtensions?: string[];
+    onValueChange: (ids: string[]) => void;
+  } = $props();
   let files = $state<IngestionFile[]>([]);
   let loading = $state(true);
   let error = $state('');
   let uploading = $state(false);
   let progress = $state(0);
+  let supportedFiles = $derived(files.filter(file => acceptedExtensions.some(extension => file.name.toLowerCase().endsWith(extension))));
+  let acceptedFileTypes = $derived(acceptedExtensions.join(','));
 
   async function refresh() {
     loading = true;
@@ -45,16 +52,16 @@
     <span class="text-xs text-gray-400">{value.length ? `${value.length} selected` : 'No files selected'}</span>
     <label class="text-xs text-cyan-400 hover:text-cyan-300 cursor-pointer">
       {uploading ? `Uploading ${progress}%` : 'Upload files'}
-      <input class="hidden" type="file" multiple accept=".pdf,.doc,.docx,.csv,.txt,.md,.json,.xml,.html,.htm" onchange={upload} disabled={uploading} />
+      <input class="hidden" type="file" multiple accept={acceptedFileTypes} onchange={upload} disabled={uploading} />
     </label>
   </div>
   {#if loading}
     <p class="text-xs text-gray-600">Loading files...</p>
-  {:else if files.length === 0}
-    <p class="text-xs text-gray-600">No files yet. Upload documents here or from Files.</p>
+  {:else if supportedFiles.length === 0}
+    <p class="text-xs text-gray-600">No compatible files yet. Upload documents here or from Files.</p>
   {:else}
     <div class="max-h-40 overflow-y-auto space-y-1">
-      {#each files as file (file.id)}
+      {#each supportedFiles as file (file.id)}
         <label class="flex items-center gap-2 rounded px-1 py-1 hover:bg-gray-800 cursor-pointer">
           <input type="checkbox" checked={value.includes(file.id)} onchange={() => toggle(file.id)} />
           <span class="min-w-0 flex-1 truncate text-xs text-gray-300" title={file.name}>{file.name}</span>

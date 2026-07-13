@@ -12,9 +12,20 @@ editing, execution history, and bounded previews. It installs the SDK from
 `sdk/pyproject.toml`; the repository root is intentionally not a Python package.
 
 Studio nodes declare whether they are `studio` implementations or thin
-`sdk-adapter` nodes. Discord and Queryable Test Store already delegate to public
-SDK components. Remaining native parsing and database nodes can migrate without
-changing the Studio graph format.
+`sdk-adapter` nodes. Discord, Document Source, and Queryable Test Store delegate
+to public SDK components. Document Source accepts only owner-scoped managed upload
+artifact IDs; absolute paths are resolved inside the control plane and removed
+from emitted metadata and provenance. Stable `upload-<artifact-id>` stream names
+preserve SDK record identity across runs. Remaining native database nodes can
+migrate without changing the Studio graph format.
+
+Manifest-aware SDK sources expose constructor-free `ConnectorSpec` metadata.
+Manifest-backed Studio adapters project those schemas into control-plane-safe fields,
+explicitly replacing raw secrets with saved connections today; managed-artifact path
+projection follows the same boundary as document adapters adopt manifests. Registry
+startup materializes every node contract and fails if an SDK field is neither projected
+nor intentionally omitted, so connector upgrades cannot silently drift away from the
+visual node contract.
 
 The Connection Center is the sole UI for connector credentials. The backend
 publishes typed connection forms, encrypts secrets at rest, and node schemas bind
@@ -40,6 +51,20 @@ If execution stops between steps 2 and 4, replay may resend the page. Stable
 record IDs and an idempotent destination make that replay safe. A source ending
 after records without a state message is a protocol error.
 
+The Studio document adapter binds the SDK `StateStore` contract to PostgreSQL
+rows keyed by owner, graph, node, source, and stream. An advisory lock serializes
+concurrent runs for the same graph node. The adapter buffers all state messages
+until every stream completes. The node runner flushes successful bounded output
+and staged source state without committing; the executor's POST_EXEC checkpoint
+then commits all three in one database transaction. Failed or over-limit reads and
+checkpoint failures cannot advance state.
+
+This makes each Document Source run an incremental delta: unchanged uploads emit
+nothing, changed files emit stable upserts and deletes, and deselecting a prior
+artifact emits tombstones. Downstream Studio nodes are not yet part of that same
+flush-before-checkpoint transaction. The per-run Queryable Test Store is therefore
+a delta inspector, not a persistent current view across runs.
+
 ## Connector conformance requirements
 
 Every connector should be tested for configuration validation, authentication,
@@ -49,17 +74,17 @@ unsupported capabilities such as delete capture rather than implying them.
 
 ## Migration sequence
 
-1. Wrap existing file parsing and database nodes behind SDK sources/transforms.
+1. Wrap remaining database nodes behind SDK sources/transforms.
 2. Replace graph tokens/passwords with `SecretRef` values and a server-side
    secret provider.
 3. Store large node outputs as artifact references instead of JSONB.
 4. Adapt the DAG executor to consume SDK messages.
 5. Generate Studio node metadata from connector specs.
 
-The first control-plane adapter is now `sdk_query_store`: it converts bounded
-legacy node output into canonical SDK envelopes and materializes a per-run query
-collection. See [Ingest and query architecture](ingest-and-query.md) for the query
-contract and the boundary with LLM orchestration frameworks.
+The `sdk_document_source` adapter exposes canonical document delta envelopes, and
+`sdk_query_store` materializes bounded node output into a per-run query collection.
+See [Ingest and query architecture](ingest-and-query.md) for the query contract and
+the boundary with LLM orchestration frameworks.
 
 Per-run query collections have a configurable retention window
 (`QUERY_ARTIFACT_TTL_HOURS`, seven days by default). Studio prunes expired SQLite

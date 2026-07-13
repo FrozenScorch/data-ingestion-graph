@@ -32,6 +32,7 @@ export interface ConfigField {
   default?: unknown;
   properties?: Record<string, ConfigField>;
   items?: ConfigField;
+  accepted_extensions?: string[];
   required?: string[];
 }
 
@@ -42,6 +43,17 @@ export interface NodeTypeDef {
   description: string;
   implementation: 'studio' | 'sdk-adapter';
   sdk_component: string | null;
+  connector_manifest?: {
+    name: string;
+    version: string;
+    capabilities: {
+      incremental: boolean;
+      resumable_full_refresh: boolean;
+      deletes: boolean;
+      schema_discovery: boolean;
+      rate_limits: boolean;
+    };
+  } | null;
   inputs: PortDef[];
   outputs: PortDef[];
   config_schema: {

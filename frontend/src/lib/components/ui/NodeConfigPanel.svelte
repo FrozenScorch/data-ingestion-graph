@@ -157,6 +157,7 @@
           {#if field.type === 'array' && field.format === 'artifact-refs'}
             <ArtifactPicker
               value={(config[key] as string[]) || []}
+              acceptedExtensions={field.accepted_extensions}
               onValueChange={(ids: string[]) => updateConfig(key, ids)}
             />
 

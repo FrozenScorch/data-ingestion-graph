@@ -8,6 +8,7 @@ from ingestion_graph.connectors.base import (
     Source,
     StreamDescriptor,
 )
+from ingestion_graph.plugins import load_connector_manifest
 
 __all__ = [
     "CheckResult",
@@ -16,4 +17,5 @@ __all__ = [
     "Destination",
     "Source",
     "StreamDescriptor",
+    "load_connector_manifest",
 ]
