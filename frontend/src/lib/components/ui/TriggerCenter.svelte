@@ -508,7 +508,7 @@
       'const timestamp = Math.floor(Date.now() / 1000).toString();',
       'const delivery = randomUUID();',
       "const signature = createHmac('sha256', secret)",
-      "  .update(timestamp + '.' + body, 'utf8')",
+      "  .update(timestamp + '.' + delivery + '.' + body, 'utf8')",
       "  .digest('hex');",
       '',
       'await fetch(' + JSON.stringify(url) + ', {',
@@ -519,7 +519,7 @@
       "    'X-Ingestion-Delivery': delivery,",
       "    'X-Ingestion-Signature': 'sha256=' + signature",
       '  },',
-      '  body // Sign and send this exact string; do not stringify it again.',
+      '  body // Sign this delivery ID and exact body; do not stringify again.',
       '});'
     ].join('\n');
   }

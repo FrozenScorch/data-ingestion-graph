@@ -106,7 +106,9 @@ def test_trigger_schema_enforces_conditional_schedule_fields_and_timezone():
         )
 
 
-@pytest.mark.parametrize("field_name", ["name", "enabled", "rate_limit_per_minute"])
+@pytest.mark.parametrize(
+    "field_name", ["name", "enabled", "timezone", "rate_limit_per_minute"]
+)
 def test_trigger_patch_rejects_explicit_null_for_required_fields(field_name):
     with pytest.raises(ValidationError, match=f"{field_name} must not be null"):
         TriggerUpdate.model_validate({field_name: None})
@@ -145,21 +147,31 @@ def test_normal_trigger_response_never_contains_encrypted_or_plaintext_secret():
 def test_hmac_contract_uses_timestamp_dot_raw_body_and_constant_digest_shape():
     secret = "a" * 43
     timestamp = "1783944000"
+    delivery_id = "delivery-1"
     body = b'{"event":"created"}'
     digest = hmac.new(
         secret.encode(),
-        timestamp.encode() + b"." + body,
+        timestamp.encode() + b"." + delivery_id.encode() + b"." + body,
         hashlib.sha256,
     ).digest()
     assert verify_webhook_signature(
         secret=secret,
         timestamp=timestamp,
+        delivery_id=delivery_id,
         body=body,
         provided_digest=digest,
     )
     assert not verify_webhook_signature(
         secret=secret,
         timestamp=timestamp,
+        delivery_id="delivery-2",
+        body=body,
+        provided_digest=digest,
+    )
+    assert not verify_webhook_signature(
+        secret=secret,
+        timestamp=timestamp,
+        delivery_id=delivery_id,
         body=body + b" ",
         provided_digest=digest,
     )
@@ -385,7 +397,7 @@ async def test_webhook_acceptance_creates_delivery_run_and_job_atomically():
     timestamp = "1783944000"
     digest = hmac.new(
         secret.encode(),
-        timestamp.encode() + b"." + body,
+        timestamp.encode() + b".delivery-1." + body,
         hashlib.sha256,
     ).digest()
     trigger = trigger_model(
@@ -435,7 +447,7 @@ async def test_webhook_replay_and_rate_limit_never_create_a_second_run():
     timestamp = "1783944000"
     digest = hmac.new(
         secret.encode(),
-        timestamp.encode() + b"." + body,
+        timestamp.encode() + b".delivery-1." + body,
         hashlib.sha256,
     ).digest()
     trigger = trigger_model(

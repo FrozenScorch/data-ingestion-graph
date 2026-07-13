@@ -74,7 +74,9 @@ X-Ingestion-Delivery: <stable delivery ID>
 X-Ingestion-Signature: sha256=<hex HMAC-SHA256>
 ```
 
-The signature input is the exact bytes `timestamp + "." + raw_body`. Studio
+The signature input is the exact bytes
+`timestamp + "." + delivery_id + "." + raw_body`. The delivery ID is signed so
+captured requests cannot be replayed under a fresh ID. Studio
 checks clock skew and the configured body limit before accepting the delivery,
 then locks the trigger for the short replay/rate-limit transaction. A unique
 trigger/delivery constraint and the trigger row lock guarantee that concurrent

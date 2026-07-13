@@ -110,10 +110,17 @@ def verify_webhook_signature(
     *,
     secret: str,
     timestamp: str,
+    delivery_id: str,
     body: bytes,
     provided_digest: bytes,
 ) -> bool:
-    signed_payload = timestamp.encode("ascii") + b"." + body
+    signed_payload = (
+        timestamp.encode("ascii")
+        + b"."
+        + delivery_id.encode("ascii")
+        + b"."
+        + body
+    )
     expected_digest = hmac.new(
         secret.encode("utf-8"),
         signed_payload,
@@ -179,6 +186,7 @@ async def accept_webhook_delivery(
     if not verify_webhook_signature(
         secret=secret,
         timestamp=timestamp,
+        delivery_id=delivery_id,
         body=body,
         provided_digest=signature_digest,
     ):

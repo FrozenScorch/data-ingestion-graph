@@ -82,7 +82,7 @@ class TriggerUpdate(BaseModel):
     @model_validator(mode="after")
     def reject_null_for_required_fields(self) -> "TriggerUpdate":
         """Distinguish an omitted PATCH field from an explicit JSON null."""
-        for field_name in ("name", "enabled", "rate_limit_per_minute"):
+        for field_name in ("name", "enabled", "timezone", "rate_limit_per_minute"):
             if field_name in self.model_fields_set and getattr(self, field_name) is None:
                 raise ValueError(f"{field_name} must not be null")
         return self

@@ -167,7 +167,7 @@ async def test_concurrent_duplicate_webhook_creates_one_delivery_and_run(postgre
     body = b'{"event":"concurrent"}'
     digest = hmac.new(
         secret.encode(),
-        timestamp.encode() + b"." + body,
+        timestamp.encode() + b".same-delivery." + body,
         hashlib.sha256,
     ).digest()
 
