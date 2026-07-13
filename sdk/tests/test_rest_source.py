@@ -15,7 +15,7 @@ from ingestion_graph.connectors.base import StreamDescriptor
 from ingestion_graph.errors import ConfigurationError, ProtocolError
 from ingestion_graph.messages import RecordMessage, StateMessage
 from ingestion_graph.models import Operation
-from ingestion_graph.secrets import EnvSecretProvider, SecretRef
+from ingestion_graph.secrets import EnvSecretProvider, SecretRef, SecretValue
 from ingestion_graph.sources import RestSource
 
 
@@ -49,6 +49,19 @@ class FakeClient:
 
     async def aclose(self) -> None:
         self.closed = True
+
+
+class RotatingSecretProvider:
+    name = "env"
+
+    def __init__(self, values: list[str]) -> None:
+        self.values = deque(values)
+        self.calls = 0
+
+    def resolve(self, reference: SecretRef) -> SecretValue:
+        assert reference.provider == self.name
+        self.calls += 1
+        return SecretValue(self.values.popleft())
 
 
 def rest_source(client: Any, **kwargs: Any) -> RestSource:
@@ -461,6 +474,68 @@ async def test_resolved_auth_secret_cannot_enter_pagination_checkpoint() -> None
     with pytest.raises(ProtocolError, match="must not contain the authentication secret"):
         await collect(source)
     assert len(client.requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_rotating_secret_is_resolved_once_and_sent_value_cannot_enter_checkpoint() -> None:
+    provider = RotatingSecretProvider(["guard-secret", "later-secret"])
+    client = FakeClient(
+        [
+            FakeResponse(
+                {"data": {"items": []}},
+                headers={"Link": '</v1/next/guard-secret>; rel="next"'},
+            )
+        ]
+    )
+    source = rest_source(
+        client,
+        pagination="link",
+        auth_type="bearer",
+        secret=SecretRef("REST_SECRET"),
+        secret_provider=provider,
+    )
+
+    with pytest.raises(ProtocolError, match="must not contain the authentication secret"):
+        await collect(source)
+
+    assert provider.calls == 1
+    assert client.requests[0][2]["headers"] == {"Authorization": "Bearer guard-secret"}
+
+
+@pytest.mark.asyncio
+async def test_retry_validates_checkpoint_against_every_credential_sent() -> None:
+    provider = RotatingSecretProvider(["first-secret", "second-secret"])
+    client = FakeClient(
+        [
+            FakeResponse({}, status_code=503),
+            FakeResponse(
+                {"data": {"items": []}},
+                headers={"Link": '</v1/next/second-secret>; rel="next"'},
+            ),
+        ]
+    )
+
+    async def no_sleep(_delay: float) -> None:
+        return None
+
+    source = rest_source(
+        client,
+        pagination="link",
+        auth_type="bearer",
+        secret=SecretRef("REST_SECRET"),
+        secret_provider=provider,
+        max_retries=1,
+        sleep=no_sleep,
+    )
+
+    with pytest.raises(ProtocolError, match="must not contain the authentication secret"):
+        await collect(source)
+
+    assert provider.calls == 2
+    assert [request[2]["headers"] for request in client.requests] == [
+        {"Authorization": "Bearer first-secret"},
+        {"Authorization": "Bearer second-secret"},
+    ]
 
 
 @pytest.mark.parametrize("next_target", ["/v1/next/top-secret", "/v1/%2574op-secret"])

@@ -188,6 +188,7 @@ class RestSource(Source):
         self._client = client
         self._owns_client = client is None
         self._sleep = sleep
+        self._sent_credentials: set[str] = set()
         self._endpoint_url = _append_query(
             f"{self.base_url.rstrip('/')}/{self.path.lstrip('/')}", self.query_params
         )
@@ -420,10 +421,9 @@ class RestSource(Source):
             },
         )
 
-    def _auth_headers(self, request_url: str) -> dict[str, str]:
-        if self.auth_type == "none" or not _same_origin(request_url, self.base_url):
+    def _auth_headers(self, credential: str | None) -> dict[str, str]:
+        if credential is None:
             return {}
-        credential = self._resolve_credential()
         if self.auth_type == "bearer":
             return {"Authorization": f"Bearer {credential}"}
         return {self.api_key_header: credential}
@@ -440,12 +440,10 @@ class RestSource(Source):
         return credential
 
     def _reject_credential_url(self, request_url: str) -> None:
-        if self.auth_type == "none":
-            return
-        credential = self._resolve_credential()
         parsed = urlsplit(request_url)
         if any(
             _decoded_component_contains(component, credential, plus=plus)
+            for credential in self._sent_credentials
             for component, plus in (
                 (parsed.netloc, False),
                 (parsed.path, False),
@@ -466,16 +464,20 @@ class RestSource(Source):
             else (),
             allow_pagination_tokens=self.pagination == "link",
         )
-        self._reject_credential_url(request_url)
         cross_origin = not _same_origin(request_url, self.base_url)
         for attempt in range(self.max_retries + 1):
+            credential = None
+            if self.auth_type != "none" and not cross_origin:
+                credential = self._resolve_credential()
+                self._sent_credentials.add(credential)
+            self._reject_credential_url(request_url)
             temporary_client = self._new_client() if cross_origin else None
             client = temporary_client or await self._get_client()
             try:
                 response = await client.request(
                     "GET",
                     request_url,
-                    headers=self._auth_headers(request_url),
+                    headers=self._auth_headers(credential),
                     follow_redirects=False,
                 )
             except IngestionError:

@@ -10,7 +10,8 @@ python -m pip install "ingestion-graph[rest] @ git+https://github.com/FrozenScor
 The endpoint URL cannot contain credentials. Authentication is resolved from a
 `SecretRef` only when a request is sent, so the resolved value is never placed in
 the manifest, connector representation, envelope metadata, provenance, or saved
-source state.
+source state. A provider is resolved once per request attempt, and every credential
+actually sent during the run remains guarded from later pagination checkpoints.
 
 ```python
 from ingestion_graph import Pipeline, SecretRef, SQLiteStateStore
