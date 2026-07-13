@@ -48,6 +48,13 @@ def verify(config: dict[str, Any]) -> list[str]:
         errors.append("the appliance API must run with production security validation")
     if "ingestion-postgres:5432" not in api_environment.get("DATABASE_URL", ""):
         errors.append("the API must use private Compose DNS for PostgreSQL")
+    if ":ingestion_password@" in api_environment.get("DATABASE_URL", ""):
+        errors.append("the API must not use the exact legacy PostgreSQL password")
+    if (
+        services["ingestion-postgres"].get("environment", {}).get("POSTGRES_PASSWORD")
+        == "ingestion_password"
+    ):
+        errors.append("PostgreSQL must initialize with a generated password")
     if "ingestion-redis:6379" not in api_environment.get("REDIS_URL", ""):
         errors.append("the API must use private Compose DNS for Redis")
     migrate_dependency = api.get("depends_on", {}).get("ingestion-migrate", {})
@@ -72,7 +79,6 @@ def verify(config: dict[str, Any]) -> list[str]:
 
     rendered = json.dumps(config, sort_keys=True)
     for insecure in (
-        "ingestion_password",
         "redis_secret_change_me",
         "change-this-secret-in-production",
         '"ADMIN_PASSWORD":"admin123"',
