@@ -14,6 +14,7 @@ import asyncpg
 import pytest
 from app.db import connection_credentials, postgres_credentials
 from app.db import migrate as migration
+from app.db.storage_import import import_legacy_tree
 from app.models.base import Base
 from sqlalchemy import inspect as sqlalchemy_inspect
 from sqlalchemy import text
@@ -152,6 +153,28 @@ def test_saved_connection_config_is_reencrypted_from_public_legacy_key():
     }
     with pytest.raises(RuntimeError, match="unknown encryption key"):
         connection_credentials.reencrypt_config(unknown, current_key)
+
+
+def test_legacy_storage_import_is_atomic_one_time_and_non_overwriting(tmp_path):
+    source = tmp_path / "legacy"
+    destination = tmp_path / "volume"
+    (source / "nested").mkdir(parents=True)
+    (source / "nested" / "legacy.txt").write_text("legacy", encoding="utf-8")
+    destination.mkdir()
+    (destination / "existing.txt").write_text("volume", encoding="utf-8")
+    abandoned = destination / ".legacy-import-staging"
+    abandoned.mkdir()
+    (abandoned / "partial.txt").write_text("partial", encoding="utf-8")
+
+    assert import_legacy_tree(source, destination) is True
+    assert (destination / "nested" / "legacy.txt").read_text(encoding="utf-8") == "legacy"
+    assert (destination / "existing.txt").read_text(encoding="utf-8") == "volume"
+    assert not abandoned.exists()
+    assert (destination / ".legacy-import-complete").is_file()
+
+    (destination / "nested" / "legacy.txt").unlink()
+    assert import_legacy_tree(source, destination) is False
+    assert not (destination / "nested" / "legacy.txt").exists()
 
 
 @pytest.mark.parametrize("host", ["https://server", "server:8040", "server/path", ""])
@@ -350,6 +373,7 @@ def test_repository_compose_contract_has_private_data_plane_and_edge_proxy():
     compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
     routes = (ROOT / "deploy/caddy/routes.caddy").read_text(encoding="utf-8")
     frontend_image = (ROOT / "frontend/Dockerfile").read_text(encoding="utf-8")
+    storage_import = (ROOT / "backend/app/db/storage_import.py").read_text(encoding="utf-8")
 
     assert "network_mode: host" not in compose
     assert not compose.startswith("name:")
@@ -361,7 +385,8 @@ def test_repository_compose_contract_has_private_data_plane_and_edge_proxy():
     assert "ingestion_uploads:/app/data/uploads" in compose
     assert "app.db.postgres_credentials" in compose
     assert "app.db.connection_credentials" in compose
-    assert ".legacy-import-complete" in compose
+    assert "app.db.storage_import" in compose
+    assert ".legacy-import-complete" in storage_import
     assert "2>/dev/null || true" not in compose
     assert "header Origin {$STUDIO_ORIGIN}" in routes
     assert "reverse_proxy ingestion-api:8040" in routes

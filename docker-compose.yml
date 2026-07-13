@@ -90,19 +90,7 @@ services:
       dockerfile: backend/Dockerfile
     user: "0:0"
     restart: "no"
-    command:
-      - sh
-      - -ec
-      - |
-        if [ ! -e /app/data/uploads/.legacy-import-complete ]; then
-          cp -a -n /legacy/uploads/. /app/data/uploads/
-          touch /app/data/uploads/.legacy-import-complete
-        fi
-        if [ ! -e /app/data/temp/.legacy-import-complete ]; then
-          cp -a -n /legacy/temp/. /app/data/temp/
-          touch /app/data/temp/.legacy-import-complete
-        fi
-        chown -R appuser:appuser /app/data/uploads /app/data/temp
+    command: ["python", "-m", "app.db.storage_import"]
     volumes:
       - ./data/uploads:/legacy/uploads:ro
       - ./data/temp:/legacy/temp:ro
