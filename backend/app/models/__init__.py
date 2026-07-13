@@ -21,6 +21,7 @@ from app.models.execution import (
 )
 from app.models.graph import Connection, ConnectionType, Graph, GraphStatus, GraphVersion
 from app.models.lineage import DataLineage, Provenance
+from app.models.sdk_source_state import SDKSourceState
 from app.models.user import ApiKey, User, UserRole
 
 __all__ = [
@@ -57,4 +58,6 @@ __all__ = [
     "Provenance",
     # DLQ
     "DeadLetterQueue",
+    # SDK adapter state
+    "SDKSourceState",
 ]

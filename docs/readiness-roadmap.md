@@ -1,7 +1,6 @@
 # Studio and SDK readiness roadmap
 
-Baseline: `main` after PRs #34-#35 plus this manifest change, audited 2026-07-12.
-PR #36 is intentionally excluded until merged.
+Baseline: `main` after PRs #34-#36 plus this manifest change, audited 2026-07-12.
 
 ## Executive assessment
 
@@ -75,8 +74,11 @@ and HTTP actions, but several displayed capabilities are incomplete:
 
 ### Sync semantics
 
-- Studio runs are manual batch/preview jobs. SDK source state is not yet persisted
-  per graph/node across Studio runs on `main`.
+- Studio's SDK Document Source resumes and reconciles per graph/node, but Discord
+  and native sources do not yet share the same durable state bridge.
+- Document state, successful bounded source output, and the POST_EXEC checkpoint commit
+  atomically, but not yet with a downstream destination flush; its starter query
+  collection is a per-run delta view.
 - `schedule` and `webhook` are labels, not implemented trigger services.
 - Durable PostgreSQL jobs, leases, heartbeat, and expired-job recovery are implemented.
   The worker still runs inside the API deployment and lacks an independently scaled
@@ -116,9 +118,10 @@ Exit: a trusted user can safely upload documents and run graphs from another LAN
 
 ### Milestone 1 — real recurring sync (3–6 additional weeks)
 
-1. Execute SDK `Pipeline` adapters with per-graph/per-node durable source state.
-2. Done: durable queued workers, run leases, heartbeat, and expired-job recovery;
-   independently scaled workers and concurrency policies remain.
+1. Done for managed documents: SDK adapter with per-graph/per-node PostgreSQL state.
+   Extend the bridge to other sources and advance state after durable destinations.
+2. Done in-process: durable queued workers, run leases, heartbeat, and recovery.
+   Add per-stream concurrency policies and a separately deployed worker profile.
 3. Implement cron/interval schedules and authenticated webhook triggers with UI.
 4. Add freshness, cursor, lag, and reconciliation status to each stream.
 

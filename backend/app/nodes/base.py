@@ -66,6 +66,7 @@ class NodeContext:
     state: dict[str, Any] = field(default_factory=dict)  # Shared state across nodes in a run
     working_dir: str = "./data/temp"
     redis_client: Any = None  # redis.Redis, not typed to avoid import
+    db_session: Any = None  # Execution-scoped AsyncSession for atomic control-plane adapters
 
 
 class BaseNode(ABC):

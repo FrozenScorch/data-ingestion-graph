@@ -32,6 +32,7 @@ export interface ConfigField {
   default?: unknown;
   properties?: Record<string, ConfigField>;
   items?: ConfigField;
+  accepted_extensions?: string[];
   required?: string[];
 }
 

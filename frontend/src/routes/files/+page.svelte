@@ -56,9 +56,9 @@
       ondragleave={() => dragging = false}
       ondrop={(e) => { e.preventDefault(); dragging = false; add(Array.from(e.dataTransfer?.files ?? [])); }}
     >
-      <input class="hidden" type="file" multiple accept=".pdf,.doc,.docx,.csv,.txt,.md,.json,.xml,.html,.htm" onchange={choose} disabled={busy} />
+      <input class="hidden" type="file" multiple accept=".pdf,.doc,.docx,.xlsx,.csv,.eml,.txt,.md,.json,.xml,.html,.htm" onchange={choose} disabled={busy} />
       <p class="text-sm text-gray-300">{busy ? `Uploading ${progress}%` : 'Drop files here or click to browse'}</p>
-      <p class="mt-1 text-xs text-gray-600">PDF, Word, CSV, text, Markdown, JSON, XML, or HTML &middot; up to 100 MB each</p>
+      <p class="mt-1 text-xs text-gray-600">PDF, Word, Excel, CSV, email, text, Markdown, JSON, XML, or HTML &middot; up to 100 MB each</p>
     </label>
 
     {#if message}<p class="text-sm text-gray-400">{message}</p>{/if}

@@ -19,6 +19,7 @@ ALLOWED_EXTENSIONS = {
     ".csv",
     ".doc",
     ".docx",
+    ".eml",
     ".htm",
     ".html",
     ".json",
@@ -26,6 +27,7 @@ ALLOWED_EXTENSIONS = {
     ".pdf",
     ".txt",
     ".xml",
+    ".xlsx",
 }
 CHUNK_SIZE = 1024 * 1024
 STAGING_MAX_AGE_SECONDS = 60 * 60
@@ -207,6 +209,16 @@ def resolve_uploads(owner_id: UUID, artifact_ids: list[str]) -> list[Path]:
             raise ValueError("Upload not found or does not belong to graph owner")
         paths.append(item[1])
     return paths
+
+
+def upload_reconciliation_path(owner_id: UUID, artifact_id: UUID) -> Path:
+    """Return a guaranteed-missing path inside an owner-scoped artifact directory."""
+    directory = _artifact_dir(owner_id, artifact_id)
+    path = directory / ".studio-reconciliation" / "missing.txt"
+    path.relative_to(owner_root(owner_id))
+    if path.exists():
+        raise RuntimeError("Managed upload reconciliation path is unexpectedly occupied")
+    return path
 
 
 def delete_upload(owner_id: UUID, artifact_id: UUID) -> bool:

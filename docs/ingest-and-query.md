@@ -53,6 +53,13 @@ the run completes, open the run detail and use **Query Pipeline Output**. Each r
 gets an isolated SQLite collection addressed by its run ID, and the API verifies
 graph ownership before returning records.
 
+The **Document Deltas to Search** starter is intentionally incremental. Its SDK
+Document Source resumes owner-scoped uploads from PostgreSQL state and preserves
+canonical record IDs and delete operations in emitted items. The run-scoped query
+store shows only that run's delta; it is not a durable current view of records from
+earlier runs. A persistent destination that applies upserts and tombstones is the
+next Studio synchronization boundary.
+
 ## Direction for query graphs
 
 The current query collection is the first vertical slice: ingest, materialize, and

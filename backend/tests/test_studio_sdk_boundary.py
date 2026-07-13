@@ -19,6 +19,7 @@ from app.graph_validation import (
 )
 from app.nodes.discord_source import DiscordSourceNode
 from app.nodes.registry import discover_nodes
+from app.nodes.sdk_document_source import SDKDocumentSourceNode
 from app.nodes.sdk_manifest import ManifestFieldProjection, project_manifest_config_schema
 from app.nodes.sdk_query_store import SDKQueryStoreNode
 from ingestion_graph.sources import DiscordSource
@@ -26,6 +27,7 @@ from ingestion_graph.sources import DiscordSource
 
 def test_sdk_adapter_metadata_is_visible_to_studio():
     discord = DiscordSourceNode().to_dict()
+    documents = SDKDocumentSourceNode().to_dict()
     query = SDKQueryStoreNode().to_dict()
 
     assert discord["implementation"] == "sdk-adapter"
@@ -41,6 +43,8 @@ def test_sdk_adapter_metadata_is_visible_to_studio():
             "rate_limits": True,
         },
     }
+    assert documents["implementation"] == "sdk-adapter"
+    assert documents["sdk_component"] == "ingestion_graph.sources.LocalDocumentsSource"
     assert query["implementation"] == "sdk-adapter"
     assert query["sdk_component"] == "ingestion_graph.destinations.SQLiteCollection"
 
@@ -146,10 +150,8 @@ def test_saved_graph_edges_enforce_registered_port_types():
     validate_graph_edges(nodes_data, edges_data)
 
     invalid_edges = deepcopy(edges_data)
-    invalid_edges["edges"][0].update(
-        {"target": "chunk", "targetHandle": "documents", "target_port": "documents"}
-    )
-    with pytest.raises(ValueError, match="cannot connect file_list to document"):
+    invalid_edges["edges"][0].update({"sourceHandle": "missing", "source_port": "missing"})
+    with pytest.raises(ValueError, match="references an unknown port"):
         validate_graph_edges(nodes_data, invalid_edges)
 
 
