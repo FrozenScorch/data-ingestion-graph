@@ -1,6 +1,7 @@
 """
 Checkpoint manager: save and restore execution state in PostgreSQL.
 """
+
 from typing import Any, Optional
 from uuid import UUID
 
@@ -27,7 +28,13 @@ async def save_checkpoint(
         node_output=node_output,
     )
     db.add(checkpoint)
-    await db.commit()
+    try:
+        await db.commit()
+    except Exception:
+        # The same transaction may contain deferred node output and source state.
+        # A failed checkpoint must roll that entire acknowledgement unit back.
+        await db.rollback()
+        raise
     await db.refresh(checkpoint)
     return checkpoint
 
