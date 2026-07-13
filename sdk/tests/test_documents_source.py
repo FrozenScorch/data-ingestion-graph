@@ -10,6 +10,7 @@ import pytest
 from ingestion_graph import ConnectorSpec
 from ingestion_graph import LocalDocumentsSource as PublicLocalDocumentsSource
 from ingestion_graph.destinations import JsonlDestination, SQLiteCollection
+from ingestion_graph.errors import ConfigurationError
 from ingestion_graph.messages import RecordMessage, StateMessage
 from ingestion_graph.models import DocumentElement, Operation, TableBatch
 from ingestion_graph.pipeline import Pipeline
@@ -90,14 +91,13 @@ async def test_text_resume_and_parser_config_are_checkpoint_safe(tmp_path: Path)
 async def test_snapshot_hash_always_matches_bytes_that_are_parsed(tmp_path: Path, monkeypatch):
     path = tmp_path / "race.txt"
     path.write_text("old bytes", encoding="utf-8")
-    real_fingerprint = documents._fingerprint
+    real_snapshot = documents._snapshot_file
 
-    def mutate_after_quick_hash(candidate: Path) -> str:
-        fingerprint = real_fingerprint(candidate)
+    def mutate_before_snapshot(candidate: Path, **kwargs):
         path.write_text("new bytes", encoding="utf-8")
-        return fingerprint
+        return real_snapshot(candidate, **kwargs)
 
-    monkeypatch.setattr(documents, "_fingerprint", mutate_after_quick_hash)
+    monkeypatch.setattr(documents, "_snapshot_file", mutate_before_snapshot)
     source = LocalDocumentsSource(path, stream_names=["race"])
     stream = (await source.discover())[0]
     messages = await collect(source, stream)
@@ -105,6 +105,69 @@ async def test_snapshot_hash_always_matches_bytes_that_are_parsed(tmp_path: Path
     assert records(messages)[0].envelope.payload.text == "new bytes"
     expected = hashlib.sha256(b"new bytes").hexdigest()
     assert states(messages)[-1].state["files"]["race.txt"]["sha256"] == expected
+
+
+@pytest.mark.asyncio
+async def test_interrupted_parser_migration_reprocesses_every_file(tmp_path: Path):
+    for name in ("a.txt", "b.txt"):
+        (tmp_path / name).write_text("many words " * 300, encoding="utf-8")
+    original = LocalDocumentsSource(
+        tmp_path,
+        stream_names=["documents"],
+        text_chunk_chars=256,
+    )
+    stream = (await original.discover())[0]
+    old_state = states(await collect(original, stream))[-1].state
+
+    migrated = LocalDocumentsSource(
+        tmp_path,
+        stream_names=["documents"],
+        text_chunk_chars=12_000,
+    )
+    iterator = migrated.read(stream, old_state)
+    interrupted = None
+    async for message in iterator:
+        if not isinstance(message, StateMessage) or "in_progress" in message.state:
+            continue
+        file_states = message.state["files"]
+        if file_states["a.txt"]["parser_fingerprint"] != old_state["parser_fingerprint"]:
+            interrupted = message.state
+            break
+    await iterator.aclose()
+
+    assert interrupted is not None
+    assert interrupted["files"]["b.txt"]["parser_fingerprint"] == old_state["parser_fingerprint"]
+    resumed = await collect(migrated, stream, interrupted)
+    assert any(item.envelope.metadata["filename"] == "b.txt" for item in records(resumed))
+
+
+@pytest.mark.asyncio
+async def test_changed_file_after_partial_checkpoint_deletes_committed_tail(tmp_path: Path):
+    path = tmp_path / "notes.txt"
+    path.write_text("replacement", encoding="utf-8")
+    source = LocalDocumentsSource(path, stream_names=["notes"])
+    stream = (await source.discover())[0]
+    parser_fingerprint = source._parser_fingerprint()
+    state = {
+        "parser_fingerprint": parser_fingerprint,
+        "files": {},
+        "in_progress": {
+            "relative_path": "notes.txt",
+            "sha256": "a" * 64,
+            "next_index": 5,
+            "parser_fingerprint": parser_fingerprint,
+        },
+    }
+
+    changed = records(await collect(source, stream, state))
+
+    assert [item.envelope.operation for item in changed] == [
+        Operation.UPSERT,
+        Operation.DELETE,
+        Operation.DELETE,
+        Operation.DELETE,
+        Operation.DELETE,
+    ]
 
 
 @pytest.mark.asyncio
@@ -280,11 +343,102 @@ async def test_symlink_root_is_rejected_when_following_is_disabled(tmp_path: Pat
 
 
 @pytest.mark.asyncio
+async def test_symlink_swap_before_open_is_rejected(tmp_path: Path, monkeypatch):
+    root = tmp_path / "documents"
+    root.mkdir()
+    path = root / "safe.txt"
+    path.write_text("safe", encoding="utf-8")
+    secret = tmp_path / "secret.txt"
+    secret.write_text("secret", encoding="utf-8")
+    real_snapshot = documents._snapshot_file
+
+    def swap_before_open(candidate: Path, **kwargs):
+        candidate.unlink()
+        try:
+            candidate.symlink_to(secret)
+        except OSError as exc:
+            pytest.skip(f"symlink creation is unavailable: {exc}")
+        return real_snapshot(candidate, **kwargs)
+
+    monkeypatch.setattr(documents, "_snapshot_file", swap_before_open)
+    source = LocalDocumentsSource(root, stream_names=["documents"])
+    stream = (await source.discover())[0]
+
+    with pytest.raises(ConfigurationError, match="symlink|escaped|changed"):
+        await collect(source, stream)
+
+
+@pytest.mark.asyncio
 async def test_file_size_limit_is_enforced_during_check(tmp_path: Path):
     (tmp_path / "large.txt").write_text("too large", encoding="utf-8")
     result = await LocalDocumentsSource(tmp_path, max_file_size_bytes=3).check()
     assert result.ok is False
     assert "size limit" in result.message
+
+
+def test_snapshot_copy_enforces_cumulative_size_limit(tmp_path: Path, monkeypatch):
+    path = tmp_path / "growing.txt"
+    path.write_bytes(b"0123456789")
+    real_fstat = documents.os.fstat
+
+    def small_initial_stat(descriptor: int):
+        result = real_fstat(descriptor)
+        values = list(result)
+        values[6] = 3
+        return documents.os.stat_result(values)
+
+    monkeypatch.setattr(documents.os, "fstat", small_initial_stat)
+    with (
+        pytest.raises(ConfigurationError, match="size limit"),
+        documents._snapshot_file(
+            path,
+            root=path,
+            trusted_root=documents._trusted_root(path),
+            follow_symlinks=False,
+            max_bytes=3,
+        ),
+    ):
+        pass
+
+
+@pytest.mark.asyncio
+async def test_followed_symlink_cycle_terminates_without_duplicate_files(tmp_path: Path):
+    root = tmp_path / "documents"
+    root.mkdir()
+    (root / "notes.txt").write_text("hello", encoding="utf-8")
+    try:
+        (root / "loop").symlink_to(root, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"directory symlink creation is unavailable: {exc}")
+    source = LocalDocumentsSource(root, stream_names=["documents"], follow_symlinks=True)
+    stream = (await source.discover())[0]
+
+    assert len(records(await collect(source, stream))) == 1
+
+
+@pytest.mark.asyncio
+async def test_direct_file_deletion_reconciles_current_view(tmp_path: Path):
+    path = tmp_path / "notes.txt"
+    path.write_text("hello", encoding="utf-8")
+    state = MemoryStateStore()
+    database = tmp_path / "direct.db"
+
+    async def sync() -> None:
+        await Pipeline(
+            "direct",
+            LocalDocumentsSource(path, stream_names=["notes"]),
+            SQLiteCollection(database),
+            state_store=state,
+        ).run()
+
+    await sync()
+    path.unlink()
+    await sync()
+    store = SQLiteCollection(database)
+    try:
+        assert len(await store.query(QueryRequest(limit=10))) == 0
+    finally:
+        await store.close()
 
 
 @pytest.mark.asyncio

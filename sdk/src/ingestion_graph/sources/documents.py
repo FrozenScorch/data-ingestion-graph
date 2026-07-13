@@ -7,6 +7,7 @@ import hashlib
 import json
 import mimetypes
 import os
+import stat
 import tempfile
 import zipfile
 from collections.abc import AsyncIterator, Iterable, Iterator, Mapping, Sequence
@@ -88,6 +89,13 @@ class _Snapshot:
     path: Path
     sha256: str
     stat: os.stat_result
+
+
+@dataclass(frozen=True, slots=True)
+class _TrustedRoot:
+    path: Path
+    identity: tuple[int, int]
+    is_file: bool
 
 
 class LocalDocumentsSource(Source):
@@ -218,8 +226,11 @@ class LocalDocumentsSource(Source):
 
     async def check(self) -> CheckResult:
         missing = [str(path) for path in self.paths if not path.exists()]
-        if missing:
-            return CheckResult(False, f"Document paths do not exist: {', '.join(missing)}")
+        invalid_missing = [
+            value for value in missing if Path(value).suffix.lower() not in self.extensions
+        ]
+        if invalid_missing:
+            return CheckResult(False, f"Document paths do not exist: {', '.join(invalid_missing)}")
         if not self.follow_symlinks and any(path.is_symlink() for path in self.paths):
             return CheckResult(False, "Configured document roots must not be symlinks")
         try:
@@ -234,7 +245,10 @@ class LocalDocumentsSource(Source):
             return CheckResult(
                 False, f"Document files exceed the configured size limit: {oversized[0]}"
             )
-        return CheckResult(True, f"Discovered {len(files)} supported document files")
+        message = f"Discovered {len(files)} supported document files"
+        if missing:
+            message += f"; missing roots will be reconciled as deletions: {', '.join(missing)}"
+        return CheckResult(True, message)
 
     async def discover(self) -> Sequence[StreamDescriptor]:
         self._streams = self._name_streams()
@@ -271,9 +285,9 @@ class LocalDocumentsSource(Source):
 
         current = _validate_state(state)
         files_state = dict(current["files"])
-        prior_parser = current.get("parser_fingerprint")
         parser_fingerprint = self._parser_fingerprint()
         in_progress = current.get("in_progress")
+        trusted_root = _trusted_root(root) if not self.follow_symlinks else None
         discovered = self._discover_files(root)
         current_paths = {_relative_path(path, root): path for path in discovered}
 
@@ -306,27 +320,25 @@ class LocalDocumentsSource(Source):
             )
 
         for relative_path, path in sorted(current_paths.items()):
-            if path.stat().st_size > self.max_file_size_bytes:
-                raise ConfigurationError(f"Document file exceeds the configured size limit: {path}")
             prior = files_state.get(relative_path)
-            quick_fingerprint = _fingerprint(path)
-            if (
-                prior_parser == parser_fingerprint
-                and prior is not None
-                and prior["sha256"] == quick_fingerprint
-                and not (
-                    isinstance(in_progress, Mapping)
-                    and in_progress.get("relative_path") == relative_path
-                )
-            ):
-                continue
-
-            with _snapshot_file(path) as snapshot:
+            with _snapshot_file(
+                path,
+                root=root,
+                trusted_root=trusted_root,
+                follow_symlinks=self.follow_symlinks,
+                max_bytes=self.max_file_size_bytes,
+            ) as snapshot:
                 fingerprint = snapshot.sha256
-                if snapshot.stat.st_size > self.max_file_size_bytes:
-                    raise ConfigurationError(
-                        f"Document file exceeds the configured size limit: {path}"
+                if (
+                    prior is not None
+                    and prior.get("parser_fingerprint") == parser_fingerprint
+                    and prior["sha256"] == fingerprint
+                    and not (
+                        isinstance(in_progress, Mapping)
+                        and in_progress.get("relative_path") == relative_path
                     )
+                ):
+                    continue
                 if path.suffix.lower() in {".docx", ".xlsx"}:
                     _validate_archive(
                         snapshot.path,
@@ -334,10 +346,10 @@ class LocalDocumentsSource(Source):
                     )
                 resume_index = 0
                 if (
-                    prior_parser == parser_fingerprint
-                    and isinstance(in_progress, Mapping)
+                    isinstance(in_progress, Mapping)
                     and in_progress.get("relative_path") == relative_path
                     and in_progress.get("sha256") == fingerprint
+                    and in_progress.get("parser_fingerprint") == parser_fingerprint
                 ):
                     resume_index = int(in_progress.get("next_index", 0))
 
@@ -374,6 +386,7 @@ class LocalDocumentsSource(Source):
                                     "relative_path": relative_path,
                                     "sha256": fingerprint,
                                     "next_index": index + 1,
+                                    "parser_fingerprint": parser_fingerprint,
                                 },
                             ),
                         )
@@ -384,11 +397,18 @@ class LocalDocumentsSource(Source):
                         f"Document checkpoint next_index exceeds parsed elements for {path}"
                     )
                 prior_count = int(prior["element_count"]) if prior is not None else 0
-                if prior_count > parsed_count:
+                progress_count = (
+                    int(in_progress.get("next_index", 0))
+                    if isinstance(in_progress, Mapping)
+                    and in_progress.get("relative_path") == relative_path
+                    else 0
+                )
+                committed_count = max(prior_count, progress_count)
+                if committed_count > parsed_count:
                     async for message in self._emit_tombstones(
                         stream.name,
                         relative_path,
-                        prior_count,
+                        committed_count,
                         files_state,
                         parser_fingerprint,
                         start=parsed_count,
@@ -397,6 +417,7 @@ class LocalDocumentsSource(Source):
                 files_state[relative_path] = {
                     "sha256": fingerprint,
                     "element_count": parsed_count,
+                    "parser_fingerprint": parser_fingerprint,
                 }
                 yield StateMessage(
                     stream.name,
@@ -519,8 +540,20 @@ class LocalDocumentsSource(Source):
         return sorted(set(files), key=lambda item: str(item).casefold())
 
     def _walk_directory(self, root: Path) -> Iterable[Path]:
+        visited: set[tuple[int, int]] = set()
         for current, directory_names, file_names in os.walk(root, followlinks=self.follow_symlinks):
             current_path = Path(current)
+            if self.follow_symlinks:
+                try:
+                    current_stat = current_path.stat()
+                except OSError:
+                    directory_names.clear()
+                    continue
+                identity = (current_stat.st_dev, current_stat.st_ino)
+                if identity in visited:
+                    directory_names.clear()
+                    continue
+                visited.add(identity)
             if not self.include_hidden:
                 directory_names[:] = [name for name in directory_names if not name.startswith(".")]
             if not self.follow_symlinks:
@@ -537,7 +570,7 @@ class LocalDocumentsSource(Source):
             if self.stream_names:
                 name = self.stream_names[index]
             else:
-                base = root.stem if root.is_file() else root.name
+                base = root.stem if root.suffix.lower() in self.extensions else root.name
                 path_hash = hashlib.sha256(str(root.resolve()).encode()).hexdigest()[:10]
                 name = f"{base or 'documents'}#{path_hash}"
             streams[name] = root
@@ -564,23 +597,137 @@ def _is_hidden(path: Path, root: Path) -> bool:
     return any(part.startswith(".") for part in relative.parts)
 
 
-def _fingerprint(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for block in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
+def _trusted_root(root: Path) -> _TrustedRoot | None:
+    """Capture a stable root identity before discovery without following a root link."""
+    try:
+        before = root.lstat()
+    except FileNotFoundError:
+        return None
+    if _is_reparse(root):
+        raise ConfigurationError(f"Configured document root must not be a symlink: {root}")
+    resolved = root.resolve(strict=True)
+    after = root.lstat()
+    if _stat_identity(before) != _stat_identity(after) or _is_reparse(root):
+        raise ConfigurationError(f"Configured document root changed during discovery: {root}")
+    return _TrustedRoot(resolved, _stat_identity(after), root.is_file())
+
+
+def _stat_identity(value: os.stat_result) -> tuple[int, int]:
+    return value.st_dev, value.st_ino
+
+
+def _is_reparse(path: Path) -> bool:
+    try:
+        value = path.lstat()
+    except OSError:
+        return False
+    attributes = getattr(value, "st_file_attributes", 0)
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    return path.is_symlink() or bool(attributes & reparse_flag)
+
+
+def _assert_contained(candidate: Path, root: Path, trusted_root: _TrustedRoot) -> Path:
+    resolved = candidate.resolve(strict=True)
+    if trusted_root.is_file:
+        if resolved != trusted_root.path:
+            raise ConfigurationError(f"Document path escaped its configured root: {candidate}")
+    else:
+        try:
+            resolved.relative_to(trusted_root.path)
+        except ValueError as exc:
+            raise ConfigurationError(
+                f"Document path escaped its configured root: {candidate}"
+            ) from exc
+
+        current = root
+        try:
+            relative_parts = candidate.relative_to(root).parts
+        except ValueError as exc:
+            raise ConfigurationError(
+                f"Document path escaped its configured root: {candidate}"
+            ) from exc
+        if _is_reparse(root):
+            raise ConfigurationError(f"Configured document root must not be a symlink: {root}")
+        for part in relative_parts:
+            current = current / part
+            if _is_reparse(current):
+                raise ConfigurationError(f"Document path contains a symlink: {candidate}")
+    return resolved
+
+
+def _open_source(
+    path: Path,
+    *,
+    root: Path,
+    trusted_root: _TrustedRoot | None,
+    follow_symlinks: bool,
+) -> int:
+    file_flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NONBLOCK", 0)
+    if follow_symlinks:
+        return os.open(path, file_flags)
+    if trusted_root is None:
+        raise ConfigurationError(f"Configured document root disappeared: {root}")
+
+    no_follow = getattr(os, "O_NOFOLLOW", 0)
+    if os.name == "nt" or os.open not in os.supports_dir_fd:
+        return os.open(path, file_flags | no_follow)
+    if trusted_root.is_file:
+        descriptor = os.open(root, file_flags | no_follow)
+        if _stat_identity(os.fstat(descriptor)) != trusted_root.identity:
+            os.close(descriptor)
+            raise ConfigurationError(f"Configured document root changed while opening: {root}")
+        return descriptor
+
+    directory_flags = os.O_RDONLY | no_follow | getattr(os, "O_DIRECTORY", 0)
+    directory_descriptor = os.open(root, directory_flags)
+    try:
+        if _stat_identity(os.fstat(directory_descriptor)) != trusted_root.identity:
+            raise ConfigurationError(f"Configured document root changed while opening: {root}")
+        parts = path.relative_to(root).parts
+        if not parts:
+            raise ConfigurationError(f"Document path is not a file below its root: {path}")
+        for part in parts[:-1]:
+            next_descriptor = os.open(
+                part,
+                directory_flags,
+                dir_fd=directory_descriptor,
+            )
+            os.close(directory_descriptor)
+            directory_descriptor = next_descriptor
+        return os.open(
+            parts[-1],
+            file_flags | no_follow,
+            dir_fd=directory_descriptor,
+        )
+    finally:
+        os.close(directory_descriptor)
 
 
 @contextmanager
-def _snapshot_file(path: Path) -> Iterator[_Snapshot]:
-    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+def _snapshot_file(
+    path: Path,
+    *,
+    root: Path,
+    trusted_root: _TrustedRoot | None,
+    follow_symlinks: bool,
+    max_bytes: int,
+) -> Iterator[_Snapshot]:
     source_descriptor: int | None = None
     temp_descriptor: int | None = None
     temp_name: str | None = None
     digest = hashlib.sha256()
     try:
-        source_descriptor = os.open(path, flags)
+        expected_path = (
+            _assert_contained(path, root, trusted_root)
+            if not follow_symlinks and trusted_root is not None
+            else path.resolve(strict=True)
+        )
+        source_descriptor = _open_source(
+            path,
+            root=root,
+            trusted_root=trusted_root,
+            follow_symlinks=follow_symlinks,
+        )
         temp_descriptor, temp_name = tempfile.mkstemp(
             prefix="ingestion-document-", suffix=path.suffix
         )
@@ -591,7 +738,31 @@ def _snapshot_file(path: Path) -> Iterator[_Snapshot]:
             source_descriptor = None
             temp_descriptor = None
             source_stat = os.fstat(source.fileno())
+            if not stat.S_ISREG(source_stat.st_mode):
+                raise ConfigurationError(f"Document path is not a regular file: {path}")
+            if source_stat.st_size > max_bytes:
+                raise ConfigurationError(f"Document file exceeds the configured size limit: {path}")
+            if not follow_symlinks:
+                if trusted_root is None:
+                    raise ConfigurationError(f"Configured document root disappeared: {root}")
+                current_path = _assert_contained(path, root, trusted_root)
+                try:
+                    path_stat = path.lstat()
+                except OSError as exc:
+                    raise ConfigurationError(
+                        f"Document path changed while opening: {path}"
+                    ) from exc
+                if current_path != expected_path or _stat_identity(path_stat) != _stat_identity(
+                    source_stat
+                ):
+                    raise ConfigurationError(f"Document path changed while opening: {path}")
+            copied = 0
             while block := source.read(1024 * 1024):
+                copied += len(block)
+                if copied > max_bytes:
+                    raise ConfigurationError(
+                        f"Document file exceeds the configured size limit: {path}"
+                    )
                 digest.update(block)
                 target.write(block)
             target.flush()
@@ -626,11 +797,18 @@ def _validate_state(state: Mapping[str, Any] | None) -> dict[str, Any]:
             or element_count < 0
         ):
             raise ConfigurationError("Document checkpoint file element_count must be non-negative")
-        files[relative_path] = {"sha256": sha256, "element_count": element_count}
-
     parser_fingerprint = current.get("parser_fingerprint")
     if parser_fingerprint is not None and not isinstance(parser_fingerprint, str):
         raise ConfigurationError("Document checkpoint parser_fingerprint must be a string")
+    for relative_path, raw_file in raw_files.items():
+        file_parser = raw_file.get("parser_fingerprint", parser_fingerprint)
+        if file_parser is not None and not isinstance(file_parser, str):
+            raise ConfigurationError("Document checkpoint file parser_fingerprint must be a string")
+        files[relative_path] = {
+            "sha256": raw_file["sha256"],
+            "element_count": raw_file["element_count"],
+            "parser_fingerprint": file_parser,
+        }
     in_progress = current.get("in_progress")
     if in_progress is not None:
         if not isinstance(in_progress, Mapping):
@@ -638,16 +816,22 @@ def _validate_state(state: Mapping[str, Any] | None) -> dict[str, Any]:
         relative_path = in_progress.get("relative_path")
         sha256 = in_progress.get("sha256")
         next_index = in_progress.get("next_index")
+        progress_parser = in_progress.get("parser_fingerprint", parser_fingerprint)
         if not isinstance(relative_path, str) or not isinstance(sha256, str):
             raise ConfigurationError("Document checkpoint in_progress identity is invalid")
         if isinstance(next_index, bool) or not isinstance(next_index, int) or next_index < 0:
             raise ConfigurationError(
                 "Document checkpoint in_progress next_index must be non-negative"
             )
+        if progress_parser is not None and not isinstance(progress_parser, str):
+            raise ConfigurationError(
+                "Document checkpoint in_progress parser_fingerprint must be a string"
+            )
         in_progress = {
             "relative_path": relative_path,
             "sha256": sha256,
             "next_index": next_index,
+            "parser_fingerprint": progress_parser,
         }
     return {
         "files": files,

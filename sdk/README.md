@@ -48,10 +48,12 @@ stream and ingests PDF, Word (`.docx`), Excel (`.xlsx`), CSV, email (`.eml`),
 HTML, Markdown, and text. Immutable snapshots ensure checkpoints describe the
 exact parsed bytes. Per-file SHA-256, element counts, and parser fingerprints
 resume within unchanged documents, reprocess configuration changes, and emit
-tombstones when a document shrinks or a file disappears from a directory root.
-Use explicit `stream_names` when identities must remain stable after moving a
-root between machines. File and expanded Office-archive size limits are enabled
-by default.
+tombstones when a document shrinks or a configured file or directory child
+disappears. With symlink following disabled (the default), snapshots use
+root-anchored safe opens and reject path/reparse changes; followed directory
+cycles are deduplicated. Use explicit `stream_names` when identities must remain
+stable after moving a root between machines. File and expanded Office-archive
+size limits are enforced while copying and parsing.
 
 ## Test an ingestion pipeline
 
