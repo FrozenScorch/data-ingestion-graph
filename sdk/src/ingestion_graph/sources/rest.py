@@ -526,6 +526,7 @@ class RestSource(Source):
                 else (),
                 allow_pagination_tokens=self.pagination == "link",
             )
+            self._reject_credential_url(next_url)
         return _Page(records, next_url, _page_fingerprint(records, next_url))
 
     def _validate_page_identities(
@@ -741,27 +742,26 @@ def _query_name_components(value: str) -> tuple[tuple[str, ...], str]:
 
 def _is_pagination_token_query_name(value: str) -> bool:
     components, collapsed = _query_name_components(value)
-    forbidden = {
-        "access",
-        "api",
-        "auth",
-        "authorization",
-        "client",
-        "credential",
-        "password",
-        "refresh",
-        "secret",
-        "signature",
-        "sig",
+    allowed_patterns = {
+        ("after", "token"),
+        ("before", "token"),
+        ("continuation", "token"),
+        ("cursor", "token"),
+        ("next", "page", "token"),
+        ("next", "token"),
+        ("page", "token"),
+        ("pagination", "token"),
     }
-    if forbidden.intersection(components):
-        return False
-    has_token = "token" in components or collapsed.endswith("token")
-    pagination_markers = {"after", "before", "continuation", "cursor", "next", "page"}
-    has_marker = bool(pagination_markers.intersection(components)) or any(
-        collapsed.startswith(marker) for marker in pagination_markers
-    )
-    return has_token and has_marker
+    return components in allowed_patterns or collapsed in {
+        "aftertoken",
+        "beforetoken",
+        "continuationtoken",
+        "cursortoken",
+        "nextpagetoken",
+        "nexttoken",
+        "pagetoken",
+        "paginationtoken",
+    }
 
 
 def _is_sensitive_query_name(value: str) -> bool:

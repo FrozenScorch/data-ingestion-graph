@@ -414,6 +414,55 @@ async def test_sensitive_next_link_query_is_rejected_before_checkpointing(name: 
     assert len(client.requests) == 1
 
 
+@pytest.mark.parametrize(
+    "name",
+    [
+        "nextaccesstoken",
+        "nextrefreshtoken",
+        "nextclientsecrettoken",
+        "next_bearer_token",
+        "next_session_token",
+    ],
+)
+@pytest.mark.asyncio
+async def test_credential_shaped_pagination_names_are_not_exempt(name: str) -> None:
+    client = FakeClient(
+        [
+            FakeResponse(
+                {"data": {"items": []}},
+                headers={"Link": f'</v1/widgets?{name}=plaintext>; rel="next"'},
+            )
+        ]
+    )
+
+    with pytest.raises(ProtocolError, match="appears to contain credentials"):
+        await collect(rest_source(client, pagination="link"))
+    assert len(client.requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_resolved_auth_secret_cannot_enter_pagination_checkpoint() -> None:
+    client = FakeClient(
+        [
+            FakeResponse(
+                {"data": {"items": []}},
+                headers={"Link": '</v1/widgets?next_page_token=top-secret>; rel="next"'},
+            )
+        ]
+    )
+    source = rest_source(
+        client,
+        pagination="link",
+        auth_type="bearer",
+        secret=SecretRef("REST_SECRET"),
+        secret_provider=EnvSecretProvider({"REST_SECRET": "top-secret"}),
+    )
+
+    with pytest.raises(ProtocolError, match="must not contain the authentication secret"):
+        await collect(source)
+    assert len(client.requests) == 1
+
+
 @pytest.mark.asyncio
 async def test_injected_redirect_following_client_cannot_forward_auth() -> None:
     requests: list[httpx.Request] = []
