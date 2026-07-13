@@ -18,6 +18,7 @@ from app.services.run_queue_service import (
     claim_run_job,
     finish_run_job,
     heartbeat_run_job,
+    mark_run_failed_if_owned,
     recover_orphaned_runs,
     release_run_job,
 )
@@ -173,18 +174,11 @@ class DurableRunWorker:
         worker_id: str,
         error: str,
     ) -> None:
-        from app.models.execution import RunJob
-
         async with AsyncSessionLocal() as db:
-            job = await db.get(RunJob, job_id)
-            if (
-                job is None
-                or job.status != RunJobStatus.LEASED.value
-                or job.lease_owner != worker_id
-            ):
-                return
-            run = await db.get(Run, run_id)
-            if run is not None and run.status != RunStatus.CANCELLED.value:
-                run.status = RunStatus.FAILED.value
-                run.error_message = error
-                await db.commit()
+            await mark_run_failed_if_owned(
+                db,
+                job_id=job_id,
+                run_id=run_id,
+                worker_id=worker_id,
+                error=error,
+            )

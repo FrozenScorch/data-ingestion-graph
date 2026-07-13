@@ -208,12 +208,12 @@ async def retry_failed_run(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found")
     await _check_run_access(run, current_user, db)
 
-    if run.status not in ("failed", "cancelled"):
+    if run.status != "failed":
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=(
                 f"Cannot retry run in '{run.status}' status. "
-                "Only 'failed' or 'cancelled' runs can be retried."
+                "Only failed runs can retry failed nodes; replay a cancelled run instead."
             ),
         )
 

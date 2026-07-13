@@ -12,6 +12,7 @@ from app.services.run_queue_service import (
     enqueue_run_job,
     finish_run_job,
     heartbeat_run_job,
+    mark_run_failed_if_owned,
     recover_orphaned_runs,
     release_run_job,
 )
@@ -129,6 +130,57 @@ async def test_heartbeat_and_finish_are_fenced_by_lease_owner():
     assert renewed is True
     assert finished is False
     assert db.commit.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_mark_run_failed_rejects_an_expired_lease():
+    job = RunJob(
+        run_id=uuid4(),
+        status=RunJobStatus.LEASED.value,
+        lease_owner="stale-worker",
+        lease_expires_at=datetime.now(timezone.utc) - timedelta(seconds=1),
+    )
+    db = AsyncMock()
+    db.execute = AsyncMock(return_value=scalar_result(job))
+
+    marked = await mark_run_failed_if_owned(
+        db,
+        job_id=job.id,
+        run_id=job.run_id,
+        worker_id="stale-worker",
+        error="late failure",
+    )
+
+    assert marked is False
+    db.rollback.assert_awaited_once()
+    db.commit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_mark_run_failed_locks_job_and_run_before_commit():
+    run = Run(id=uuid4(), graph_id=uuid4(), status="running")
+    job = RunJob(
+        run_id=run.id,
+        status=RunJobStatus.LEASED.value,
+        lease_owner="worker-1",
+        lease_expires_at=datetime.now(timezone.utc) + timedelta(seconds=60),
+    )
+    db = AsyncMock()
+    db.execute = AsyncMock(side_effect=[scalar_result(job), scalar_result(run)])
+
+    marked = await mark_run_failed_if_owned(
+        db,
+        job_id=job.id,
+        run_id=run.id,
+        worker_id="worker-1",
+        error="connector failed",
+    )
+
+    assert marked is True
+    assert run.status == "failed"
+    assert run.error_message == "connector failed"
+    assert all("FOR UPDATE" in str(call.args[0]) for call in db.execute.await_args_list)
+    db.commit.assert_awaited_once()
 
 
 @pytest.mark.asyncio

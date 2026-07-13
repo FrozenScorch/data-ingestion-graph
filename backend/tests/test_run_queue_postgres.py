@@ -13,6 +13,7 @@ from app.services.run_queue_service import (
     claim_run_job,
     finish_run_job,
     heartbeat_run_job,
+    mark_run_failed_if_owned,
     recover_orphaned_runs,
     utc_now,
 )
@@ -194,6 +195,56 @@ async def test_postgres_claim_is_exclusive_and_expired_lease_is_reclaimed():
                 )
             ).one()
         assert recovered == ("pending", "queued", "full")
+
+        stale_run_id = uuid4()
+        stale_job_id = uuid4()
+        async with admin_engine.begin() as conn:
+            await conn.execute(
+                text(
+                    f"""
+                    INSERT INTO "{schema}".runs
+                        (id, graph_id, graph_version_id, status)
+                    VALUES (:run_id, :graph_id, :graph_version_id, 'running')
+                    """
+                ),
+                {
+                    "run_id": stale_run_id,
+                    "graph_id": uuid4(),
+                    "graph_version_id": uuid4(),
+                },
+            )
+            await conn.execute(
+                text(
+                    f"""
+                    INSERT INTO "{schema}".run_jobs
+                        (id, run_id, job_type, status, available_at, lease_owner,
+                         lease_expires_at, heartbeat_at, attempt_count)
+                    VALUES (:job_id, :run_id, 'full', 'leased', :available_at,
+                            'stale-worker', :lease_expires_at, :heartbeat_at, 1)
+                    """
+                ),
+                {
+                    "job_id": stale_job_id,
+                    "run_id": stale_run_id,
+                    "available_at": now,
+                    "lease_expires_at": now - timedelta(seconds=1),
+                    "heartbeat_at": now - timedelta(seconds=30),
+                },
+            )
+        async with sessions() as db:
+            assert not await mark_run_failed_if_owned(
+                db,
+                job_id=stale_job_id,
+                run_id=stale_run_id,
+                worker_id="stale-worker",
+                error="late failure",
+            )
+        async with admin_engine.connect() as conn:
+            stale_status = await conn.scalar(
+                text(f'SELECT status FROM "{schema}".runs WHERE id = :run_id'),
+                {"run_id": stale_run_id},
+            )
+        assert stale_status == "running"
     finally:
         await engine.dispose()
         async with admin_engine.begin() as conn:

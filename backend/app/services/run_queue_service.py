@@ -166,6 +166,40 @@ async def finish_run_job(
     return bool(result.rowcount)
 
 
+async def mark_run_failed_if_owned(
+    db: AsyncSession,
+    *,
+    job_id: UUID,
+    run_id: UUID,
+    worker_id: str,
+    error: str,
+) -> bool:
+    """Fail a run only while holding its current, unexpired job lease."""
+    job_result = await db.execute(select(RunJob).where(RunJob.id == job_id).with_for_update())
+    job = job_result.scalar_one_or_none()
+    now = utc_now()
+    if (
+        job is None
+        or job.status != RunJobStatus.LEASED.value
+        or job.lease_owner != worker_id
+        or job.lease_expires_at is None
+        or job.lease_expires_at <= now
+    ):
+        await db.rollback()
+        return False
+
+    run_result = await db.execute(select(Run).where(Run.id == run_id).with_for_update())
+    run = run_result.scalar_one_or_none()
+    if run is None or run.status == RunStatus.CANCELLED.value:
+        await db.rollback()
+        return False
+
+    run.status = RunStatus.FAILED.value
+    run.error_message = error
+    await db.commit()
+    return True
+
+
 async def release_run_job(
     db: AsyncSession,
     *,
