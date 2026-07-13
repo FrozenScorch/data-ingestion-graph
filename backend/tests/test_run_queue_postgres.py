@@ -13,6 +13,7 @@ from app.services.run_queue_service import (
     claim_run_job,
     finish_run_job,
     heartbeat_run_job,
+    recover_orphaned_runs,
     utc_now,
 )
 from sqlalchemy import text
@@ -45,7 +46,15 @@ async def test_postgres_claim_is_exclusive_and_expired_lease_is_reclaimed():
                 text(
                     f"""
                     CREATE TABLE "{schema}".runs (
-                        id UUID PRIMARY KEY
+                        id UUID PRIMARY KEY,
+                        graph_id UUID NOT NULL,
+                        graph_version_id UUID,
+                        trigger_type VARCHAR(50) NOT NULL DEFAULT 'manual',
+                        triggered_by UUID,
+                        status VARCHAR(50) NOT NULL DEFAULT 'pending',
+                        error_message TEXT,
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                        updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
                     )
                     """
                 )
@@ -71,8 +80,13 @@ async def test_postgres_claim_is_exclusive_and_expired_lease_is_reclaimed():
                 )
             )
             await conn.execute(
-                text(f'INSERT INTO "{schema}".runs (id) VALUES (:run_id)'),
-                {"run_id": run_id},
+                text(
+                    f"""
+                    INSERT INTO "{schema}".runs (id, graph_id, graph_version_id)
+                    VALUES (:run_id, :graph_id, :graph_version_id)
+                    """
+                ),
+                {"run_id": run_id, "graph_id": uuid4(), "graph_version_id": uuid4()},
             )
             await conn.execute(
                 text(
@@ -146,6 +160,40 @@ async def test_postgres_claim_is_exclusive_and_expired_lease_is_reclaimed():
                 job_id=job_id,
                 worker_id=replacement_owner,
             )
+
+        orphaned_run_id = uuid4()
+        async with admin_engine.begin() as conn:
+            await conn.execute(
+                text(
+                    f"""
+                    INSERT INTO "{schema}".runs
+                        (id, graph_id, graph_version_id, status)
+                    VALUES (:run_id, :graph_id, :graph_version_id, 'running')
+                    """
+                ),
+                {
+                    "run_id": orphaned_run_id,
+                    "graph_id": uuid4(),
+                    "graph_version_id": uuid4(),
+                },
+            )
+        async with sessions() as db:
+            assert await recover_orphaned_runs(db) == 1
+        async with admin_engine.connect() as conn:
+            recovered = (
+                await conn.execute(
+                    text(
+                        f"""
+                        SELECT r.status, j.status, j.job_type
+                        FROM "{schema}".runs r
+                        JOIN "{schema}".run_jobs j ON j.run_id = r.id
+                        WHERE r.id = :run_id
+                        """
+                    ),
+                    {"run_id": orphaned_run_id},
+                )
+            ).one()
+        assert recovered == ("pending", "queued", "full")
     finally:
         await engine.dispose()
         async with admin_engine.begin() as conn:

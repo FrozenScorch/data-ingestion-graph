@@ -24,7 +24,7 @@ async def recover_orphaned_runs(db: AsyncSession) -> int:
             Run.graph_version_id.is_not(None),
             Run.status.in_((RunStatus.PENDING.value, RunStatus.RUNNING.value)),
         )
-        .with_for_update(skip_locked=True)
+        .with_for_update(skip_locked=True, of=Run)
     )
     runs = list(result.scalars().all())
     for run in runs:
