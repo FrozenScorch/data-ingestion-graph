@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import gzip
 import ipaddress
 import json
 import logging
@@ -16,7 +17,7 @@ import app.nodes.http_request as http_request_module
 import httpcore
 import httpx
 import pytest
-from app.config import Settings
+from app.config import Settings, settings
 from app.nodes.base import NodeContext
 from app.nodes.http_request import HttpRequestNode
 from app.services.connection_service import test_connection as check_connection
@@ -65,6 +66,15 @@ class FakeResponse:
                 "sensitive upstream text", request=request, response=response
             )
 
+    async def __aenter__(self) -> FakeResponse:
+        return self
+
+    async def __aexit__(self, *_args: Any) -> None:
+        return None
+
+    async def aiter_bytes(self):
+        yield self.content
+
 
 class FakeClient:
     def __init__(self, response: FakeResponse, requests: list[dict[str, Any]]) -> None:
@@ -78,6 +88,10 @@ class FakeClient:
         return None
 
     async def request(self, method: str, url: str, **kwargs: Any) -> FakeResponse:
+        self.requests.append({"method": method, "url": url, **kwargs})
+        return self.response
+
+    def stream(self, method: str, url: str, **kwargs: Any) -> FakeResponse:
         self.requests.append({"method": method, "url": url, **kwargs})
         return self.response
 
@@ -474,6 +488,75 @@ async def test_http_node_timeout_preempts_bounded_response_parsing() -> None:
     assert result.success is False
     assert "timed out" in (result.error_message or "")
     assert elapsed < 1.15
+
+
+@pytest.mark.asyncio
+async def test_http_node_limits_decoded_gzip_body_before_buffering() -> None:
+    compressed = gzip.compress(b"x" * 2_000_000)
+    assert len(compressed) < 10_000
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            content=compressed,
+            headers={"content-encoding": "gzip", "content-type": "text/plain"},
+            request=request,
+        )
+
+    def factory(_target: ValidatedTarget, timeout: float) -> httpx.AsyncClient:
+        return httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            timeout=timeout,
+            follow_redirects=False,
+        )
+
+    node = HttpRequestNode(egress_policy=EgressPolicy(), client_factory=factory)
+    with patch.object(settings, "egress_max_response_bytes", 10_000):
+        result = await node.execute(context("https://93.184.216.34/"))
+
+    assert result.success is False
+    assert "size limit" in (result.error_message or "")
+
+
+@pytest.mark.asyncio
+async def test_late_dns_and_parser_failures_are_consumed_safely() -> None:
+    loop = asyncio.get_running_loop()
+    original_handler = loop.get_exception_handler()
+    unhandled: list[dict[str, Any]] = []
+    loop.set_exception_handler(lambda _loop, context: unhandled.append(context))
+
+    def delayed_dns_failure(*_args: Any, **_kwargs: Any) -> Any:
+        time.sleep(0.05)
+        raise socket.gaierror("sensitive resolver detail")
+
+    def delayed_parse_failure(_content: bytes, _content_type: str) -> Any:
+        time.sleep(0.05)
+        raise ValueError("sensitive parser detail")
+
+    try:
+        with (
+            patch("socket.getaddrinfo", side_effect=delayed_dns_failure),
+            pytest.raises(EgressPolicyError, match="timed out"),
+        ):
+            await EgressPolicy(resolution_timeout=0.01).validate_url(
+                "https://late-failure.example/"
+            )
+        with (
+            patch(
+                "app.nodes.http_request._decode_response_body",
+                side_effect=delayed_parse_failure,
+            ),
+            pytest.raises(TimeoutError),
+        ):
+            await asyncio.wait_for(
+                http_request_module._parse_response_body(b"{}", "application/json"),
+                timeout=0.01,
+            )
+        await asyncio.sleep(0.1)
+    finally:
+        loop.set_exception_handler(original_handler)
+
+    assert unhandled == []
 
 
 @pytest.mark.asyncio

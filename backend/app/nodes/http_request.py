@@ -38,6 +38,26 @@ def _decode_response_body(content: bytes, content_type: str) -> Any:
         return {"raw_text": content.decode("utf-8", errors="replace")}
 
 
+async def _read_response_body(response: Any) -> bytes:
+    chunks: list[bytes] = []
+    received = 0
+    async for chunk in response.aiter_bytes():
+        received += len(chunk)
+        if received > settings.egress_max_response_bytes:
+            raise EgressPolicyError("Outbound response exceeded the size limit")
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def _consume_future_exception(future: asyncio.Future[Any]) -> None:
+    if future.cancelled():
+        return
+    try:
+        future.exception()
+    except Exception:
+        return
+
+
 async def _parse_response_body(content: bytes, content_type: str) -> Any:
     if len(content) > settings.egress_max_response_bytes:
         raise EgressPolicyError("Outbound response exceeded the size limit")
@@ -49,8 +69,10 @@ async def _parse_response_body(content: bytes, content_type: str) -> Any:
         _RESPONSE_PARSE_CAPACITY.release()
         raise EgressPolicyError("Outbound response parsing failed") from None
     future.add_done_callback(lambda _finished: _RESPONSE_PARSE_CAPACITY.release())
+    wrapped = asyncio.wrap_future(future)
+    wrapped.add_done_callback(_consume_future_exception)
     try:
-        return await asyncio.shield(asyncio.wrap_future(future))
+        return await asyncio.shield(wrapped)
     except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
         raise EgressPolicyError("Outbound response JSON is invalid") from None
 
@@ -198,20 +220,26 @@ class HttpRequestNode(BaseNode):
                 )
                 redirect_count = 0
                 while True:
-                    async with self._client_factory(target, timeout) as client:
-                        response = await client.request(
+                    async with (
+                        self._client_factory(target, timeout) as client,
+                        client.stream(
                             method,
                             target.url,
                             follow_redirects=False,
                             **req_kwargs,
-                        )
-                    if response.status_code not in {301, 302, 303, 307, 308}:
-                        break
+                        ) as response,
+                    ):
+                        status_code = response.status_code
+                        location = response.headers.get("location")
+                        if status_code not in {301, 302, 303, 307, 308}:
+                            response.raise_for_status()
+                            content_type = response.headers.get("content-type", "")
+                            response_content = await _read_response_body(response)
+                            break
                     if method != "GET":
                         raise EgressPolicyError("Redirects are allowed only for GET requests")
                     if redirect_count >= max_redirects:
                         raise EgressPolicyError("Outbound redirect limit was exceeded")
-                    location = response.headers.get("location")
                     if not isinstance(location, str) or not location:
                         raise EgressPolicyError("Outbound redirect is missing a Location header")
                     redirected = await policy.validate_url(
@@ -221,18 +249,16 @@ class HttpRequestNode(BaseNode):
                         raise EgressPolicyError("Cross-origin outbound redirects are blocked")
                     target = redirected
                     redirect_count += 1
-                response.raise_for_status()
 
                 # Parse a size-bounded buffered body outside the event-loop thread.
-                content_type = response.headers.get("content-type", "")
-                response_data = await _parse_response_body(response.content, content_type)
+                response_data = await _parse_response_body(response_content, content_type)
 
                 return NodeResult(
                     success=True,
                     output_data={"json": response_data},
                     items_processed=1,
                     metadata={
-                        "status_code": response.status_code,
+                        "status_code": status_code,
                         "url": target.safe_origin,
                         "method": method,
                         "content_type": content_type,

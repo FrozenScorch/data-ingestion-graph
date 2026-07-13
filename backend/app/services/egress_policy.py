@@ -57,6 +57,15 @@ _DNS_EXECUTOR = ThreadPoolExecutor(max_workers=_DNS_WORKERS, thread_name_prefix=
 _DNS_CAPACITY = threading.BoundedSemaphore(_DNS_WORKERS)
 
 
+def _consume_future_exception(future: asyncio.Future[Any]) -> None:
+    if future.cancelled():
+        return
+    try:
+        future.exception()
+    except Exception:
+        return
+
+
 class EgressPolicyError(ValueError):
     """A safe, credential-free outbound-policy failure."""
 
@@ -209,8 +218,10 @@ async def resolve_all_addresses(host: str, port: int) -> Sequence[str]:
         _DNS_CAPACITY.release()
         raise EgressPolicyError("Outbound hostname resolution failed") from None
     future.add_done_callback(lambda _finished: _DNS_CAPACITY.release())
+    wrapped = asyncio.wrap_future(future, loop=loop)
+    wrapped.add_done_callback(_consume_future_exception)
     try:
-        answers = await asyncio.shield(asyncio.wrap_future(future, loop=loop))
+        answers = await asyncio.shield(wrapped)
     except OSError:
         raise EgressPolicyError("Outbound hostname resolution failed") from None
     return tuple(str(answer[4][0]) for answer in answers)
