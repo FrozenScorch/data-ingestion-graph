@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from copy import deepcopy
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from typing import Any
 from uuid import UUID
@@ -132,6 +132,12 @@ class FakeConnection:
         self.mutations = 0
         self.fail_target_insert = False
         self.closed = False
+        self.target_identity: Mapping[str, Any] | None = {
+            "oid": 4242,
+            "schema_name": "public",
+            "table_name": "items",
+        }
+        self.unique_indexes: list[Mapping[str, Any]] = [{"columns": ["id"]}]
 
     def transaction(self, **kwargs: Any) -> Transaction:
         del kwargs
@@ -147,12 +153,15 @@ class FakeConnection:
     async def fetch(self, query: str, *args: Any) -> list[Any]:
         self.fetch_calls.append((query, args))
         if "FROM pg_index" in query:
-            return [{"columns": ["id"]}]
+            return list(self.unique_indexes)
         return list(self.pages.pop(0))
 
+    async def fetchrow(self, query: str, *args: Any) -> Mapping[str, Any] | None:
+        assert "to_regclass" in query
+        assert args
+        return self.target_identity
+
     async def fetchval(self, query: str, *args: Any) -> Any:
-        if "to_regclass" in query:
-            return "public.items"
         if "event_hash" in query:
             return 1 if tuple(args) in self.ledger else None
         return None
@@ -283,6 +292,53 @@ async def test_snapshot_keyset_pages_checkpoint_and_reset_only_at_clean_eof(conn
 
 
 @pytest.mark.asyncio
+async def test_snapshot_cycle_identity_allows_a_b_a_reversion(connect) -> None:
+    connector = source()
+    state: Mapping[str, Any] = {}
+    records: list[Envelope] = []
+    for value in ("A", "B", "A"):
+        connect.append(FakeConnection([[{"id": 1, "value": value}]]))
+        messages = [
+            message async for message in connector.read(await _descriptor(connector), state)
+        ]
+        records.extend(
+            message.envelope for message in messages if isinstance(message, RecordMessage)
+        )
+        state = [message.state for message in messages if isinstance(message, StateMessage)][-1]
+
+    assert [record.metadata["snapshot_cycle"] for record in records] == [0, 1, 2]
+    shared = FakeConnection()
+    connect.extend([shared, shared, shared, shared])
+    target = destination(mode="upsert", key_fields=("id",))
+    assert [await target.write([record]) for record in records] == [1, 1, 1]
+    assert await target.write([records[-1]]) == 0
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_fingerprint_rejects_a_different_database(connect) -> None:
+    first = source()
+    connect.append(FakeConnection([[]]))
+    messages = [message async for message in first.read(await _descriptor(first), {})]
+    state = [message.state for message in messages if isinstance(message, StateMessage)][-1]
+    second = PostgresSource(
+        "db",
+        5432,
+        "other-data",
+        "reader",
+        SecretRef("PASSWORD"),
+        query="SELECT id, cursor, value FROM items",
+        stream="items",
+        primary_key=("id",),
+        page_size=2,
+        secret_provider=EnvSecretProvider({"PASSWORD": "secret"}),
+    )
+
+    with pytest.raises(ConfigurationError, match="configuration changed"):
+        _ = [message async for message in second.read(await _descriptor(second), state)]
+    assert connect == []
+
+
+@pytest.mark.asyncio
 async def test_incremental_keyset_uses_cursor_and_pk_and_resumes_exactly(connect) -> None:
     first = FakeConnection(
         [
@@ -347,10 +403,78 @@ async def test_destination_replay_event_history_and_atomic_replace(connect) -> N
 
 
 @pytest.mark.asyncio
+async def test_native_postgres_values_round_trip_through_envelope(connect) -> None:
+    occurred_at = datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC)
+    day = date(2026, 1, 2)
+    at = time(3, 4, 5)
+    duration = timedelta(days=2, seconds=3, microseconds=4)
+    identifier_value = UUID("12345678-1234-5678-1234-567812345678")
+    row = {
+        "id": 1,
+        "occurred_at": occurred_at,
+        "day": day,
+        "at": at,
+        "duration": duration,
+        "body": b"bytes",
+        "amount": Decimal("10.50"),
+        "external_id": identifier_value,
+    }
+    connector = source(query="SELECT * FROM typed_items")
+    connect.append(FakeConnection([[row]]))
+    messages = [message async for message in connector.read(await _descriptor(connector), {})]
+    record = next(message.envelope for message in messages if isinstance(message, RecordMessage))
+    assert record.payload.data["occurred_at"] == occurred_at.isoformat()
+    assert record.payload.data["duration"] == "172803000004"
+
+    target_connection = FakeConnection()
+    connect.append(target_connection)
+    assert await destination().write([record]) == 1
+    assert target_connection.rows == [
+        (
+            1,
+            occurred_at,
+            day,
+            at,
+            duration,
+            b"bytes",
+            Decimal("10.50"),
+            identifier_value,
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_target_aliases_share_physical_lock_and_ledger_scope(connect) -> None:
+    shared = FakeConnection()
+    connect.extend([shared, shared])
+    record = envelope("1")
+
+    assert await destination(target="items").write([record]) == 1
+    assert await destination(target="public.items").write([record]) == 0
+    assert {item[0] for item in shared.ledger} == {"4242"}
+
+
+@pytest.mark.asyncio
+async def test_upsert_check_requires_an_inferable_unique_index(connect) -> None:
+    connection = FakeConnection()
+    connection.unique_indexes = []
+    connect.append(connection)
+
+    result = await destination(mode="upsert", key_fields=("id",)).check()
+
+    assert result.ok is False
+    query = next(query for query, _ in connection.fetch_calls if "FROM pg_index" in query)
+    assert "index.indimmediate" in query
+    assert "index.indpred IS NULL" in query
+    assert "index.indexprs IS NULL" in query
+    assert "key.ordinality <= index.indnkeyatts" in query
+
+
+@pytest.mark.asyncio
 async def test_replace_rolls_back_truncate_and_ledger_when_insert_fails(connect) -> None:
     shared = FakeConnection()
     shared.rows = [(99, "existing")]
-    shared.ledger.add(("public.items", "s", "x", "old", "hash"))
+    shared.ledger.add(("4242", "s", "x", "old", "hash"))
     shared.fail_target_insert = True
     connect.append(shared)
     connector = destination()
@@ -359,7 +483,7 @@ async def test_replace_rolls_back_truncate_and_ledger_when_insert_fails(connect)
         await connector.replace([envelope("1")])
 
     assert shared.rows == [(99, "existing")]
-    assert ("public.items", "s", "x", "old", "hash") in shared.ledger
+    assert ("4242", "s", "x", "old", "hash") in shared.ledger
     assert shared.truncates == 0
 
 

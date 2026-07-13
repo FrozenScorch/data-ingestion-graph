@@ -8,7 +8,7 @@ import math
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from typing import Any
 from uuid import UUID
@@ -220,6 +220,95 @@ def json_value(value: Any) -> Any:
     if isinstance(value, (list, tuple)):
         return [json_value(item) for item in value]
     raise ConfigurationError(f"Unsupported PostgreSQL value type: {type(value).__name__}")
+
+
+def transport_value(value: Any) -> tuple[Any, Any | None]:
+    """Return a JSON-safe value plus a reversible PostgreSQL type hint."""
+    if value is None or isinstance(value, (bool, int, str)):
+        return value, None
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ConfigurationError("PostgreSQL floating-point values must be finite")
+        return value, None
+    if isinstance(value, Decimal):
+        return str(value), "decimal"
+    if isinstance(value, datetime):
+        return value.isoformat(), "datetime"
+    if isinstance(value, date):
+        return value.isoformat(), "date"
+    if isinstance(value, time):
+        return value.isoformat(), "time"
+    if isinstance(value, timedelta):
+        microseconds = (value.days * 86_400 + value.seconds) * 1_000_000 + value.microseconds
+        return str(microseconds), "interval"
+    if isinstance(value, UUID):
+        return str(value), "uuid"
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        return base64.b64encode(bytes(value)).decode("ascii"), "bytes"
+    if isinstance(value, Mapping):
+        encoded: dict[str, Any] = {}
+        hints: dict[str, Any] = {}
+        for key, item in value.items():
+            encoded_item, hint = transport_value(item)
+            normalized_key = str(key)
+            encoded[normalized_key] = encoded_item
+            if hint is not None:
+                hints[normalized_key] = hint
+        return encoded, {"object": hints} if hints else None
+    if isinstance(value, (list, tuple)):
+        encoded_items: list[Any] = []
+        array_hints: list[Any | None] = []
+        for item in value:
+            encoded_item, hint = transport_value(item)
+            encoded_items.append(encoded_item)
+            array_hints.append(hint)
+        return (
+            encoded_items,
+            {"array": array_hints} if any(hint is not None for hint in array_hints) else None,
+        )
+    raise ConfigurationError(f"Unsupported PostgreSQL value type: {type(value).__name__}")
+
+
+def restore_transport_value(value: Any, hint: Any) -> Any:
+    """Restore a JSON-safe PostgreSQL source value before binding it to asyncpg."""
+    try:
+        if hint is None:
+            return value
+        if hint == "decimal" and isinstance(value, str):
+            return Decimal(value)
+        if hint == "datetime" and isinstance(value, str):
+            return datetime.fromisoformat(value)
+        if hint == "date" and isinstance(value, str):
+            return date.fromisoformat(value)
+        if hint == "time" and isinstance(value, str):
+            return time.fromisoformat(value)
+        if hint == "interval" and isinstance(value, str):
+            return timedelta(microseconds=int(value))
+        if hint == "uuid" and isinstance(value, str):
+            return UUID(value)
+        if hint == "bytes" and isinstance(value, str):
+            return base64.b64decode(value, validate=True)
+        if isinstance(hint, Mapping) and set(hint) == {"array"}:
+            item_hints = hint["array"]
+            if not isinstance(value, list) or not isinstance(item_hints, list):
+                raise ValueError
+            if len(value) != len(item_hints):
+                raise ValueError
+            return [
+                restore_transport_value(item, item_hint)
+                for item, item_hint in zip(value, item_hints, strict=True)
+            ]
+        if isinstance(hint, Mapping) and set(hint) == {"object"}:
+            item_hints = hint["object"]
+            if not isinstance(value, Mapping) or not isinstance(item_hints, Mapping):
+                raise ValueError
+            return {
+                str(key): restore_transport_value(item, item_hints.get(str(key)))
+                for key, item in value.items()
+            }
+    except (TypeError, ValueError) as exc:
+        raise ConfigurationError("Invalid PostgreSQL transport value") from exc
+    raise ConfigurationError("Invalid PostgreSQL transport type hint")
 
 
 def canonical_typed(values: Sequence[Any]) -> str:

@@ -25,10 +25,10 @@ from ingestion_graph.postgres import (
     decode_scalar,
     encode_scalar,
     identifier,
-    json_value,
     normalize_select_query,
     quote_identifier,
     safe_postgres_error,
+    transport_value,
 )
 from ingestion_graph.secrets import SecretProvider, SecretRef
 
@@ -257,7 +257,14 @@ class PostgresSource(Source):
                             "PostgreSQL keyset fields are tied across a page boundary"
                         )
                     for row in page:
-                        yield RecordMessage(self._envelope(row, order_fields, mode))
+                        yield RecordMessage(
+                            self._envelope(
+                                row,
+                                order_fields,
+                                mode,
+                                cycle=cycle if mode == "snapshot" else None,
+                            )
+                        )
                     after = tuples[-1]
                     emitted += len(page)
                     checkpoint: dict[str, Any] = {
@@ -332,8 +339,17 @@ class PostgresSource(Source):
         row: Mapping[str, Any],
         order_fields: Sequence[str],
         mode: str,
+        *,
+        cycle: int | None = None,
     ) -> Envelope:
-        data = {str(key): json_value(value) for key, value in row.items()}
+        data: dict[str, Any] = {}
+        type_hints: dict[str, Any] = {}
+        for key, value in row.items():
+            normalized_key = str(key)
+            encoded, hint = transport_value(value)
+            data[normalized_key] = encoded
+            if hint is not None:
+                type_hints[normalized_key] = hint
         key_values = tuple(row[field] for field in self.primary_key)
         native_id = (
             canonical_typed(key_values)
@@ -344,6 +360,14 @@ class PostgresSource(Source):
         )
         order_values = tuple(row[field] for field in order_fields)
         cursor = canonical_typed(order_values) if order_values else None
+        metadata: dict[str, Any] = {
+            "key": {field: data[field] for field in self.primary_key},
+            "mode": mode,
+        }
+        if type_hints:
+            metadata["ingestion_graph.postgres_types"] = type_hints
+        if cycle is not None:
+            metadata["snapshot_cycle"] = cycle
         return Envelope(
             id=stable_record_id("postgres", self.stream, native_id),
             source="postgres",
@@ -351,10 +375,7 @@ class PostgresSource(Source):
             payload=RecordPayload(data),
             operation=Operation.UPSERT if mode == "incremental" else Operation.SNAPSHOT,
             cursor=cursor,
-            metadata={
-                "key": {field: json_value(row[field]) for field in self.primary_key},
-                "mode": mode,
-            },
+            metadata=metadata,
             provenance={"connector": "postgres"},
         )
 
@@ -363,6 +384,13 @@ class PostgresSource(Source):
 
     def _config_fingerprint(self) -> str:
         value = {
+            "format": 2,
+            "connection": {
+                "host": self.connection.host.casefold(),
+                "port": self.connection.port,
+                "database": self.connection.database,
+                "username": self.connection.username,
+            },
             "query": self.query,
             "stream": self.stream,
             "primary_key": self.primary_key,

@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from typing import Any
 
 from ingestion_graph.connectors.base import (
@@ -23,9 +24,25 @@ from ingestion_graph.postgres import (
     identifier_path,
     quote_identifier,
     quote_path,
+    restore_transport_value,
     safe_postgres_error,
 )
 from ingestion_graph.secrets import SecretProvider, SecretRef
+
+
+@dataclass(frozen=True, slots=True)
+class _TargetIdentity:
+    oid: int
+    schema: str
+    table: str
+
+    @property
+    def parts(self) -> tuple[str, str]:
+        return self.schema, self.table
+
+    @property
+    def key(self) -> str:
+        return str(self.oid)
 
 
 class PostgresDestination(Destination):
@@ -74,7 +91,6 @@ class PostgresDestination(Destination):
             raise ConfigurationError("PostgreSQL batch_size must be positive")
         self.batch_size = batch_size
         self.ledger_table = identifier(ledger_table, label="ledger table")
-        self.ledger_parts = (*self.target_parts[:-1], self.ledger_table)
 
     @classmethod
     def manifest(cls) -> ConnectorSpec:
@@ -122,11 +138,11 @@ class PostgresDestination(Destination):
         try:
             connection = await self.connection.connect()
             async with connection.transaction():
-                exists = await connection.fetchval("SELECT to_regclass($1)", self.target)
-                if exists is None:
+                target = await self._resolve_target(connection)
+                if target is None:
                     return CheckResult(False, "PostgreSQL target table does not exist")
-                await self._ensure_ledger(connection)
-                if self.mode == "upsert" and not await self._has_unique_key(connection):
+                await self._ensure_ledger(connection, target)
+                if self.mode == "upsert" and not await self._has_unique_key(connection, target):
                     return CheckResult(
                         False,
                         "PostgreSQL upsert key_fields must match a unique or primary constraint",
@@ -151,9 +167,10 @@ class PostgresDestination(Destination):
         try:
             connection = await self.connection.connect()
             async with connection.transaction():
-                await self._lock_target(connection)
-                await self._ensure_ledger(connection)
-                return await self._apply_prepared(connection, prepared)
+                target = await self._require_target(connection)
+                await self._lock_target(connection, target)
+                await self._ensure_ledger(connection, target)
+                return await self._apply_prepared(connection, target, prepared)
         except ConfigurationError:
             raise
         except Exception as exc:
@@ -169,14 +186,16 @@ class PostgresDestination(Destination):
         try:
             connection = await self.connection.connect()
             async with connection.transaction():
-                await self._lock_target(connection)
-                await self._ensure_ledger(connection)
-                await connection.execute(f"TRUNCATE TABLE {quote_path(self.target_parts)}")
+                target = await self._require_target(connection)
+                await self._lock_target(connection, target)
+                await self._ensure_ledger(connection, target)
+                ledger_parts = (target.schema, self.ledger_table)
+                await connection.execute(f"TRUNCATE TABLE {quote_path(target.parts)}")
                 await connection.execute(
-                    f"DELETE FROM {quote_path(self.ledger_parts)} WHERE target_table=$1",
-                    self.target,
+                    f"DELETE FROM {quote_path(ledger_parts)} WHERE target_table=$1",
+                    target.key,
                 )
-                return await self._apply_prepared(connection, prepared)
+                return await self._apply_prepared(connection, target, prepared)
         except ConfigurationError:
             raise
         except Exception as exc:
@@ -204,6 +223,9 @@ class PostgresDestination(Destination):
             if not isinstance(envelope, Envelope):
                 raise ConfigurationError("PostgreSQL destination records must be Envelopes")
             event_hash = _event_hash(envelope)
+            raw_type_hints = envelope.metadata.get("ingestion_graph.postgres_types", {})
+            if not isinstance(raw_type_hints, Mapping):
+                raise ConfigurationError("PostgreSQL transport type hints must be an object")
             if envelope.operation is Operation.DELETE:
                 if not allow_deletes:
                     raise ConfigurationError("PostgreSQL replace does not accept DELETE envelopes")
@@ -212,7 +234,10 @@ class PostgresDestination(Destination):
                 raw_key = envelope.metadata.get("key")
                 if not isinstance(raw_key, Mapping):
                     raise ConfigurationError("PostgreSQL DELETE requires metadata.key")
-                key = {field: raw_key.get(field) for field in self.key_fields}
+                key = {
+                    field: restore_transport_value(raw_key.get(field), raw_type_hints.get(field))
+                    for field in self.key_fields
+                }
                 if any(value is None for value in key.values()):
                     raise ConfigurationError(
                         "PostgreSQL DELETE key values must be complete and non-null"
@@ -223,7 +248,10 @@ class PostgresDestination(Destination):
                 raise ConfigurationError(
                     "PostgreSQL UPSERT/SNAPSHOT envelopes require RecordPayload"
                 )
-            row = dict(envelope.payload.data)
+            row = {
+                str(column): restore_transport_value(value, raw_type_hints.get(str(column)))
+                for column, value in envelope.payload.data.items()
+            }
             if not row:
                 raise ConfigurationError("PostgreSQL destination rows must not be empty")
             columns = tuple(str(column) for column in row)
@@ -243,16 +271,18 @@ class PostgresDestination(Destination):
     async def _apply_prepared(
         self,
         connection: Any,
+        target: _TargetIdentity,
         prepared: Sequence[tuple[Envelope, Mapping[str, Any] | None, str]],
     ) -> int:
         applied = 0
+        ledger_parts = (target.schema, self.ledger_table)
         for start in range(0, len(prepared), self.batch_size):
             for envelope, value, event_hash in prepared[start : start + self.batch_size]:
                 exists = await connection.fetchval(
-                    f"SELECT 1 FROM {quote_path(self.ledger_parts)} "
+                    f"SELECT 1 FROM {quote_path(ledger_parts)} "
                     "WHERE target_table=$1 AND source=$2 AND stream=$3 "
                     "AND record_id=$4 AND event_hash=$5",
-                    self.target,
+                    target.key,
                     envelope.source,
                     envelope.stream,
                     envelope.id,
@@ -260,12 +290,12 @@ class PostgresDestination(Destination):
                 )
                 if exists is not None:
                     continue
-                changed = await self._apply_event(connection, envelope, value)
+                changed = await self._apply_event(connection, target, envelope, value)
                 await connection.execute(
-                    f"INSERT INTO {quote_path(self.ledger_parts)} "
+                    f"INSERT INTO {quote_path(ledger_parts)} "
                     "(target_table, source, stream, record_id, event_hash) "
                     "VALUES ($1, $2, $3, $4, $5)",
-                    self.target,
+                    target.key,
                     envelope.source,
                     envelope.stream,
                     envelope.id,
@@ -277,10 +307,11 @@ class PostgresDestination(Destination):
     async def _apply_event(
         self,
         connection: Any,
+        target_identity: _TargetIdentity,
         envelope: Envelope,
         value: Mapping[str, Any] | None,
     ) -> int:
-        target = quote_path(self.target_parts)
+        target = quote_path(target_identity.parts)
         if envelope.operation is Operation.DELETE:
             assert value is not None
             predicate = " AND ".join(
@@ -310,10 +341,37 @@ class PostgresDestination(Destination):
         status = await connection.execute(statement, *(value[column] for column in columns))
         return _affected_rows(status)
 
-    async def _ensure_ledger(self, connection: Any) -> None:
+    async def _resolve_target(self, connection: Any) -> _TargetIdentity | None:
+        row = await connection.fetchrow(
+            """
+            SELECT target.oid::bigint AS oid,
+                   namespace.nspname AS schema_name,
+                   target.relname AS table_name
+            FROM pg_class AS target
+            JOIN pg_namespace AS namespace ON namespace.oid=target.relnamespace
+            WHERE target.oid=to_regclass($1) AND target.relkind IN ('r', 'p')
+            """,
+            self.target,
+        )
+        if row is None:
+            return None
+        return _TargetIdentity(
+            oid=int(row["oid"]),
+            schema=identifier(str(row["schema_name"]), label="resolved schema"),
+            table=identifier(str(row["table_name"]), label="resolved table"),
+        )
+
+    async def _require_target(self, connection: Any) -> _TargetIdentity:
+        target = await self._resolve_target(connection)
+        if target is None:
+            raise ConfigurationError("PostgreSQL target table does not exist")
+        return target
+
+    async def _ensure_ledger(self, connection: Any, target: _TargetIdentity) -> None:
+        ledger_parts = (target.schema, self.ledger_table)
         await connection.execute(
             f"""
-            CREATE TABLE IF NOT EXISTS {quote_path(self.ledger_parts)} (
+            CREATE TABLE IF NOT EXISTS {quote_path(ledger_parts)} (
                 target_table TEXT NOT NULL,
                 source TEXT NOT NULL,
                 stream TEXT NOT NULL,
@@ -325,31 +383,35 @@ class PostgresDestination(Destination):
             """
         )
 
-    async def _lock_target(self, connection: Any) -> None:
+    async def _lock_target(self, connection: Any, target: _TargetIdentity) -> None:
         await connection.execute(
-            "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
-            f"ingestion-graph:{self.target}",
+            "SELECT pg_advisory_xact_lock($1::bigint)",
+            target.oid,
         )
 
-    async def _has_unique_key(self, connection: Any) -> bool:
-        schema = self.target_parts[0] if len(self.target_parts) == 2 else "public"
-        table = self.target_parts[-1]
+    async def _has_unique_key(self, connection: Any, target: _TargetIdentity) -> bool:
         rows = await connection.fetch(
             """
             SELECT array_agg(attribute.attname ORDER BY key.ordinality) AS columns
             FROM pg_index AS index
-            JOIN pg_class AS target ON target.oid=index.indrelid
-            JOIN pg_namespace AS namespace ON namespace.oid=target.relnamespace
             CROSS JOIN LATERAL unnest(index.indkey) WITH ORDINALITY AS key(attnum, ordinality)
             JOIN pg_attribute AS attribute
-              ON attribute.attrelid=target.oid AND attribute.attnum=key.attnum
-            WHERE namespace.nspname=$1 AND target.relname=$2 AND index.indisunique
+              ON attribute.attrelid=index.indrelid AND attribute.attnum=key.attnum
+            WHERE index.indrelid=$1::oid
+              AND index.indisunique
+              AND index.indimmediate
+              AND index.indpred IS NULL
+              AND index.indexprs IS NULL
+              AND key.ordinality <= index.indnkeyatts
             GROUP BY index.indexrelid
             """,
-            schema,
-            table,
+            target.oid,
         )
-        return any(tuple(row["columns"]) == self.key_fields for row in rows)
+        expected = frozenset(self.key_fields)
+        return any(
+            len(row["columns"]) == len(self.key_fields) and frozenset(row["columns"]) == expected
+            for row in rows
+        )
 
 
 def _event_hash(envelope: Envelope) -> str:

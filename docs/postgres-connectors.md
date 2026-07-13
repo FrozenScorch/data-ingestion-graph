@@ -42,6 +42,13 @@ end of the query. Rows inserted behind an active full-refresh checkpoint are
 picked up by the next cycle. A query without a primary key is intentionally a
 bounded, non-resumable preview and requires `max_records`.
 
+Tagged checkpoints preserve keyset scalar types and bind to the non-secret host,
+port, database, username, query, stream, keyset, cursor, and checkpoint format.
+State from one database therefore cannot silently skip rows in another. Snapshot
+envelopes include their full-refresh cycle in event identity, so `A -> B -> A`
+across three cycles is applied three times while retrying one cycle remains
+idempotent.
+
 The destination validates and quotes every configured identifier. Upsert keys
 must match a real unique or primary constraint. It creates a same-schema replay
 ledger named `_ingestion_graph_versions` by default, so the writer role needs
@@ -50,6 +57,16 @@ it. The ledger retains applied event identities; plan retention for high-volume
 targets. Exact envelope replays are skipped. A later logical reversion must carry
 a new cursor, checksum, or metadata identity. Without a monotonic event identity,
 cross-pipeline conflicts are last-committed-wins.
+
+The destination resolves each target to its PostgreSQL table OID and canonical
+schema inside the transaction. Qualified and unqualified aliases share one
+advisory lock and replay-ledger scope. Upsert readiness accepts only immediate,
+non-partial, non-expression unique indexes that PostgreSQL can infer for
+`ON CONFLICT`; included columns are not mistaken for conflict keys.
+
+Timestamps, dates, times, intervals, UUIDs, decimals, bytes, and arrays containing
+those native values remain JSON-safe in envelopes through reversible type hints.
+A PostgreSQL destination restores them before binding values through `asyncpg`.
 
 DELETE envelopes use the configured `key_fields` and require their values in
 `envelope.metadata["key"]`; metadata never controls column names. `replace()` is
