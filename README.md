@@ -1,5 +1,7 @@
 # Enterprise Data Ingestion Graph Studio
 
+> Start with the [product overview](docs/PRODUCT.md) for the problem, audience, value, proof, limits, and evaluation path. Continue here for setup and implementation details.
+
 Enterprise Data Ingestion Graph Studio is the visual product for designing,
 testing, running, and querying enterprise ingestion pipelines. The FastAPI
 backend and Svelte canvas are a control plane; they explicitly install and
