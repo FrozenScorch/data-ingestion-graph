@@ -22,7 +22,7 @@ The intended outcomes are less duplicated connector work, faster recovery from f
 ## Why it is different
 
 - **SDK and Studio stay separate.** The reusable `ingestion-graph` SDK can be installed without the visual control plane.
-- **Durability is part of the contract.** Checkpoints, leases, idempotency, retries, and dead-letter recovery are designed in rather than added after failure.
+- **Durability is part of the contract.** Checkpoints, leases, retries, and dead-letter recovery are designed in. Execution is at-least-once, so duplicate safety still depends on each destination's upsert, idempotency-key, or transactional behavior.
 - **The run is inspectable.** Operators can see graph definitions, node state, events, credentials boundaries, and materialized outputs.
 - **Private deployment is normal.** The appliance is designed for localhost, LAN, or WireGuard operation with explicit egress policy.
 
@@ -32,7 +32,7 @@ The intended outcomes are less duplicated connector work, faster recovery from f
 2. Configure source, transform, and destination nodes through reusable contracts.
 3. Validate the graph and start a durable run.
 4. Inspect node progress, events, failures, and checkpoints.
-5. Recover or replay safely when work is interrupted.
+5. Recover or replay with the destination-specific idempotency guarantees understood.
 6. Query the materialized output from the same control plane.
 
 ## Proof available today
@@ -40,17 +40,17 @@ The intended outcomes are less duplicated connector work, faster recovery from f
 - Independent Python SDK and connector protocol.
 - Visual Svelte Studio and FastAPI control plane.
 - REST and PostgreSQL source paths.
-- Replay, checkpoint, leased-worker, and egress-policy tests.
+- Replay, checkpoint, leased-worker, and egress-policy tests for the implemented paths.
 - Documented trusted-LAN deployment and readiness roadmap.
 
 ## How to evaluate it
 
-Start with the repository quickstart, then run one pipeline through success and one intentional failure. The useful proof is not a screenshot; it is whether the same run can be inspected and recovered without creating duplicate side effects.
+Start with the repository quickstart, then run one pipeline through success and one intentional failure. The useful proof is not a screenshot; it is whether the same run can be inspected and recovered, and whether the chosen destination's upsert, idempotency-key, or transaction semantics prevent duplicate side effects under at-least-once delivery.
 
 ### Evaluation questions
 
 - Can a connector be reused outside Studio?
-- Can an operator identify where a run stopped and resume it safely?
+- Can an operator identify where a run stopped, and does the selected destination make replay idempotent?
 - Are secrets, server paths, and outbound destinations kept inside explicit boundaries?
 - Can downstream software query a stable materialized result?
 - Are current connector coverage and readiness limits clear enough for the intended workload?
@@ -62,6 +62,7 @@ The current posture is self-hosted and private-first. Use the [LAN deployment gu
 ## Current limits
 
 - Connector coverage is growing and is not comparable to a mature connector marketplace.
+- Execution is at-least-once; replay is not universally duplicate-free, and durable-state coverage varies by connector path.
 - Hosted multi-tenant operation is not the current product boundary.
 - Studio API documentation is less complete than the SDK and architecture guides.
 - Performance and recovery should be validated against the buyer's real data volumes.
