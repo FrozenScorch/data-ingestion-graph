@@ -143,6 +143,10 @@ class SDKDocumentSourceNode(BaseNode):
                 "max_archive_uncompressed_bytes": (
                     "Studio enforces centrally managed archive expansion limits"
                 ),
+                "ocr_languages": "Studio uses the deployment's configured OCR language set",
+                "render_dpi": "Studio keeps renderer resolution deployment-controlled",
+                "page_timeout_seconds": "Studio keeps page timeouts deployment-controlled",
+                "max_page_concurrency": "Studio keeps concurrency deployment-controlled",
                 "vision_fallback": "Studio has no live vision adapter in this release",
             },
             studio_properties={
