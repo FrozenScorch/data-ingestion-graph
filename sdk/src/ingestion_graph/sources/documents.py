@@ -135,6 +135,11 @@ class LocalDocumentsSource(Source):
         vision_extractor: Any = None,
         vision_fallback: bool = False,
         external_processing_policy: Any = None,
+        ocr_languages: Sequence[str] = ("eng",),
+        render_dpi: int = 300,
+        page_timeout_seconds: float = 120.0,
+        max_page_concurrency: int = 2,
+        retain_extraction_artifacts: bool = False,
     ) -> None:
         raw_paths = (paths,) if isinstance(paths, (str, Path)) else tuple(paths)
         if not raw_paths:
@@ -169,6 +174,21 @@ class LocalDocumentsSource(Source):
             raise ConfigurationError("Document min_native_text_quality must be numeric")
         if not 0 <= float(min_native_text_quality) <= 1:
             raise ConfigurationError("Document min_native_text_quality must be between 0 and 1")
+        if not ocr_languages or any(
+            not isinstance(item, str) or not item or not item.replace("-", "").isalnum()
+            for item in ocr_languages
+        ):
+            raise ConfigurationError("Document ocr_languages must contain valid language codes")
+        if isinstance(render_dpi, bool) or render_dpi <= 0:
+            raise ConfigurationError("Document render_dpi must be positive")
+        if (
+            isinstance(page_timeout_seconds, bool)
+            or not isinstance(page_timeout_seconds, (int, float))
+            or page_timeout_seconds <= 0
+        ):
+            raise ConfigurationError("Document page_timeout_seconds must be positive")
+        if isinstance(max_page_concurrency, bool) or max_page_concurrency <= 0:
+            raise ConfigurationError("Document max_page_concurrency must be positive")
         if checkpoint_interval < 1:
             raise ConfigurationError("Document checkpoint_interval must be positive")
         if text_chunk_chars < 256:
@@ -211,6 +231,11 @@ class LocalDocumentsSource(Source):
         self.vision_extractor = vision_extractor
         self.vision_fallback = vision_fallback
         self.external_processing_policy = external_processing_policy
+        self.ocr_languages = tuple(ocr_languages)
+        self.render_dpi = int(render_dpi)
+        self.page_timeout_seconds = float(page_timeout_seconds)
+        self.max_page_concurrency = int(max_page_concurrency)
+        self.retain_extraction_artifacts = bool(retain_extraction_artifacts)
         for component in (
             self.document_splitter,
             self.vision_extractor,
@@ -299,6 +324,10 @@ class LocalDocumentsSource(Source):
                         "maximum": 1,
                         "default": 0.65,
                     },
+                    "ocr_languages": {"type": "array", "items": {"type": "string"}},
+                    "render_dpi": {"type": "integer", "minimum": 1, "default": 300},
+                    "page_timeout_seconds": {"type": "number", "exclusiveMinimum": 0},
+                    "max_page_concurrency": {"type": "integer", "minimum": 1},
                     "vision_fallback": {"type": "boolean", "default": False},
                 },
                 "required": ["paths"],
@@ -638,6 +667,10 @@ class LocalDocumentsSource(Source):
                     "table_mode": self.table_mode,
                     "failure_mode": self.failure_mode,
                     "min_native_text_quality": self.min_native_text_quality,
+                    "ocr_languages": self.ocr_languages,
+                    "render_dpi": self.render_dpi,
+                    "page_timeout_seconds": self.page_timeout_seconds,
+                    "max_page_concurrency": self.max_page_concurrency,
                     "ocr_engine": _component_fingerprint(self.ocr_engine),
                     "page_renderer": _component_fingerprint(self.page_renderer),
                     "table_extractor": _component_fingerprint(self.table_extractor),
@@ -692,7 +725,7 @@ class LocalDocumentsSource(Source):
                     {
                         "image_sha256": hashlib.sha256(image).hexdigest(),
                         "engine": _component_fingerprint(ocr_engine),
-                        "language": "eng",
+                        "language": self.ocr_languages,
                     }
                 )
                 cached = (
@@ -711,8 +744,8 @@ class LocalDocumentsSource(Source):
                     )
                 else:
                     result = await asyncio.wait_for(
-                        ocr_engine.recognize(image, language="eng"),
-                        timeout=120,
+                        ocr_engine.recognize(image, language="+".join(self.ocr_languages)),
+                        timeout=self.page_timeout_seconds,
                     )
                     if self.extraction_cache is not None and image:
                         await self.extraction_cache.put(
@@ -777,17 +810,34 @@ class LocalDocumentsSource(Source):
                     )
                 ):
                     raise ConfigurationError("External vision processing was not authorized")
-                vision_result = await self.vision_extractor.extract(
-                    image,
-                    schema={"type": "object", "required": ["table_artifacts"]},
-                )
+                schema = {"type": "object", "required": ["table_artifacts"]}
+                vision_result: Mapping[str, Any] | None = None
+                for _attempt in range(2):
+                    candidate = await self.vision_extractor.extract(image, schema=schema)
+                    if (
+                        isinstance(candidate, Mapping)
+                        and isinstance(candidate.get("table_artifacts"), Sequence)
+                        and not isinstance(candidate.get("table_artifacts"), (str, bytes))
+                    ):
+                        vision_result = candidate
+                        break
+                if vision_result is None:
+                    if self.failure_mode == "strict":
+                        raise ConfigurationError(
+                            "Vision extractor returned invalid table artifacts"
+                        )
+                    return results
                 candidate_tables = vision_result.get("table_artifacts", ())
                 if not isinstance(candidate_tables, Sequence) or isinstance(
                     candidate_tables, (str, bytes)
                 ):
                     raise ConfigurationError("Vision extractor returned invalid table artifacts")
                 tables = tuple(candidate_tables)
+            from ingestion_graph.document_ai import TableArtifact
+
             for table_index, artifact in enumerate(tables):
+                if isinstance(artifact, Mapping):
+                    artifact = TableArtifact.from_dict(artifact)
                 for batch_index, batch in enumerate(
                     table_artifact_to_batches(artifact, batch_rows=self.table_batch_rows)
                 ):
@@ -837,7 +887,8 @@ class LocalDocumentsSource(Source):
             if renderer is None:
                 raise ConfigurationError("PDF OCR/table processing requires a page renderer")
             image = await asyncio.wait_for(
-                renderer.render(path.read_bytes(), page_number=page_number, dpi=300), timeout=120
+                renderer.render(path.read_bytes(), page_number=page_number, dpi=self.render_dpi),
+                timeout=self.page_timeout_seconds,
             )
             elements.extend(await process_image(image, page_number, native_text))
         return elements

@@ -178,6 +178,53 @@ class TableArtifact:
             ],
         }
 
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> TableArtifact:
+        """Reconstruct a validated artifact from its JSON-safe representation."""
+        coordinates = value.get("coordinates")
+        box = None if not isinstance(coordinates, Mapping) else BoundingBox(**coordinates)
+        cells: list[TableCell] = []
+        for raw in value.get("cells", ()):
+            if not isinstance(raw, Mapping):
+                raise ValueError("TableArtifact cells must be mappings")
+            cell_box = raw.get("coordinates")
+            cells.append(
+                TableCell(
+                    row=int(raw["row"]),
+                    column=int(raw["column"]),
+                    text=str(raw.get("text", "")),
+                    coordinates=None
+                    if not isinstance(cell_box, Mapping)
+                    else BoundingBox(**cell_box),
+                    rowspan=int(raw.get("rowspan", 1)),
+                    colspan=int(raw.get("colspan", 1)),
+                    header_level=raw.get("header_level")
+                    if isinstance(raw.get("header_level"), int)
+                    else None,
+                    confidence=raw.get("confidence")
+                    if isinstance(raw.get("confidence"), (int, float))
+                    else None,
+                    value=raw.get("value"),
+                )
+            )
+        return cls(
+            table_id=str(value.get("table_id", "vision-table")),
+            page_number=value.get("page_number")
+            if isinstance(value.get("page_number"), int)
+            else None,
+            coordinates=box,
+            cells=cells,
+            row_count=int(value.get("row_count", 0)),
+            column_count=int(value.get("column_count", 0)),
+            caption=value.get("caption") if isinstance(value.get("caption"), str) else None,
+            confidence=value.get("confidence")
+            if isinstance(value.get("confidence"), (int, float))
+            else None,
+            metadata=value.get("metadata", {})
+            if isinstance(value.get("metadata"), Mapping)
+            else {},
+        )
+
 
 @dataclass(frozen=True, slots=True)
 class SplitChunk:
