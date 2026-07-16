@@ -21,6 +21,17 @@ from ingestion_graph.connectors.base import (
     Source,
     StreamDescriptor,
 )
+from ingestion_graph.document_ai import (
+    BoundingBox,
+    ComponentDescriptor,
+    ExtractionCache,
+    ExtractionWarning,
+    MemoryExtractionCache,
+    SQLiteExtractionCache,
+    TableArtifact,
+    TableCell,
+    canonical_fingerprint,
+)
 from ingestion_graph.messages import (
     LogMessage,
     RecordMessage,
@@ -53,12 +64,16 @@ __all__ = [
     "ConnectorCapabilities",
     "ConnectorConformanceError",
     "ConnectorSpec",
+    "BoundingBox",
+    "ComponentDescriptor",
     "ConformanceIssue",
     "ConformanceReport",
     "ConformanceSeverity",
     "Destination",
     "DocumentElement",
     "Envelope",
+    "ExtractionCache",
+    "ExtractionWarning",
     "EnvSecretProvider",
     "LocalArtifactStore",
     "LocalDocumentsSource",
@@ -71,6 +86,7 @@ __all__ = [
     "load_connector_manifest",
     "LogMessage",
     "MemoryStateStore",
+    "MemoryExtractionCache",
     "Operation",
     "Pipeline",
     "PipelineResult",
@@ -84,6 +100,7 @@ __all__ = [
     "SchemaMessage",
     "SecretProvider",
     "SQLiteStateStore",
+    "SQLiteExtractionCache",
     "SecretRef",
     "SecretValue",
     "Source",
@@ -91,9 +108,12 @@ __all__ = [
     "StateMessage",
     "StreamDescriptor",
     "TableBatch",
+    "TableArtifact",
+    "TableCell",
     "Tombstone",
     "Transform",
     "stable_record_id",
+    "canonical_fingerprint",
 ]
 
 __version__ = "0.7.0"

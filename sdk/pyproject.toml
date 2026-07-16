@@ -26,6 +26,18 @@ Documentation = "https://github.com/FrozenScorch/data-ingestion-graph/tree/main/
 [project.optional-dependencies]
 discord = ["httpx>=0.28"]
 documents = ["openpyxl>=3.1", "pypdf>=5.1", "python-docx>=1.1"]
+ocr = ["pypdfium2>=5.5,<6", "Pillow>=10.0"]
+document-ai = ["docling>=2.75,<3"]
+vision = ["jsonschema>=4.20,<5"]
+all-documents = [
+  "openpyxl>=3.1",
+  "pypdf>=5.1",
+  "python-docx>=1.1",
+  "pypdfium2>=5.5,<6",
+  "Pillow>=10.0",
+  "docling>=2.75,<3",
+  "jsonschema>=4.20,<5",
+]
 postgres = ["asyncpg>=0.30"]
 rest = ["httpx>=0.28"]
 dev = [
@@ -38,6 +50,8 @@ dev = [
   "openpyxl>=3.1",
   "pypdf>=5.1",
   "python-docx>=1.1",
+  "Pillow>=10.0",
+  "jsonschema>=4.20,<5",
   "ruff>=0.12",
 ]
 

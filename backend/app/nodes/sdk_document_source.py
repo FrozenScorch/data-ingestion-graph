@@ -20,7 +20,7 @@ from app.services.sdk_source_state_service import (
 )
 from ingestion_graph.messages import RecordMessage, StateMessage
 from ingestion_graph.sources import LocalDocumentsSource
-from ingestion_graph.sources.documents import SUPPORTED_EXTENSIONS
+from ingestion_graph.sources.documents import OCR_IMAGE_EXTENSIONS, SUPPORTED_EXTENSIONS
 
 SOURCE_NAME = "local_documents"
 STREAM_PREFIX = "upload-"
@@ -59,6 +59,14 @@ class SDKDocumentSourceNode(BaseNode):
 
     def __init__(self, state_store: _StudioStateStore | None = None) -> None:
         self._injected_state_store = state_store
+
+    @property
+    def studio_accepted_extensions(self) -> tuple[str, ...]:
+        return SUPPORTED_EXTENSIONS
+
+    @property
+    def studio_default_ocr_mode(self) -> str:
+        return "off"
 
     @property
     def implementation(self) -> str:
@@ -116,6 +124,13 @@ class SDKDocumentSourceNode(BaseNode):
                     target_field="table_batch_rows",
                     overrides={"maximum": 5000},
                 ),
+                ManifestFieldProjection(source_field="ocr_mode", target_field="ocr_mode"),
+                ManifestFieldProjection(source_field="table_mode", target_field="table_mode"),
+                ManifestFieldProjection(source_field="failure_mode", target_field="failure_mode"),
+                ManifestFieldProjection(
+                    source_field="min_native_text_quality",
+                    target_field="min_native_text_quality",
+                ),
             ),
             omitted={
                 "paths": "Studio resolves owner-scoped upload IDs to managed paths",
@@ -128,6 +143,7 @@ class SDKDocumentSourceNode(BaseNode):
                 "max_archive_uncompressed_bytes": (
                     "Studio enforces centrally managed archive expansion limits"
                 ),
+                "vision_fallback": "Studio has no live vision adapter in this release",
             },
             studio_properties={
                 "artifact_ids": {
@@ -137,7 +153,7 @@ class SDKDocumentSourceNode(BaseNode):
                     "default": [],
                     "uniqueItems": True,
                     "maxItems": 100,
-                    "accepted_extensions": list(SUPPORTED_EXTENSIONS),
+                    "accepted_extensions": list(self.studio_accepted_extensions),
                     "description": "Explicit Studio-managed files to ingest. Empty selects none.",
                 },
                 "max_output_items": {
@@ -184,6 +200,10 @@ class SDKDocumentSourceNode(BaseNode):
             checkpoint_interval = int(context.config.get("checkpoint_interval", 50))
             text_chunk_chars = int(context.config.get("text_chunk_chars", 12_000))
             table_batch_rows = int(context.config.get("table_batch_rows", 500))
+            ocr_mode = str(context.config.get("ocr_mode", self.studio_default_ocr_mode))
+            table_mode = str(context.config.get("table_mode", "off"))
+            failure_mode = str(context.config.get("failure_mode", "strict"))
+            min_native_text_quality = float(context.config.get("min_native_text_quality", 0.65))
             max_output_items = int(context.config.get("max_output_items", 5_000))
             max_output_bytes = int(context.config.get("max_output_bytes", 16 * 1024 * 1024))
         except (TypeError, ValueError):
@@ -232,7 +252,7 @@ class SDKDocumentSourceNode(BaseNode):
                     if stream not in saved_streams:
                         return self._failure("Upload not found or does not belong to graph owner")
                     path = upload_service.upload_reconciliation_path(owner_id, artifact_id)
-                if path.exists() and path.suffix.lower() not in SUPPORTED_EXTENSIONS:
+                if path.exists() and path.suffix.lower() not in self.studio_accepted_extensions:
                     return self._failure(
                         f"Upload type {path.suffix.lower() or '<none>'} is not supported "
                         "by Document Source"
@@ -264,6 +284,11 @@ class SDKDocumentSourceNode(BaseNode):
                 checkpoint_interval=checkpoint_interval,
                 text_chunk_chars=text_chunk_chars,
                 table_batch_rows=table_batch_rows,
+                extensions=self.studio_accepted_extensions,
+                ocr_mode=ocr_mode,
+                table_mode=table_mode,
+                failure_mode=failure_mode,
+                min_native_text_quality=min_native_text_quality,
             )
             check = await connector.check()
             if not check.ok:
@@ -394,7 +419,30 @@ async def _stage_states(
             await store.delete(pipeline, SOURCE_NAME, stream)
 
 
+class SDKOCRDocumentSourceNode(SDKDocumentSourceNode):
+    @property
+    def node_type(self) -> str:
+        return "sdk_ocr_document_source"
+
+    @property
+    def display_name(self) -> str:
+        return "OCR Document Source (SDK)"
+
+    @property
+    def description(self) -> str:
+        return "Read managed uploads with local-first OCR and table recovery"
+
+    @property
+    def studio_accepted_extensions(self) -> tuple[str, ...]:
+        return SUPPORTED_EXTENSIONS + OCR_IMAGE_EXTENSIONS
+
+    @property
+    def studio_default_ocr_mode(self) -> str:
+        return "auto"
+
+
 def register() -> None:
     from app.nodes.registry import register_node
 
     register_node(SDKDocumentSourceNode())
+    register_node(SDKOCRDocumentSourceNode())

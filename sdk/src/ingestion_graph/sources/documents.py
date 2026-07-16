@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import csv
 import hashlib
 import json
@@ -27,8 +28,9 @@ from ingestion_graph.connectors.base import (
     Source,
     StreamDescriptor,
 )
+from ingestion_graph.document_ai import canonical_fingerprint, evaluate_text_quality
 from ingestion_graph.errors import ConfigurationError
-from ingestion_graph.messages import RecordMessage, SourceMessage, StateMessage
+from ingestion_graph.messages import LogMessage, RecordMessage, SourceMessage, StateMessage
 from ingestion_graph.models import (
     DocumentElement,
     Envelope,
@@ -75,6 +77,7 @@ SUPPORTED_EXTENSIONS = (
     ".txt",
     ".xlsx",
 )
+OCR_IMAGE_EXTENSIONS = (".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp")
 PARSER_VERSION = "2"
 
 
@@ -120,6 +123,18 @@ class LocalDocumentsSource(Source):
         stream_names: Sequence[str] | None = None,
         max_file_size_bytes: int = 256 * 1024 * 1024,
         max_archive_uncompressed_bytes: int = 512 * 1024 * 1024,
+        ocr_mode: str = "off",
+        table_mode: str = "off",
+        ocr_engine: Any = None,
+        page_renderer: Any = None,
+        table_extractor: Any = None,
+        document_splitter: Any = None,
+        extraction_cache: Any = None,
+        failure_mode: str = "strict",
+        min_native_text_quality: float = 0.65,
+        vision_extractor: Any = None,
+        vision_fallback: bool = False,
+        external_processing_policy: Any = None,
     ) -> None:
         raw_paths = (paths,) if isinstance(paths, (str, Path)) else tuple(paths)
         if not raw_paths:
@@ -127,9 +142,33 @@ class LocalDocumentsSource(Source):
         normalized_extensions = tuple(_normalize_extension(item) for item in extensions)
         if not normalized_extensions:
             raise ConfigurationError("Document extensions must not be empty")
-        unsupported = sorted(set(normalized_extensions) - set(SUPPORTED_EXTENSIONS))
+        supported = set(SUPPORTED_EXTENSIONS) | set(OCR_IMAGE_EXTENSIONS)
+        unsupported = sorted(set(normalized_extensions) - supported)
         if unsupported:
             raise ConfigurationError(f"Unsupported document extensions: {', '.join(unsupported)}")
+        if (
+            any(item in OCR_IMAGE_EXTENSIONS for item in normalized_extensions)
+            and ocr_mode == "off"
+        ):
+            raise ConfigurationError("Image extensions require ocr_mode='auto' or 'always'")
+        if ocr_mode not in {"off", "auto", "always"}:
+            raise ConfigurationError("Document ocr_mode must be off, auto, or always")
+        if table_mode not in {"off", "native", "auto", "local", "vision"}:
+            raise ConfigurationError("Document table_mode is invalid")
+        if table_mode == "vision" and vision_extractor is None:
+            raise ConfigurationError("Document table_mode='vision' requires vision_extractor")
+        if vision_fallback and vision_extractor is None:
+            raise ConfigurationError("vision_fallback requires vision_extractor")
+        if vision_extractor is not None and external_processing_policy is None:
+            raise ConfigurationError("vision_extractor requires external_processing_policy")
+        if failure_mode not in {"strict", "best_effort"}:
+            raise ConfigurationError("Document failure_mode must be strict or best_effort")
+        if not isinstance(min_native_text_quality, (int, float)) or isinstance(
+            min_native_text_quality, bool
+        ):
+            raise ConfigurationError("Document min_native_text_quality must be numeric")
+        if not 0 <= float(min_native_text_quality) <= 1:
+            raise ConfigurationError("Document min_native_text_quality must be between 0 and 1")
         if checkpoint_interval < 1:
             raise ConfigurationError("Document checkpoint_interval must be positive")
         if text_chunk_chars < 256:
@@ -160,6 +199,31 @@ class LocalDocumentsSource(Source):
         self.stream_names = normalized_names
         self.max_file_size_bytes = max_file_size_bytes
         self.max_archive_uncompressed_bytes = max_archive_uncompressed_bytes
+        self.ocr_mode = ocr_mode
+        self.table_mode = table_mode
+        self.ocr_engine = ocr_engine
+        self.page_renderer = page_renderer
+        self.table_extractor = table_extractor
+        self.document_splitter = document_splitter
+        self.extraction_cache = extraction_cache
+        self.failure_mode = failure_mode
+        self.min_native_text_quality = float(min_native_text_quality)
+        self.vision_extractor = vision_extractor
+        self.vision_fallback = vision_fallback
+        self.external_processing_policy = external_processing_policy
+        for component in (
+            self.document_splitter,
+            self.vision_extractor,
+        ):
+            descriptor = getattr(component, "descriptor", None)
+            if (
+                descriptor is not None
+                and not descriptor.deterministic
+                and (extraction_cache is None or not getattr(extraction_cache, "persistent", False))
+            ):
+                raise ConfigurationError(
+                    "Nondeterministic document components require a persistent extraction cache"
+                )
         self._streams: dict[str, Path] = {}
 
     @classmethod
@@ -214,6 +278,28 @@ class LocalDocumentsSource(Source):
                         "minimum": 1,
                         "default": 536_870_912,
                     },
+                    "ocr_mode": {
+                        "type": "string",
+                        "enum": ["off", "auto", "always"],
+                        "default": "off",
+                    },
+                    "table_mode": {
+                        "type": "string",
+                        "enum": ["off", "native", "auto", "local", "vision"],
+                        "default": "off",
+                    },
+                    "failure_mode": {
+                        "type": "string",
+                        "enum": ["strict", "best_effort"],
+                        "default": "strict",
+                    },
+                    "min_native_text_quality": {
+                        "type": "number",
+                        "minimum": 0,
+                        "maximum": 1,
+                        "default": 0.65,
+                    },
+                    "vision_fallback": {"type": "boolean", "default": False},
                 },
                 "required": ["paths"],
             },
@@ -244,6 +330,16 @@ class LocalDocumentsSource(Source):
         dependency_error = _missing_dependency(files)
         if dependency_error:
             return CheckResult(False, dependency_error)
+        if self.ocr_mode != "off":
+            engine = self.ocr_engine
+            if engine is None:
+                from ingestion_graph.document_ai.tesseract import TesseractOcrEngine
+
+                engine = TesseractOcrEngine()
+            engine_check = await engine.check()
+            check = CheckResult(bool(engine_check.ok), str(engine_check.message))
+            if not check.ok:
+                return check
         oversized = [str(path) for path in files if path.stat().st_size > self.max_file_size_bytes]
         if oversized:
             return CheckResult(
@@ -359,11 +455,30 @@ class LocalDocumentsSource(Source):
 
                 parsed_count = 0
                 emitted = 0
-                elements = _parse_file(
-                    snapshot.path,
-                    text_chunk_chars=self.text_chunk_chars,
-                    table_batch_rows=self.table_batch_rows,
-                )
+                try:
+                    if (
+                        self.ocr_mode == "off"
+                        and self.table_mode == "off"
+                        and self.document_splitter is None
+                    ):
+                        elements = _parse_file(
+                            snapshot.path,
+                            text_chunk_chars=self.text_chunk_chars,
+                            table_batch_rows=self.table_batch_rows,
+                        )
+                    else:
+                        elements = await self._parse_file_with_document_ai(snapshot.path)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    if self.failure_mode == "strict":
+                        raise
+                    yield LogMessage(
+                        "warning",
+                        "document_ai_file_failed",
+                        {"extension": path.suffix.lower(), "error_type": type(exc).__name__},
+                    )
+                    elements = []
                 for index, element in enumerate(elements):
                     parsed_count = index + 1
                     if index < resume_index:
@@ -507,15 +622,225 @@ class LocalDocumentsSource(Source):
                 emitted = 0
 
     def _parser_fingerprint(self) -> str:
-        raw = json.dumps(
+        legacy = {
+            "parser_version": PARSER_VERSION,
+            "text_chunk_chars": self.text_chunk_chars,
+            "table_batch_rows": self.table_batch_rows,
+        }
+        if self.ocr_mode == "off" and self.table_mode == "off" and self.document_splitter is None:
+            raw = json.dumps(legacy, sort_keys=True)
+            return hashlib.sha256(raw.encode()).hexdigest()
+        return canonical_fingerprint(
             {
-                "parser_version": PARSER_VERSION,
-                "text_chunk_chars": self.text_chunk_chars,
-                "table_batch_rows": self.table_batch_rows,
-            },
-            sort_keys=True,
+                **legacy,
+                "document_ai": {
+                    "ocr_mode": self.ocr_mode,
+                    "table_mode": self.table_mode,
+                    "failure_mode": self.failure_mode,
+                    "min_native_text_quality": self.min_native_text_quality,
+                    "ocr_engine": _component_fingerprint(self.ocr_engine),
+                    "page_renderer": _component_fingerprint(self.page_renderer),
+                    "table_extractor": _component_fingerprint(self.table_extractor),
+                    "document_splitter": _component_fingerprint(self.document_splitter),
+                    "vision_extractor": _component_fingerprint(self.vision_extractor),
+                    "vision_fallback": self.vision_fallback,
+                },
+            }
         )
-        return hashlib.sha256(raw.encode()).hexdigest()
+
+    async def _parse_file_with_document_ai(
+        self,
+        path: Path,
+    ) -> list[_ParsedElement]:
+        """Run opt-in OCR/table/splitter processing against an immutable snapshot."""
+        from ingestion_graph.document_ai import table_artifact_to_batches
+
+        ocr_engine = self.ocr_engine
+        renderer = self.page_renderer
+        table_extractor = self.table_extractor
+        if self.ocr_mode != "off" and ocr_engine is None:
+            from ingestion_graph.document_ai.tesseract import TesseractOcrEngine
+
+            ocr_engine = TesseractOcrEngine()
+        if (
+            (self.ocr_mode != "off" or self.table_mode in {"local", "auto"})
+            and path.suffix.lower() == ".pdf"
+            and renderer is None
+        ):
+            from ingestion_graph.document_ai.rendering import PdfiumPageRenderer
+
+            renderer = PdfiumPageRenderer()
+        if self.table_mode in {"local", "auto"} and table_extractor is None:
+            from ingestion_graph.document_ai.docling_adapter import DoclingTableExtractor
+
+            table_extractor = DoclingTableExtractor()
+
+        async def process_image(
+            image: bytes, page_number: int | None, native_text: str = ""
+        ) -> list[_ParsedElement]:
+            quality = evaluate_text_quality(native_text)
+            should_ocr = self.ocr_mode == "always" or (
+                self.ocr_mode == "auto" and quality.score < self.min_native_text_quality
+            )
+            results: list[_ParsedElement] = []
+            text = native_text
+            metadata: dict[str, Any] = {"page_number": page_number, "native_quality": quality.score}
+            if should_ocr:
+                if ocr_engine is None:
+                    raise ConfigurationError("OCR requires an OCR engine")
+                cache_key = canonical_fingerprint(
+                    {
+                        "image_sha256": hashlib.sha256(image).hexdigest(),
+                        "engine": _component_fingerprint(ocr_engine),
+                        "language": "eng",
+                    }
+                )
+                cached = (
+                    await self.extraction_cache.get(cache_key)
+                    if self.extraction_cache is not None and image
+                    else None
+                )
+                if cached is not None:
+                    cached_value = json.loads(cached.decode("utf-8"))
+                    from ingestion_graph.document_ai import OcrResult
+
+                    result = OcrResult(
+                        str(cached_value.get("text", "")),
+                        confidence=cached_value.get("confidence"),
+                        usage={"cache_hit": True},
+                    )
+                else:
+                    result = await asyncio.wait_for(
+                        ocr_engine.recognize(image, language="eng"),
+                        timeout=120,
+                    )
+                    if self.extraction_cache is not None and image:
+                        await self.extraction_cache.put(
+                            cache_key,
+                            json.dumps(
+                                {"text": result.text, "confidence": result.confidence},
+                                sort_keys=True,
+                            ).encode("utf-8"),
+                        )
+                text = result.text
+                metadata.update(
+                    {
+                        "extraction_mode": "ocr",
+                        "ocr_confidence": result.confidence,
+                        "ocr_engine": _component_fingerprint(ocr_engine),
+                        "warnings": [item.to_dict() for item in result.warnings],
+                    }
+                )
+            elif native_text:
+                metadata["extraction_mode"] = "native"
+            if text or page_number is not None:
+                element = DocumentElement(text, "ocr_page" if should_ocr else "page", page_number)
+                if self.document_splitter is None:
+                    results.append(
+                        _ParsedElement(
+                            element, {"native_id": f"page-{page_number or 1}", **metadata}
+                        )
+                    )
+                else:
+                    chunks = await self.document_splitter.split(element)
+                    for index, chunk in enumerate(chunks):
+                        results.append(
+                            _ParsedElement(
+                                DocumentElement(
+                                    chunk.text,
+                                    chunk.element_type,
+                                    chunk.page_number,
+                                    chunk.parent_id,
+                                    None
+                                    if chunk.coordinates is None
+                                    else chunk.coordinates.to_dict(),
+                                ),
+                                {
+                                    "native_id": f"page-{page_number or 1}-chunk-{index}",
+                                    **metadata,
+                                    **dict(chunk.metadata),
+                                },
+                            )
+                        )
+            tables: Sequence[Any] = ()
+            if table_extractor is not None and self.table_mode in {"local", "auto"}:
+                tables = await table_extractor.extract(image, page_number=page_number)
+            if (
+                not tables
+                and (self.vision_fallback or self.table_mode == "vision")
+                and self.vision_extractor is not None
+            ):
+                if (
+                    self.external_processing_policy is None
+                    or not await self.external_processing_policy.authorize(
+                        purpose="table", page_number=page_number
+                    )
+                ):
+                    raise ConfigurationError("External vision processing was not authorized")
+                vision_result = await self.vision_extractor.extract(
+                    image,
+                    schema={"type": "object", "required": ["table_artifacts"]},
+                )
+                candidate_tables = vision_result.get("table_artifacts", ())
+                if not isinstance(candidate_tables, Sequence) or isinstance(
+                    candidate_tables, (str, bytes)
+                ):
+                    raise ConfigurationError("Vision extractor returned invalid table artifacts")
+                tables = tuple(candidate_tables)
+            for table_index, artifact in enumerate(tables):
+                for batch_index, batch in enumerate(
+                    table_artifact_to_batches(artifact, batch_rows=self.table_batch_rows)
+                ):
+                    results.append(
+                        _ParsedElement(
+                            batch,
+                            {
+                                "native_id": (
+                                    f"table-{page_number or 1}-{table_index}-{batch_index}"
+                                ),
+                                "page_number": page_number,
+                                "table_index": table_index,
+                                "batch_index": batch_index,
+                                "table_artifact": artifact.to_dict(),
+                            },
+                        )
+                    )
+            return results
+
+        if path.suffix.lower() in OCR_IMAGE_EXTENSIONS:
+            return await process_image(path.read_bytes(), 1)
+        if path.suffix.lower() != ".pdf":
+            return list(
+                _parse_file(
+                    path,
+                    text_chunk_chars=self.text_chunk_chars,
+                    table_batch_rows=self.table_batch_rows,
+                )
+            )
+        if PdfReader is None:
+            raise ConfigurationError(
+                "PDF support requires: pip install 'ingestion-graph[documents]'"
+            )
+        reader = PdfReader(str(path))
+        elements: list[_ParsedElement] = []
+        for page_number, page in enumerate(reader.pages, start=1):
+            native_text = page.extract_text() or ""
+            quality = evaluate_text_quality(native_text)
+            needs_render = (
+                self.ocr_mode == "always"
+                or (self.ocr_mode == "auto" and quality.score < self.min_native_text_quality)
+                or self.table_mode in {"local", "auto"}
+            )
+            if not needs_render:
+                elements.extend(await process_image(b"", page_number, native_text))
+                continue
+            if renderer is None:
+                raise ConfigurationError("PDF OCR/table processing requires a page renderer")
+            image = await asyncio.wait_for(
+                renderer.render(path.read_bytes(), page_number=page_number, dpi=300), timeout=120
+            )
+            elements.extend(await process_image(image, page_number, native_text))
+        return elements
 
     def _discover_files(self, only_root: Path | None = None) -> list[Path]:
         files: list[Path] = []
@@ -1114,6 +1439,17 @@ def _payload_checksum(payload: Payload) -> str:
         value = repr(payload)
     encoded = json.dumps(value, sort_keys=True, default=str, ensure_ascii=False).encode()
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _component_fingerprint(component: Any) -> Any:
+    if component is None:
+        return None
+    descriptor = getattr(component, "descriptor", None)
+    if descriptor is not None and hasattr(descriptor, "to_dict"):
+        return descriptor.to_dict()
+    if isinstance(component, (str, int, float, bool)):
+        return component
+    return {"type": type(component).__module__ + "." + type(component).__qualname__}
 
 
 class _TextHTMLParser(HTMLParser):
