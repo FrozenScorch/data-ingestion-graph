@@ -433,9 +433,13 @@ class LocalDocumentsSource(Source):
         progress_path = (
             pending_in_progress.get("relative_path") if pending_in_progress is not None else None
         )
-        ordered_removed_paths = sorted(
-            removed_paths,
-            key=lambda item: (0 if item == progress_path else 1, item),
+        ordered_removed_paths = (
+            []
+            if progress_path in current_paths
+            else sorted(
+                removed_paths,
+                key=lambda item: (0 if item == progress_path else 1, item),
+            )
         )
         for relative_path in ordered_removed_paths:
             prior = files_state.get(relative_path)
@@ -520,6 +524,7 @@ class LocalDocumentsSource(Source):
                     and in_progress.get("relative_path") == relative_path
                     and in_progress.get("sha256") == fingerprint
                     and in_progress.get("parser_fingerprint") == parser_fingerprint
+                    and in_progress.get("tombstone_next_index") is None
                 ):
                     resume_index = int(in_progress.get("next_index", 0))
 
@@ -782,7 +787,10 @@ class LocalDocumentsSource(Source):
             emitted += 1
             if emitted >= self.checkpoint_interval:
                 checkpoint_progress = None if in_progress is None else dict(in_progress)
-                if checkpoint_progress is not None:
+                if (
+                    checkpoint_progress is not None
+                    and checkpoint_progress.get("relative_path") == relative_path
+                ):
                     checkpoint_progress["tombstone_next_index"] = index + 1
                 yield StateMessage(
                     stream_name,
@@ -811,6 +819,7 @@ class LocalDocumentsSource(Source):
                     "render_dpi": self.render_dpi,
                     "page_timeout_seconds": self.page_timeout_seconds,
                     "max_page_concurrency": self.max_page_concurrency,
+                    "retain_extraction_artifacts": self.retain_extraction_artifacts,
                     "ocr_engine": _component_fingerprint(self.ocr_engine),
                     "page_renderer": _component_fingerprint(self.page_renderer),
                     "table_extractor": _component_fingerprint(self.table_extractor),

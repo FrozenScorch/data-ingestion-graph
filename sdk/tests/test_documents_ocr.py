@@ -315,3 +315,21 @@ async def test_table_artifact_metadata_requires_explicit_retention(tmp_path, ret
     assert len(table_records) == 1
     assert ("table_artifact" in table_records[0].envelope.metadata) is retain
     assert table_records[0].envelope.metadata["table_id"] == "table-1"
+
+
+def test_artifact_retention_changes_enhanced_parser_fingerprint(tmp_path):
+    path = tmp_path / "table.png"
+    path.write_bytes(b"image-bytes")
+    common = {
+        "paths": path,
+        "extensions": (".png",),
+        "ocr_mode": "always",
+        "ocr_engine": FakeOcr(),
+        "table_mode": "local",
+        "table_extractor": FakeTableExtractor(),
+    }
+
+    without_artifacts = LocalDocumentsSource(**common, retain_extraction_artifacts=False)
+    with_artifacts = LocalDocumentsSource(**common, retain_extraction_artifacts=True)
+
+    assert without_artifacts._parser_fingerprint() != with_artifacts._parser_fingerprint()

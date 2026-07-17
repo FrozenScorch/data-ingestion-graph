@@ -264,6 +264,82 @@ async def test_deleted_in_progress_checkpoint_retains_replay_count(tmp_path: Pat
 
 
 @pytest.mark.asyncio
+async def test_reappearing_file_restores_rows_after_partial_deletion(tmp_path: Path):
+    path = tmp_path / "restored.txt"
+    original = "many words " * 200
+    path.write_text(original, encoding="utf-8")
+    source = LocalDocumentsSource(
+        path,
+        stream_names=["documents"],
+        checkpoint_interval=1,
+        text_chunk_chars=256,
+    )
+    stream = (await source.discover())[0]
+    initial = await collect(source, stream)
+    initial_records = records(initial)
+    final_state = states(initial)[-1].state
+    assert len(initial_records) > 1
+
+    path.unlink()
+    deletion = source.read(stream, final_state)
+    deletion_checkpoint = None
+    async for message in deletion:
+        if isinstance(message, StateMessage) and message.state.get("in_progress", {}).get(
+            "tombstone_next_index"
+        ):
+            deletion_checkpoint = message.state
+            break
+    await deletion.aclose()
+    assert deletion_checkpoint is not None
+
+    path.write_text(original, encoding="utf-8")
+    restored = records(await collect(source, stream, deletion_checkpoint))
+
+    assert len(restored) == len(initial_records)
+    assert all(item.envelope.operation is Operation.UPSERT for item in restored)
+
+
+@pytest.mark.asyncio
+async def test_unrelated_deletion_waits_for_saved_in_progress_file(tmp_path: Path):
+    current = tmp_path / "a.txt"
+    current.write_text("many words " * 100, encoding="utf-8")
+    source = LocalDocumentsSource(
+        tmp_path,
+        stream_names=["documents"],
+        checkpoint_interval=1,
+        text_chunk_chars=256,
+    )
+    stream = (await source.discover())[0]
+    parser = source._parser_fingerprint()
+    current_hash = hashlib.sha256(current.read_bytes()).hexdigest()
+    state = {
+        "parser_fingerprint": parser,
+        "files": {
+            "b.txt": {
+                "sha256": "b" * 64,
+                "element_count": 2,
+                "parser_fingerprint": parser,
+            }
+        },
+        "in_progress": {
+            "relative_path": "a.txt",
+            "sha256": current_hash,
+            "next_index": 1,
+            "parser_fingerprint": parser,
+        },
+    }
+
+    resumed = await collect(source, stream, state)
+    resumed_final = states(resumed)[-1].state
+
+    assert "in_progress" not in resumed_final
+    assert "b.txt" in resumed_final["files"]
+    deleted = records(await collect(source, stream, resumed_final))
+    assert len(deleted) == 2
+    assert all(item.envelope.operation is Operation.DELETE for item in deleted)
+
+
+@pytest.mark.asyncio
 async def test_csv_duplicate_headers_and_excel_temporal_values_are_json_safe(tmp_path: Path):
     (tmp_path / "people.csv").write_text("name,name\nAda,Grace\n", encoding="utf-8")
     if documents.load_workbook is None:
