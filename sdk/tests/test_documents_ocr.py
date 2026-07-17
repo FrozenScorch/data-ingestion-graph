@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+
 import pytest
 
 from ingestion_graph.document_ai import (
@@ -9,6 +11,8 @@ from ingestion_graph.document_ai import (
     OcrResult,
     SplitChunk,
     SQLiteExtractionCache,
+    TableArtifact,
+    TableCell,
 )
 from ingestion_graph.messages import LogMessage, RecordMessage, StateMessage
 from ingestion_graph.models import DocumentElement, Operation, TableBatch
@@ -94,6 +98,48 @@ async def test_best_effort_failure_preserves_prior_records_and_checkpoint(tmp_pa
     assert not any(isinstance(item, RecordMessage) for item in messages)
     final = [item for item in messages if isinstance(item, StateMessage)][-1].state
     assert final["files"] == prior["files"]
+
+
+@pytest.mark.asyncio
+async def test_later_files_cannot_overwrite_failed_in_progress_state(tmp_path):
+    failed = tmp_path / "a.png"
+    failed.write_bytes(b"image-bytes")
+    (tmp_path / "b.txt").write_text("many words " * 100, encoding="utf-8")
+    source = LocalDocumentsSource(
+        tmp_path,
+        extensions=(".png", ".txt"),
+        ocr_mode="always",
+        ocr_engine=FailingOcr(),
+        failure_mode="best_effort",
+        checkpoint_interval=1,
+        text_chunk_chars=256,
+        stream_names=("documents",),
+    )
+    stream = (await source.discover())[0]
+    parser = source._parser_fingerprint()
+    state = {
+        "parser_fingerprint": parser,
+        "files": {},
+        "in_progress": {
+            "relative_path": "a.png",
+            "sha256": hashlib.sha256(b"image-bytes").hexdigest(),
+            "next_index": 2,
+            "parser_fingerprint": parser,
+        },
+    }
+
+    messages = [item async for item in source.read(stream, state)]
+    final = [item for item in messages if isinstance(item, StateMessage)][-1].state
+    assert final["in_progress"]["relative_path"] == "a.png"
+
+    failed.unlink()
+    retried = [item async for item in source.read(stream, final)]
+    deletes = [
+        item
+        for item in retried
+        if isinstance(item, RecordMessage) and item.envelope.operation is Operation.DELETE
+    ]
+    assert len(deletes) == 2
 
 
 class RecordingOcr(FakeOcr):
@@ -220,3 +266,52 @@ async def test_nondeterministic_split_manifest_is_reused_on_resume(tmp_path):
     assert second_splitter.calls == 0
     assert [item.envelope.payload.text for item in resumed_records] == ["first-b"]
     assert all(item.envelope.operation is Operation.UPSERT for item in resumed_records)
+
+
+class FakeTableExtractor:
+    descriptor = ComponentDescriptor("fake-table", "1", deterministic=True)
+
+    async def extract(self, image: bytes, *, page_number: int | None = None):
+        return (
+            TableArtifact(
+                "table-1",
+                page_number,
+                None,
+                (
+                    TableCell(0, 0, "Name", header_level=0),
+                    TableCell(1, 0, "Ada"),
+                ),
+                2,
+                1,
+            ),
+        )
+
+    async def close(self):
+        return None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("retain", [False, True])
+async def test_table_artifact_metadata_requires_explicit_retention(tmp_path, retain):
+    path = tmp_path / "table.png"
+    path.write_bytes(b"image-bytes")
+    source = LocalDocumentsSource(
+        path,
+        extensions=(".png",),
+        ocr_mode="always",
+        ocr_engine=FakeOcr(),
+        table_mode="local",
+        table_extractor=FakeTableExtractor(),
+        retain_extraction_artifacts=retain,
+        stream_names=("table",),
+    )
+    stream = (await source.discover())[0]
+    table_records = [
+        item
+        async for item in source.read(stream)
+        if isinstance(item, RecordMessage) and isinstance(item.envelope.payload, TableBatch)
+    ]
+
+    assert len(table_records) == 1
+    assert ("table_artifact" in table_records[0].envelope.metadata) is retain
+    assert table_records[0].envelope.metadata["table_id"] == "table-1"

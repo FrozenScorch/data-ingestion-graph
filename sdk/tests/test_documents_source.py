@@ -257,8 +257,9 @@ async def test_deleted_in_progress_checkpoint_retains_replay_count(tmp_path: Pat
 
     assert checkpoint is not None
     assert checkpoint["in_progress"]["next_index"] == 3
+    assert checkpoint["in_progress"]["tombstone_next_index"] == 1
     replayed = records(await collect(source, stream, checkpoint))
-    assert len(replayed) == 3
+    assert len(replayed) == 2
     assert all(item.envelope.operation is Operation.DELETE for item in replayed)
 
 

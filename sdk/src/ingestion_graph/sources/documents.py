@@ -430,7 +430,14 @@ class LocalDocumentsSource(Source):
             progress_path = in_progress.get("relative_path")
             if isinstance(progress_path, str) and progress_path not in current_paths:
                 removed_paths.add(progress_path)
-        for relative_path in sorted(removed_paths):
+        progress_path = (
+            pending_in_progress.get("relative_path") if pending_in_progress is not None else None
+        )
+        ordered_removed_paths = sorted(
+            removed_paths,
+            key=lambda item: (0 if item == progress_path else 1, item),
+        )
+        for relative_path in ordered_removed_paths:
             prior = files_state.get(relative_path)
             prior_count = int(prior["element_count"]) if prior is not None else 0
             progress_count = (
@@ -439,12 +446,28 @@ class LocalDocumentsSource(Source):
                 and in_progress.get("relative_path") == relative_path
                 else 0
             )
+            delete_count = max(prior_count, progress_count)
+            if pending_in_progress is None and prior is not None:
+                pending_in_progress = {
+                    "relative_path": relative_path,
+                    "sha256": str(prior["sha256"]),
+                    "next_index": delete_count,
+                    "parser_fingerprint": parser_fingerprint,
+                    "tombstone_next_index": 0,
+                }
+            tombstone_start = (
+                int(pending_in_progress.get("tombstone_next_index", 0))
+                if pending_in_progress is not None
+                and pending_in_progress.get("relative_path") == relative_path
+                else 0
+            )
             async for message in self._emit_tombstones(
                 stream.name,
                 relative_path,
-                max(prior_count, progress_count),
+                delete_count,
                 files_state,
                 parser_fingerprint,
+                start=tombstone_start,
                 in_progress=pending_in_progress,
             ):
                 yield message
@@ -459,7 +482,14 @@ class LocalDocumentsSource(Source):
                 _checkpoint(files_state, parser_fingerprint, pending_in_progress),
             )
 
-        for relative_path, path in sorted(current_paths.items()):
+        progress_path = (
+            pending_in_progress.get("relative_path") if pending_in_progress is not None else None
+        )
+        ordered_current_paths = sorted(
+            current_paths.items(),
+            key=lambda item: (0 if item[0] == progress_path else 1, item[0]),
+        )
+        for relative_path, path in ordered_current_paths:
             prior = files_state.get(relative_path)
             with _snapshot_file(
                 path,
@@ -598,6 +628,12 @@ class LocalDocumentsSource(Source):
                     )
                     emitted += 1
                     if emitted >= self.checkpoint_interval:
+                        if (
+                            pending_in_progress is not None
+                            and pending_in_progress.get("relative_path") != relative_path
+                        ):
+                            emitted = 0
+                            continue
                         progress: dict[str, Any] = {
                             "relative_path": relative_path,
                             "sha256": fingerprint,
@@ -635,13 +671,22 @@ class LocalDocumentsSource(Source):
                 )
                 committed_count = max(prior_count, progress_count)
                 if committed_count > parsed_count:
+                    tombstone_start = parsed_count
+                    if (
+                        pending_in_progress is not None
+                        and pending_in_progress.get("relative_path") == relative_path
+                    ):
+                        tombstone_start = max(
+                            tombstone_start,
+                            int(pending_in_progress.get("tombstone_next_index", 0)),
+                        )
                     async for message in self._emit_tombstones(
                         stream.name,
                         relative_path,
                         committed_count,
                         files_state,
                         parser_fingerprint,
-                        start=parsed_count,
+                        start=tombstone_start,
                         in_progress=pending_in_progress,
                     ):
                         yield message
@@ -736,9 +781,12 @@ class LocalDocumentsSource(Source):
             )
             emitted += 1
             if emitted >= self.checkpoint_interval:
+                checkpoint_progress = None if in_progress is None else dict(in_progress)
+                if checkpoint_progress is not None:
+                    checkpoint_progress["tombstone_next_index"] = index + 1
                 yield StateMessage(
                     stream_name,
-                    _checkpoint(files_state, parser_fingerprint, in_progress),
+                    _checkpoint(files_state, parser_fingerprint, checkpoint_progress),
                 )
                 emitted = 0
 
@@ -957,18 +1005,21 @@ class LocalDocumentsSource(Source):
                 for batch_index, batch in enumerate(
                     table_artifact_to_batches(artifact, batch_rows=self.table_batch_rows)
                 ):
+                    table_metadata: dict[str, Any] = {
+                        "native_id": (f"table-{page_number or 1}-{table_index}-{batch_index}"),
+                        "page_number": page_number,
+                        "table_index": table_index,
+                        "batch_index": batch_index,
+                        "table_id": artifact.table_id,
+                        "table_confidence": artifact.confidence,
+                        "table_warnings": [warning.to_dict() for warning in artifact.warnings],
+                    }
+                    if self.retain_extraction_artifacts:
+                        table_metadata["table_artifact"] = artifact.to_dict()
                     results.append(
                         _ParsedElement(
                             batch,
-                            {
-                                "native_id": (
-                                    f"table-{page_number or 1}-{table_index}-{batch_index}"
-                                ),
-                                "page_number": page_number,
-                                "table_index": table_index,
-                                "batch_index": batch_index,
-                                "table_artifact": artifact.to_dict(),
-                            },
+                            table_metadata,
                         )
                     )
             return results
@@ -1341,6 +1392,17 @@ def _validate_state(state: Mapping[str, Any] | None) -> dict[str, Any]:
                         f"Document checkpoint in_progress {key} must be a string"
                     )
                 in_progress[key] = item
+        tombstone_next_index = current["in_progress"].get("tombstone_next_index")
+        if tombstone_next_index is not None:
+            if (
+                isinstance(tombstone_next_index, bool)
+                or not isinstance(tombstone_next_index, int)
+                or tombstone_next_index < 0
+            ):
+                raise ConfigurationError(
+                    "Document checkpoint in_progress tombstone_next_index must be non-negative"
+                )
+            in_progress["tombstone_next_index"] = tombstone_next_index
     return {
         "files": files,
         "parser_fingerprint": parser_fingerprint,
