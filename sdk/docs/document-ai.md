@@ -44,8 +44,20 @@ semantic extraction; `TableBatch` is never sent through a text splitter.
 Vision is a bounded, region-level fallback. It is disabled unless explicitly
 configured, and nondeterministic/external components require a persistent
 `ExtractionCache` so interrupted reads cannot regenerate a different element
-sequence. The SDK validates cached values and structured table results using
-JSON-safe contracts; raw prompts, images, and provider payloads are not logged.
+sequence. Before the first record is emitted, the SDK persists the complete
+ordered extraction manifest; an interrupted checkpoint references that
+manifest and fails safely if it is missing or corrupt. The SDK validates cached
+values and structured table results using JSON-safe contracts; raw prompts,
+images, and provider payloads are not logged.
+
+In `best_effort` mode, a failed file emits a safe warning but does not reconcile
+or checkpoint that file. Existing records remain intact and the file is retried
+on the next run. PDF rendering enforces configured pixel and encoded-output
+limits before OCR.
+
+Studio's OCR preset accepts managed PNG, JPEG, WebP, and TIFF uploads. Studio
+exposes only `table_mode="off"` and `"native"` in this release; applications that
+need Docling or vision table recovery inject those adapters through the SDK.
 
 Docling normalization accepts an application-supplied offline converter factory:
 

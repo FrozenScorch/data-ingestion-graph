@@ -139,12 +139,19 @@ class TableArtifact:
     def __post_init__(self) -> None:
         if not self.table_id or self.row_count < 0 or self.column_count < 0:
             raise ValueError("TableArtifact identity and dimensions are invalid")
+        occupied: set[tuple[int, int]] = set()
         for cell in self.cells:
             if (
                 cell.row + cell.rowspan > self.row_count
                 or cell.column + cell.colspan > self.column_count
             ):
                 raise ValueError("Table cell span exceeds table dimensions")
+            for row in range(cell.row, cell.row + cell.rowspan):
+                for column in range(cell.column, cell.column + cell.colspan):
+                    position = (row, column)
+                    if position in occupied:
+                        raise ValueError("Table cells overlap")
+                    occupied.add(position)
         _json(self.metadata)
 
     def to_dict(self) -> dict[str, JSONValue]:

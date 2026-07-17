@@ -21,6 +21,8 @@ async def test_pdfium_renderer_loads_optional_dependencies_lazily() -> None:
     closed: list[str] = []
 
     class FakeImage:
+        size = (20, 10)
+
         def save(self, output: object, *, format: str) -> None:
             assert format == "PNG"
             output.write(b"fake-png")  # type: ignore[attr-defined]
@@ -67,6 +69,96 @@ async def test_pdfium_renderer_loads_optional_dependencies_lazily() -> None:
     assert await renderer.render(b"%PDF-fake", page_number=1, dpi=144) == b"fake-png"
     assert loaded == ["pypdfium2", "PIL.Image"]
     assert closed == ["bitmap", "page", "document"]
+
+
+@pytest.mark.asyncio
+async def test_pdfium_renderer_rejects_oversized_page_before_render() -> None:
+    rendered = False
+
+    class FakePage:
+        def get_size(self):
+            return (1000.0, 1000.0)
+
+        def render(self, *, scale: float):
+            nonlocal rendered
+            rendered = True
+            raise AssertionError("oversized page must not render")
+
+        def close(self):
+            return None
+
+    class FakeDocument:
+        def __init__(self, source: bytes):
+            return None
+
+        def __len__(self):
+            return 1
+
+        def __getitem__(self, index: int):
+            return FakePage()
+
+        def close(self):
+            return None
+
+    pdfium = ModuleType("pypdfium2")
+    pdfium.PdfDocument = FakeDocument  # type: ignore[attr-defined]
+    renderer = PdfiumPageRenderer(
+        module_loader=lambda name: pdfium if name == "pypdfium2" else ModuleType(name),
+        max_pixels=100,
+    )
+
+    with pytest.raises(ConfigurationError, match="pixel limit"):
+        await renderer.render(b"%PDF-fake", page_number=1, dpi=72)
+    assert rendered is False
+
+
+@pytest.mark.asyncio
+async def test_pdfium_renderer_bounds_encoded_output() -> None:
+    class FakeImage:
+        size = (1, 1)
+
+        def save(self, output: object, *, format: str) -> None:
+            output.write(b"too-large-output")  # type: ignore[attr-defined]
+
+    class FakeBitmap:
+        def to_pil(self):
+            return FakeImage()
+
+        def close(self):
+            return None
+
+    class FakePage:
+        def get_size(self):
+            return (1.0, 1.0)
+
+        def render(self, *, scale: float):
+            return FakeBitmap()
+
+        def close(self):
+            return None
+
+    class FakeDocument:
+        def __init__(self, source: bytes):
+            return None
+
+        def __len__(self):
+            return 1
+
+        def __getitem__(self, index: int):
+            return FakePage()
+
+        def close(self):
+            return None
+
+    pdfium = ModuleType("pypdfium2")
+    pdfium.PdfDocument = FakeDocument  # type: ignore[attr-defined]
+    renderer = PdfiumPageRenderer(
+        module_loader=lambda name: pdfium if name == "pypdfium2" else ModuleType(name),
+        max_output_bytes=4,
+    )
+
+    with pytest.raises(ConfigurationError, match="output-size limit"):
+        await renderer.render(b"%PDF-fake", page_number=1, dpi=72)
 
 
 @pytest.mark.asyncio

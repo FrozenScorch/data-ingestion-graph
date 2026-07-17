@@ -11,17 +11,27 @@ def table_artifact_to_batches(
 ) -> list[TableBatch]:
     if batch_rows < 1:
         raise ValueError("batch_rows must be positive")
-    cells = {(cell.row, cell.column): cell for cell in artifact.cells}
-    header_rows = (
-        max((cell.header_level or 0) for cell in artifact.cells) + 1 if artifact.cells else 1
-    )
+    anchors = {(cell.row, cell.column): cell for cell in artifact.cells}
+    coverage = {
+        (row, column): cell
+        for cell in artifact.cells
+        for row in range(cell.row, cell.row + cell.rowspan)
+        for column in range(cell.column, cell.column + cell.colspan)
+    }
+    header_cells = [cell for cell in artifact.cells if cell.header_level is not None]
+    header_rows = max((cell.row + cell.rowspan for cell in header_cells), default=1)
+    header_rows = min(header_rows, artifact.row_count)
     headers: list[str] = []
     for column in range(artifact.column_count):
-        parts = [
-            cells[(row, column)].text.strip()
-            for row in range(min(header_rows, artifact.row_count))
-            if (row, column) in cells and cells[(row, column)].text.strip()
-        ]
+        parts: list[str] = []
+        seen_cells: set[tuple[int, int]] = set()
+        for row in range(header_rows):
+            cell = coverage.get((row, column))
+            if cell is None or (cell.row, cell.column) in seen_cells:
+                continue
+            seen_cells.add((cell.row, cell.column))
+            if cell.text.strip():
+                parts.append(cell.text.strip())
         headers.append(" / ".join(parts) or f"column_{column + 1}")
     seen: dict[str, int] = {}
     for index, header in enumerate(headers):
@@ -32,7 +42,7 @@ def table_artifact_to_batches(
     for row in range(header_rows, artifact.row_count):
         values = {}
         for column, header in enumerate(headers):
-            cell = cells.get((row, column))
+            cell = anchors.get((row, column))
             values[header] = (
                 None if cell is None else (cell.value if cell.value is not None else cell.text)
             )

@@ -236,10 +236,14 @@ class LocalDocumentsSource(Source):
         self.page_timeout_seconds = float(page_timeout_seconds)
         self.max_page_concurrency = int(max_page_concurrency)
         self.retain_extraction_artifacts = bool(retain_extraction_artifacts)
-        for component in (
-            self.document_splitter,
-            self.vision_extractor,
-        ):
+        active_components = [self.document_splitter]
+        if self.ocr_mode != "off":
+            active_components.extend((self.ocr_engine, self.page_renderer))
+        if self.table_mode in {"auto", "local"}:
+            active_components.extend((self.table_extractor, self.page_renderer))
+        if self.table_mode == "vision" or self.vision_fallback:
+            active_components.append(self.vision_extractor)
+        for component in active_components:
             descriptor = getattr(component, "descriptor", None)
             if (
                 descriptor is not None
@@ -416,6 +420,7 @@ class LocalDocumentsSource(Source):
         files_state = dict(current["files"])
         parser_fingerprint = self._parser_fingerprint()
         in_progress = current.get("in_progress")
+        pending_in_progress = dict(in_progress) if isinstance(in_progress, Mapping) else None
         trusted_root = _trusted_root(root) if not self.follow_symlinks else None
         discovered = self._discover_files(root)
         current_paths = {_relative_path(path, root): path for path in discovered}
@@ -443,9 +448,14 @@ class LocalDocumentsSource(Source):
             ):
                 yield message
             files_state.pop(relative_path, None)
+            if (
+                pending_in_progress is not None
+                and pending_in_progress.get("relative_path") == relative_path
+            ):
+                pending_in_progress = None
             yield StateMessage(
                 stream.name,
-                _checkpoint(files_state, parser_fingerprint),
+                _checkpoint(files_state, parser_fingerprint, pending_in_progress),
             )
 
         for relative_path, path in sorted(current_paths.items()):
@@ -484,19 +494,81 @@ class LocalDocumentsSource(Source):
 
                 parsed_count = 0
                 emitted = 0
+                manifest_key: str | None = None
+                manifest_sha256: str | None = None
                 try:
-                    if (
-                        self.ocr_mode == "off"
-                        and self.table_mode == "off"
-                        and self.document_splitter is None
-                    ):
-                        elements = _parse_file(
-                            snapshot.path,
-                            text_chunk_chars=self.text_chunk_chars,
-                            table_batch_rows=self.table_batch_rows,
+                    elements: list[_ParsedElement] | None = None
+                    requires_manifest = self._requires_replay_manifest()
+                    referenced_manifest = (
+                        in_progress.get("manifest_cache_key")
+                        if isinstance(in_progress, Mapping)
+                        and in_progress.get("relative_path") == relative_path
+                        and resume_index > 0
+                        else None
+                    )
+                    if requires_manifest:
+                        if self.extraction_cache is None or not getattr(
+                            self.extraction_cache, "persistent", False
+                        ):
+                            raise ConfigurationError(
+                                "Nondeterministic document components require a persistent "
+                                "extraction cache"
+                            )
+                        manifest_key = canonical_fingerprint(
+                            {
+                                "kind": "ordered-extraction-manifest",
+                                "schema_version": "1",
+                                "document_sha256": fingerprint,
+                                "source_extension": snapshot.path.suffix.lower(),
+                                "parser_fingerprint": parser_fingerprint,
+                            }
                         )
-                    else:
-                        elements = await self._parse_file_with_document_ai(snapshot.path)
+                        if referenced_manifest is not None and referenced_manifest != manifest_key:
+                            raise ConfigurationError(
+                                "In-progress extraction manifest does not match this document"
+                            )
+                        cached_manifest = await self.extraction_cache.get(manifest_key)
+                        if cached_manifest is not None:
+                            try:
+                                expected_hash = (
+                                    in_progress.get("manifest_sha256")
+                                    if isinstance(in_progress, Mapping)
+                                    else None
+                                )
+                                manifest_sha256 = hashlib.sha256(cached_manifest).hexdigest()
+                                if expected_hash is not None and expected_hash != manifest_sha256:
+                                    raise ValueError("manifest hash mismatch")
+                                elements = _deserialize_extraction_manifest(cached_manifest)
+                            except (TypeError, ValueError, json.JSONDecodeError) as exc:
+                                if referenced_manifest is not None:
+                                    raise ConfigurationError(
+                                        "In-progress extraction manifest is corrupt"
+                                    ) from exc
+                                await self.extraction_cache.delete(manifest_key)
+                                elements = None
+                        elif referenced_manifest is not None:
+                            raise ConfigurationError(
+                                "In-progress extraction manifest is unavailable"
+                            )
+                    if elements is None:
+                        if (
+                            self.ocr_mode == "off"
+                            and self.table_mode == "off"
+                            and self.document_splitter is None
+                        ):
+                            elements = list(
+                                _parse_file(
+                                    snapshot.path,
+                                    text_chunk_chars=self.text_chunk_chars,
+                                    table_batch_rows=self.table_batch_rows,
+                                )
+                            )
+                        else:
+                            elements = await self._parse_file_with_document_ai(snapshot.path)
+                        if manifest_key is not None:
+                            manifest_bytes = _serialize_extraction_manifest(elements)
+                            await self.extraction_cache.put(manifest_key, manifest_bytes)
+                            manifest_sha256 = hashlib.sha256(manifest_bytes).hexdigest()
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:
@@ -507,7 +579,7 @@ class LocalDocumentsSource(Source):
                         "document_ai_file_failed",
                         {"extension": path.suffix.lower(), "error_type": type(exc).__name__},
                     )
-                    elements = []
+                    continue
                 for index, element in enumerate(elements):
                     parsed_count = index + 1
                     if index < resume_index:
@@ -525,17 +597,26 @@ class LocalDocumentsSource(Source):
                     )
                     emitted += 1
                     if emitted >= self.checkpoint_interval:
+                        progress: dict[str, Any] = {
+                            "relative_path": relative_path,
+                            "sha256": fingerprint,
+                            "next_index": index + 1,
+                            "parser_fingerprint": parser_fingerprint,
+                        }
+                        if manifest_key is not None and manifest_sha256 is not None:
+                            progress.update(
+                                {
+                                    "manifest_cache_key": manifest_key,
+                                    "manifest_sha256": manifest_sha256,
+                                }
+                            )
+                        pending_in_progress = progress
                         yield StateMessage(
                             stream.name,
                             _checkpoint(
                                 files_state,
                                 parser_fingerprint,
-                                {
-                                    "relative_path": relative_path,
-                                    "sha256": fingerprint,
-                                    "next_index": index + 1,
-                                    "parser_fingerprint": parser_fingerprint,
-                                },
+                                progress,
                             ),
                         )
                         emitted = 0
@@ -567,12 +648,20 @@ class LocalDocumentsSource(Source):
                     "element_count": parsed_count,
                     "parser_fingerprint": parser_fingerprint,
                 }
+                if (
+                    pending_in_progress is not None
+                    and pending_in_progress.get("relative_path") == relative_path
+                ):
+                    pending_in_progress = None
                 yield StateMessage(
                     stream.name,
-                    _checkpoint(files_state, parser_fingerprint),
+                    _checkpoint(files_state, parser_fingerprint, pending_in_progress),
                 )
 
-        yield StateMessage(stream.name, _checkpoint(files_state, parser_fingerprint))
+        yield StateMessage(
+            stream.name,
+            _checkpoint(files_state, parser_fingerprint, pending_in_progress),
+        )
 
     def _record_envelope(
         self,
@@ -596,6 +685,7 @@ class LocalDocumentsSource(Source):
             checksum=_payload_checksum(element.payload),
             event_time=event_time,
             metadata={
+                **element.metadata,
                 "element_id": element_id,
                 "element_index": index,
                 "relative_path": relative_path,
@@ -604,7 +694,6 @@ class LocalDocumentsSource(Source):
                 "media_type": media_type,
                 "size_bytes": stat.st_size,
                 "modified_at": event_time.isoformat(),
-                **element.metadata,
             },
             provenance={
                 "connector": "local_documents",
@@ -681,6 +770,21 @@ class LocalDocumentsSource(Source):
             }
         )
 
+    def _requires_replay_manifest(self) -> bool:
+        """Return whether any active component can change ordered extraction output."""
+        active_components = [self.document_splitter]
+        if self.ocr_mode != "off":
+            active_components.extend((self.ocr_engine, self.page_renderer))
+        if self.table_mode in {"auto", "local"}:
+            active_components.extend((self.table_extractor, self.page_renderer))
+        if self.table_mode == "vision" or self.vision_fallback:
+            active_components.append(self.vision_extractor)
+        for component in active_components:
+            descriptor = getattr(component, "descriptor", None)
+            if descriptor is not None and not descriptor.deterministic:
+                return True
+        return False
+
     async def _parse_file_with_document_ai(
         self,
         path: Path,
@@ -708,6 +812,39 @@ class LocalDocumentsSource(Source):
 
             table_extractor = DoclingTableExtractor()
 
+        async def split_narrative(element: _ParsedElement) -> list[_ParsedElement]:
+            if self.document_splitter is None or not isinstance(element.payload, DocumentElement):
+                return [element]
+            parent = element.payload
+            parent_native_id = str(element.metadata.get("native_id", "element"))
+            chunks = await self.document_splitter.split(parent)
+            split_elements: list[_ParsedElement] = []
+            for index, chunk in enumerate(chunks):
+                coordinates = (
+                    parent.coordinates if chunk.coordinates is None else chunk.coordinates.to_dict()
+                )
+                metadata = {
+                    **dict(chunk.metadata),
+                    **dict(element.metadata),
+                    "native_id": f"{parent_native_id}-chunk-{index}",
+                    "splitter": _component_fingerprint(self.document_splitter),
+                }
+                if chunk.coordinates is None and coordinates is not None:
+                    metadata["coordinate_precision"] = "parent"
+                split_elements.append(
+                    _ParsedElement(
+                        DocumentElement(
+                            chunk.text,
+                            chunk.element_type,
+                            parent.page_number if chunk.page_number is None else chunk.page_number,
+                            chunk.parent_id or parent.parent_id or parent_native_id,
+                            coordinates,
+                        ),
+                        metadata,
+                    )
+                )
+            return split_elements
+
         async def process_image(
             image: bytes, page_number: int | None, native_text: str = ""
         ) -> list[_ParsedElement]:
@@ -734,15 +871,14 @@ class LocalDocumentsSource(Source):
                     else None
                 )
                 if cached is not None:
-                    cached_value = json.loads(cached.decode("utf-8"))
-                    from ingestion_graph.document_ai import OcrResult
-
-                    result = OcrResult(
-                        str(cached_value.get("text", "")),
-                        confidence=cached_value.get("confidence"),
-                        usage={"cache_hit": True},
-                    )
-                else:
+                    try:
+                        result = _deserialize_ocr_result(cached, cache_hit=True)
+                    except (TypeError, ValueError, json.JSONDecodeError, UnicodeDecodeError):
+                        if self.extraction_cache is None:
+                            raise
+                        await self.extraction_cache.delete(cache_key)
+                        cached = None
+                if cached is None:
                     result = await asyncio.wait_for(
                         ocr_engine.recognize(image, language="+".join(self.ocr_languages)),
                         timeout=self.page_timeout_seconds,
@@ -750,10 +886,7 @@ class LocalDocumentsSource(Source):
                     if self.extraction_cache is not None and image:
                         await self.extraction_cache.put(
                             cache_key,
-                            json.dumps(
-                                {"text": result.text, "confidence": result.confidence},
-                                sort_keys=True,
-                            ).encode("utf-8"),
+                            _serialize_ocr_result(result),
                         )
                 text = result.text
                 metadata.update(
@@ -768,33 +901,13 @@ class LocalDocumentsSource(Source):
                 metadata["extraction_mode"] = "native"
             if text or page_number is not None:
                 element = DocumentElement(text, "ocr_page" if should_ocr else "page", page_number)
-                if self.document_splitter is None:
-                    results.append(
+                results.extend(
+                    await split_narrative(
                         _ParsedElement(
                             element, {"native_id": f"page-{page_number or 1}", **metadata}
                         )
                     )
-                else:
-                    chunks = await self.document_splitter.split(element)
-                    for index, chunk in enumerate(chunks):
-                        results.append(
-                            _ParsedElement(
-                                DocumentElement(
-                                    chunk.text,
-                                    chunk.element_type,
-                                    chunk.page_number,
-                                    chunk.parent_id,
-                                    None
-                                    if chunk.coordinates is None
-                                    else chunk.coordinates.to_dict(),
-                                ),
-                                {
-                                    "native_id": f"page-{page_number or 1}-chunk-{index}",
-                                    **metadata,
-                                    **dict(chunk.metadata),
-                                },
-                            )
-                        )
+                )
             tables: Sequence[Any] = ()
             if table_extractor is not None and self.table_mode in {"local", "auto"}:
                 tables = await table_extractor.extract(image, page_number=page_number)
@@ -860,13 +973,17 @@ class LocalDocumentsSource(Source):
         if path.suffix.lower() in OCR_IMAGE_EXTENSIONS:
             return await process_image(path.read_bytes(), 1)
         if path.suffix.lower() != ".pdf":
-            return list(
+            parsed = list(
                 _parse_file(
                     path,
                     text_chunk_chars=self.text_chunk_chars,
                     table_batch_rows=self.table_batch_rows,
                 )
             )
+            split: list[_ParsedElement] = []
+            for element in parsed:
+                split.extend(await split_narrative(element))
+            return split
         if PdfReader is None:
             raise ConfigurationError(
                 "PDF support requires: pip install 'ingestion-graph[documents]'"
@@ -1213,6 +1330,14 @@ def _validate_state(state: Mapping[str, Any] | None) -> dict[str, Any]:
             "next_index": next_index,
             "parser_fingerprint": progress_parser,
         }
+        for key in ("manifest_cache_key", "manifest_sha256"):
+            item = current["in_progress"].get(key)
+            if item is not None:
+                if not isinstance(item, str) or not item:
+                    raise ConfigurationError(
+                        f"Document checkpoint in_progress {key} must be a string"
+                    )
+                in_progress[key] = item
     return {
         "files": files,
         "parser_fingerprint": parser_fingerprint,
@@ -1474,6 +1599,123 @@ def _table_element(
             "batch_index": batch_index,
             "row_count": len(rows),
         },
+    )
+
+
+def _serialize_extraction_manifest(elements: Sequence[_ParsedElement]) -> bytes:
+    items: list[dict[str, Any]] = []
+    for element in elements:
+        payload = Envelope(
+            id="manifest",
+            source="local_documents",
+            stream="manifest",
+            payload=element.payload,
+        ).to_dict()["payload"]
+        items.append({"payload": payload, "metadata": dict(element.metadata)})
+    return json.dumps(
+        {"schema_version": "1", "elements": items},
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")
+
+
+def _deserialize_extraction_manifest(value: bytes) -> list[_ParsedElement]:
+    document = json.loads(value.decode("utf-8"))
+    if not isinstance(document, Mapping) or document.get("schema_version") != "1":
+        raise ValueError("Unsupported extraction manifest schema")
+    raw_elements = document.get("elements")
+    if not isinstance(raw_elements, list):
+        raise ValueError("Extraction manifest elements must be an array")
+    elements: list[_ParsedElement] = []
+    for raw in raw_elements:
+        if not isinstance(raw, Mapping) or not isinstance(raw.get("payload"), Mapping):
+            raise ValueError("Extraction manifest element is invalid")
+        metadata = raw.get("metadata", {})
+        if not isinstance(metadata, Mapping):
+            raise ValueError("Extraction manifest metadata must be an object")
+        envelope = Envelope.from_dict(
+            {
+                "id": "manifest",
+                "source": "local_documents",
+                "stream": "manifest",
+                "payload": raw["payload"],
+            }
+        )
+        elements.append(_ParsedElement(envelope.payload, dict(metadata)))
+    return elements
+
+
+def _serialize_ocr_result(result: Any) -> bytes:
+    value = {
+        "schema_version": "1",
+        "text": result.text,
+        "confidence": result.confidence,
+        "tokens": [
+            {
+                "text": token.text,
+                "confidence": token.confidence,
+                "coordinates": None if token.coordinates is None else token.coordinates.to_dict(),
+            }
+            for token in result.tokens
+        ],
+        "warnings": [warning.to_dict() for warning in result.warnings],
+        "usage": dict(result.usage),
+    }
+    return json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
+def _deserialize_ocr_result(value: bytes, *, cache_hit: bool) -> Any:
+    from ingestion_graph.document_ai import (
+        BoundingBox,
+        ExtractionWarning,
+        OcrResult,
+        OcrToken,
+    )
+
+    raw = json.loads(value.decode("utf-8"))
+    if not isinstance(raw, Mapping) or raw.get("schema_version") != "1":
+        raise ValueError("Unsupported OCR cache schema")
+    raw_tokens = raw.get("tokens", [])
+    raw_warnings = raw.get("warnings", [])
+    if not isinstance(raw_tokens, list) or not isinstance(raw_warnings, list):
+        raise ValueError("OCR cache entry is invalid")
+    tokens = []
+    for item in raw_tokens:
+        if not isinstance(item, Mapping):
+            raise ValueError("OCR cache token is invalid")
+        coordinates = item.get("coordinates")
+        tokens.append(
+            OcrToken(
+                text=str(item.get("text", "")),
+                confidence=item.get("confidence"),
+                coordinates=None
+                if not isinstance(coordinates, Mapping)
+                else BoundingBox(**coordinates),
+            )
+        )
+    warnings = []
+    for item in raw_warnings:
+        if not isinstance(item, Mapping):
+            raise ValueError("OCR cache warning is invalid")
+        warnings.append(
+            ExtractionWarning(
+                code=str(item.get("code", "ocr_warning")),
+                message=str(item.get("message", "OCR warning")),
+                page_number=item.get("page_number")
+                if isinstance(item.get("page_number"), int)
+                else None,
+            )
+        )
+    usage = raw.get("usage", {})
+    if not isinstance(usage, Mapping):
+        raise ValueError("OCR cache usage is invalid")
+    return OcrResult(
+        text=str(raw.get("text", "")),
+        tokens=tuple(tokens),
+        confidence=raw.get("confidence"),
+        warnings=tuple(warnings),
+        usage={**dict(usage), "cache_hit": cache_hit},
     )
 
 

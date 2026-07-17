@@ -42,6 +42,46 @@ def test_table_artifact_preserves_hierarchical_headers_and_batches() -> None:
     assert batches[0].rows == ({"Revenue / Q1": 10, "Q2": 20},)
 
 
+def test_table_artifact_preserves_merged_headers_and_anchor_cells() -> None:
+    artifact = TableArtifact(
+        "merged",
+        1,
+        BoundingBox(0, 0, 1, 1),
+        (
+            TableCell(0, 0, "Group", colspan=2, header_level=0),
+            TableCell(1, 0, "A", header_level=1),
+            TableCell(1, 1, "B", header_level=1),
+            TableCell(2, 0, "merged value", rowspan=2),
+            TableCell(2, 1, "first"),
+            TableCell(3, 1, "second"),
+        ),
+        4,
+        2,
+    )
+
+    batch = table_artifact_to_batches(artifact)[0]
+
+    assert batch.columns == ("Group / A", "Group / B")
+    assert batch.rows == (
+        {"Group / A": "merged value", "Group / B": "first"},
+        {"Group / A": None, "Group / B": "second"},
+    )
+
+
+def test_table_artifact_rejects_overlapping_spans() -> None:
+    import pytest
+
+    with pytest.raises(ValueError, match="overlap"):
+        TableArtifact(
+            "overlap",
+            1,
+            None,
+            (TableCell(0, 0, "wide", colspan=2), TableCell(0, 1, "collision")),
+            1,
+            2,
+        )
+
+
 def test_memory_and_sqlite_cache_round_trip(tmp_path) -> None:
     async def run() -> None:
         memory = MemoryExtractionCache()
