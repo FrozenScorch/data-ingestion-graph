@@ -358,6 +358,9 @@ async def test_docling_cancellation_drains_worker_before_releasing_converter() -
     extraction.cancel()
     await asyncio.sleep(0.01)
     assert not extraction.done()
+    extraction.cancel()
+    await asyncio.sleep(0.01)
+    assert not extraction.done()
     release.set()
 
     with pytest.raises(asyncio.CancelledError):
@@ -386,6 +389,9 @@ async def test_docling_cancellation_drains_and_retains_factory_result() -> None:
     extraction = asyncio.create_task(extractor.extract(b"image"))
     assert await asyncio.to_thread(started.wait, 1)
 
+    extraction.cancel()
+    await asyncio.sleep(0.01)
+    assert not extraction.done()
     extraction.cancel()
     await asyncio.sleep(0.01)
     assert not extraction.done()

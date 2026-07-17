@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import inspect
 from collections.abc import Callable, Mapping, Sequence
-from contextlib import suppress
 from typing import Any
 
 from ingestion_graph.document_ai.models import (
@@ -63,13 +62,10 @@ class DoclingTableExtractor:
                         "Docling table extraction requires an explicitly configured offline "
                         "converter_factory; automatic model downloads are disabled"
                     )
-                factory_task = asyncio.create_task(asyncio.to_thread(self._converter_factory))
-                try:
-                    self._converter = await asyncio.shield(factory_task)
-                except asyncio.CancelledError:
-                    with suppress(Exception):
-                        self._converter = await factory_task
-                    raise
+                converter, cancelled = await _drain_blocking(self._converter_factory)
+                self._converter = converter
+                if cancelled:
+                    raise asyncio.CancelledError
             return self._converter
 
     async def close(self) -> None:
@@ -87,13 +83,21 @@ class DoclingTableExtractor:
 
 async def _run_blocking(function: Callable[..., Any], *args: object) -> Any:
     """Drain a worker after cancellation before shared converter ownership is released."""
+    result, cancelled = await _drain_blocking(function, *args)
+    if cancelled:
+        raise asyncio.CancelledError
+    return result
+
+
+async def _drain_blocking(function: Callable[..., Any], *args: object) -> tuple[Any, bool]:
+    """Shield a thread through repeated cancellation and report cancellation afterwards."""
     task = asyncio.create_task(asyncio.to_thread(function, *args))
-    try:
-        return await asyncio.shield(task)
-    except asyncio.CancelledError:
-        with suppress(Exception):
-            await task
-        raise
+    cancelled = False
+    while True:
+        try:
+            return await asyncio.shield(task), cancelled
+        except asyncio.CancelledError:
+            cancelled = True
 
 
 def _convert(converter: object, image: bytes) -> object:
