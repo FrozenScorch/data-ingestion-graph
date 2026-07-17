@@ -63,7 +63,13 @@ class DoclingTableExtractor:
                         "Docling table extraction requires an explicitly configured offline "
                         "converter_factory; automatic model downloads are disabled"
                     )
-                self._converter = await asyncio.to_thread(self._converter_factory)
+                factory_task = asyncio.create_task(asyncio.to_thread(self._converter_factory))
+                try:
+                    self._converter = await asyncio.shield(factory_task)
+                except asyncio.CancelledError:
+                    with suppress(Exception):
+                        self._converter = await factory_task
+                    raise
             return self._converter
 
     async def close(self) -> None:

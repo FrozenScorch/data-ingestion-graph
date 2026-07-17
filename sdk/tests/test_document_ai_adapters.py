@@ -363,3 +363,35 @@ async def test_docling_cancellation_drains_worker_before_releasing_converter() -
     with pytest.raises(asyncio.CancelledError):
         await extraction
     assert await extractor.extract(b"next") == ()
+
+
+@pytest.mark.asyncio
+async def test_docling_cancellation_drains_and_retains_factory_result() -> None:
+    started = threading.Event()
+    release = threading.Event()
+    factory_calls = 0
+
+    class FakeConverter:
+        def convert_bytes(self, _image: bytes) -> object:
+            return {"document": {"tables": []}}
+
+    def factory() -> object:
+        nonlocal factory_calls
+        factory_calls += 1
+        started.set()
+        release.wait(timeout=2)
+        return FakeConverter()
+
+    extractor = DoclingTableExtractor(converter_factory=factory)
+    extraction = asyncio.create_task(extractor.extract(b"image"))
+    assert await asyncio.to_thread(started.wait, 1)
+
+    extraction.cancel()
+    await asyncio.sleep(0.01)
+    assert not extraction.done()
+    release.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await extraction
+    assert await extractor.extract(b"next") == ()
+    assert factory_calls == 1
