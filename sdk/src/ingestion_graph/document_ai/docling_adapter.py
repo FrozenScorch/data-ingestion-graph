@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 from collections.abc import Callable, Mapping, Sequence
+from contextlib import suppress
 from typing import Any
 
 from ingestion_graph.document_ai.models import (
@@ -49,7 +50,7 @@ class DoclingTableExtractor:
             raise ValueError("page_number must be positive when provided")
         converter = await self._get_converter()
         async with self._conversion_lock:
-            result = await asyncio.to_thread(_convert, converter, image)
+            result = await _run_blocking(_convert, converter, image)
         return tuple(_normalize_result(result, image=image, page_number=page_number))
 
     async def _get_converter(self) -> object:
@@ -66,15 +67,27 @@ class DoclingTableExtractor:
             return self._converter
 
     async def close(self) -> None:
-        converter, self._converter = self._converter, None
-        if converter is None:
-            return
-        close = getattr(converter, "close", None)
-        if not callable(close):
-            return
-        result = close()
-        if inspect.isawaitable(result):
-            await result
+        async with self._conversion_lock:
+            converter, self._converter = self._converter, None
+            if converter is None:
+                return
+            close = getattr(converter, "close", None)
+            if not callable(close):
+                return
+            result = await _run_blocking(close)
+            if inspect.isawaitable(result):
+                await result
+
+
+async def _run_blocking(function: Callable[..., Any], *args: object) -> Any:
+    """Drain a worker after cancellation before shared converter ownership is released."""
+    task = asyncio.create_task(asyncio.to_thread(function, *args))
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        with suppress(Exception):
+            await task
+        raise
 
 
 def _convert(converter: object, image: bytes) -> object:

@@ -338,3 +338,28 @@ async def test_docling_adapter_serializes_shared_converter_calls() -> None:
     await asyncio.gather(extractor.extract(b"one"), extractor.extract(b"two"))
 
     assert max_active == 1
+
+
+@pytest.mark.asyncio
+async def test_docling_cancellation_drains_worker_before_releasing_converter() -> None:
+    started = threading.Event()
+    release = threading.Event()
+
+    class FakeConverter:
+        def convert_bytes(self, _image: bytes) -> object:
+            started.set()
+            release.wait(timeout=2)
+            return {"document": {"tables": []}}
+
+    extractor = DoclingTableExtractor(converter_factory=FakeConverter)
+    extraction = asyncio.create_task(extractor.extract(b"image"))
+    assert await asyncio.to_thread(started.wait, 1)
+
+    extraction.cancel()
+    await asyncio.sleep(0.01)
+    assert not extraction.done()
+    release.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await extraction
+    assert await extractor.extract(b"next") == ()
