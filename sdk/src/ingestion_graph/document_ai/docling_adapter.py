@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 from collections.abc import Callable, Mapping, Sequence
+from functools import partial
 from typing import Any
 
 from ingestion_graph.document_ai.models import (
@@ -91,23 +92,23 @@ async def _run_blocking(function: Callable[..., Any], *args: object) -> Any:
 
 async def _drain_blocking(function: Callable[..., Any], *args: object) -> tuple[Any, bool]:
     """Shield a thread through repeated cancellation and report cancellation afterwards."""
-    task = asyncio.create_task(asyncio.to_thread(function, *args))
+    worker = asyncio.get_running_loop().run_in_executor(None, partial(function, *args))
     cancelled = False
-    while not task.done():
+    while not worker.done():
         try:
-            await asyncio.shield(task)
+            await asyncio.shield(worker)
         except asyncio.CancelledError:
-            if task.done():
-                if not task.cancelled():
+            if worker.done():
+                if not worker.cancelled():
                     cancelled = True
                 break
             cancelled = True
         except BaseException:
             break
-    if task.cancelled():
+    if worker.cancelled():
         raise asyncio.CancelledError
     try:
-        result = task.result()
+        result = worker.result()
     except BaseException:
         if cancelled:
             raise asyncio.CancelledError from None
