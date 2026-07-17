@@ -125,7 +125,11 @@ class SDKDocumentSourceNode(BaseNode):
                     overrides={"maximum": 5000},
                 ),
                 ManifestFieldProjection(source_field="ocr_mode", target_field="ocr_mode"),
-                ManifestFieldProjection(source_field="table_mode", target_field="table_mode"),
+                ManifestFieldProjection(
+                    source_field="table_mode",
+                    target_field="table_mode",
+                    overrides={"enum": ["off", "native"]},
+                ),
                 ManifestFieldProjection(source_field="failure_mode", target_field="failure_mode"),
                 ManifestFieldProjection(
                     source_field="min_native_text_quality",
@@ -212,6 +216,11 @@ class SDKDocumentSourceNode(BaseNode):
             max_output_bytes = int(context.config.get("max_output_bytes", 16 * 1024 * 1024))
         except (TypeError, ValueError):
             return self._failure("Document parser limits must be integers")
+        if table_mode not in {"off", "native"}:
+            return self._failure(
+                "Studio supports table_mode 'off' or 'native'; local and vision adapters "
+                "must be injected through the SDK"
+            )
         if not 1 <= max_output_items <= MAX_OUTPUT_ITEMS:
             return self._failure(f"max_output_items must be between 1 and {MAX_OUTPUT_ITEMS}")
         if not 1024 <= max_output_bytes <= MAX_OUTPUT_BYTES:
@@ -434,7 +443,7 @@ class SDKOCRDocumentSourceNode(SDKDocumentSourceNode):
 
     @property
     def description(self) -> str:
-        return "Read managed uploads with local-first OCR and table recovery"
+        return "Read managed uploads with local-first OCR"
 
     @property
     def studio_accepted_extensions(self) -> tuple[str, ...]:

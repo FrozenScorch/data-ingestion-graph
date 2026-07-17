@@ -53,6 +53,16 @@ async def test_uploads_are_owner_scoped_and_resolvable(upload_root):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("filename", ["scan.png", "photo.jpg", "pages.tiff"])
+async def test_ocr_image_uploads_are_allowed(upload_root, filename):
+    owner = uuid4()
+    saved = await upload_service.save_upload(owner, make_upload(filename, b"image"))
+
+    assert saved["name"] == filename
+    assert upload_service.resolve_uploads(owner, [saved["id"]])[0].read_bytes() == b"image"
+
+
+@pytest.mark.asyncio
 async def test_invalid_and_oversized_uploads_leave_no_files(upload_root, monkeypatch):
     owner = uuid4()
     with pytest.raises(HTTPException) as invalid:
