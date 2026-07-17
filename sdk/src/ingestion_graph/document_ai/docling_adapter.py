@@ -47,8 +47,8 @@ class DoclingTableExtractor:
             raise ValueError("table image must not be empty")
         if page_number is not None and page_number < 1:
             raise ValueError("page_number must be positive when provided")
-        converter = await self._get_converter()
         async with self._conversion_lock:
+            converter = await self._get_converter()
             result = await _run_blocking(_convert, converter, image)
         return tuple(_normalize_result(result, image=image, page_number=page_number))
 
@@ -93,11 +93,26 @@ async def _drain_blocking(function: Callable[..., Any], *args: object) -> tuple[
     """Shield a thread through repeated cancellation and report cancellation afterwards."""
     task = asyncio.create_task(asyncio.to_thread(function, *args))
     cancelled = False
-    while True:
+    while not task.done():
         try:
-            return await asyncio.shield(task), cancelled
+            await asyncio.shield(task)
         except asyncio.CancelledError:
+            if task.done():
+                if not task.cancelled():
+                    cancelled = True
+                break
             cancelled = True
+        except BaseException:
+            break
+    if task.cancelled():
+        raise asyncio.CancelledError
+    try:
+        result = task.result()
+    except BaseException:
+        if cancelled:
+            raise asyncio.CancelledError from None
+        raise
+    return result, cancelled
 
 
 def _convert(converter: object, image: bytes) -> object:

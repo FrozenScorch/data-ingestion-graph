@@ -401,3 +401,69 @@ async def test_docling_cancellation_drains_and_retains_factory_result() -> None:
         await extraction
     assert await extractor.extract(b"next") == ()
     assert factory_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_docling_close_waits_for_cancelled_factory_and_closes_result() -> None:
+    started = threading.Event()
+    release = threading.Event()
+    closes = 0
+
+    class FakeConverter:
+        def convert_bytes(self, _image: bytes) -> object:
+            return {"document": {"tables": []}}
+
+        def close(self) -> None:
+            nonlocal closes
+            closes += 1
+
+    def factory() -> object:
+        started.set()
+        release.wait(timeout=2)
+        return FakeConverter()
+
+    extractor = DoclingTableExtractor(converter_factory=factory)
+    extraction = asyncio.create_task(extractor.extract(b"image"))
+    assert await asyncio.to_thread(started.wait, 1)
+    extraction.cancel()
+    closing = asyncio.create_task(extractor.close())
+    await asyncio.sleep(0.01)
+    assert not extraction.done()
+    assert not closing.done()
+
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await extraction
+    await closing
+
+    assert closes == 1
+
+
+@pytest.mark.asyncio
+async def test_docling_worker_cancelled_error_does_not_spin() -> None:
+    def cancelled_factory() -> object:
+        raise asyncio.CancelledError
+
+    extractor = DoclingTableExtractor(converter_factory=cancelled_factory)
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(extractor.extract(b"image"), timeout=1)
+
+
+@pytest.mark.asyncio
+async def test_docling_outer_cancellation_wins_over_late_worker_error() -> None:
+    started = threading.Event()
+    release = threading.Event()
+
+    def failing_factory() -> object:
+        started.set()
+        release.wait(timeout=2)
+        raise RuntimeError("late worker failure")
+
+    extractor = DoclingTableExtractor(converter_factory=failing_factory)
+    extraction = asyncio.create_task(extractor.extract(b"image"))
+    assert await asyncio.to_thread(started.wait, 1)
+    extraction.cancel()
+    release.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await extraction
