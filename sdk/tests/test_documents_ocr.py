@@ -323,6 +323,53 @@ async def test_invalid_vision_response_retries_once_before_accepting_table(tmp_p
     assert any(isinstance(element.payload, TableBatch) for element in elements)
 
 
+@pytest.mark.asyncio
+async def test_multiframe_image_is_rejected_before_external_vision(tmp_path):
+    from io import BytesIO
+
+    from PIL import Image
+
+    output = BytesIO()
+    first = Image.new("RGB", (1, 1), "white")
+    second = Image.new("RGB", (1, 1), "black")
+    first.save(output, format="TIFF", save_all=True, append_images=[second])
+
+    class Vision:
+        descriptor = ComponentDescriptor("frame-vision", "1", deterministic=False, external=True)
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def extract(self, _image: bytes, *, schema):
+            self.calls += 1
+            return {"table_artifacts": []}
+
+        async def close(self) -> None:
+            return None
+
+    class Allow:
+        async def authorize(self, *, purpose: str, page_number: int | None) -> bool:
+            return True
+
+    path = tmp_path / "frames.tiff"
+    path.write_bytes(output.getvalue())
+    vision = Vision()
+    source = LocalDocumentsSource(
+        path,
+        extensions=(".tiff",),
+        ocr_mode="always",
+        ocr_engine=FakeOcr(),
+        table_mode="vision",
+        vision_extractor=vision,
+        external_processing_policy=Allow(),
+        extraction_cache=SQLiteExtractionCache(tmp_path / "frames.db"),
+    )
+
+    with pytest.raises(ConfigurationError, match="frame-count limit"):
+        await source._parse_file_with_document_ai(path)
+    assert vision.calls == 0
+
+
 class FailingOcr(FakeOcr):
     async def recognize(self, image: bytes, *, language: str = "eng") -> OcrResult:
         raise RuntimeError("transient OCR failure")

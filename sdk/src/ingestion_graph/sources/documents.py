@@ -1163,6 +1163,7 @@ class LocalDocumentsSource(Source):
                     validate_image_payload,
                     image,
                     extension=path.suffix.lower(),
+                    max_frames=(1 if self.table_mode == "vision" or self.vision_fallback else 256),
                 )
                 return await process_image(image, 1)
 
