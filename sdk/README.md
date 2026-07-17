@@ -35,6 +35,9 @@ python -m pip install "ingestion-graph[documents] @ git+https://github.com/Froze
 For generic paginated HTTPS JSON APIs, install the `rest` extra and see the
 [REST source guide](docs/rest-source.md).
 
+For scanned PDFs and image documents, install the optional `ocr` extra and
+enable `ocr_mode` explicitly. See the [local-first document intelligence guide](docs/document-ai.md).
+
 ```python
 from ingestion_graph import LocalDocumentsSource, Pipeline
 from ingestion_graph.destinations import SQLiteCollection

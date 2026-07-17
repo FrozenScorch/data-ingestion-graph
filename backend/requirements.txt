@@ -1,5 +1,5 @@
 # Independently packaged data plane (path resolves from repository root)
-./sdk[documents]
+./sdk[documents,ocr]
 
 # Core
 fastapi>=0.115.0

@@ -19,7 +19,7 @@ from app.graph_validation import (
 )
 from app.nodes.discord_source import DiscordSourceNode
 from app.nodes.registry import discover_nodes
-from app.nodes.sdk_document_source import SDKDocumentSourceNode
+from app.nodes.sdk_document_source import SDKDocumentSourceNode, SDKOCRDocumentSourceNode
 from app.nodes.sdk_manifest import (
     ManifestFieldProjection,
     project_manifest_config_schema,
@@ -28,6 +28,18 @@ from app.nodes.sdk_manifest import (
 from app.nodes.sdk_query_store import SDKQueryStoreNode
 from ingestion_graph.destinations import SQLiteCollection
 from ingestion_graph.sources import DiscordSource, LocalDocumentsSource
+
+
+def test_ocr_adapter_is_a_thin_sdk_preset():
+    node = SDKOCRDocumentSourceNode()
+    assert node.node_type == "sdk_ocr_document_source"
+    assert node.studio_default_ocr_mode == "auto"
+    properties = node.config_schema["properties"]
+    assert ".png" in properties["artifact_ids"]["accepted_extensions"]
+    assert properties["ocr_mode"]["default"] == "auto"
+    assert properties["ocr_mode"]["enum"] == ["auto", "always"]
+    assert properties["table_mode"]["enum"] == ["off", "native"]
+    assert SDKDocumentSourceNode().config_schema["properties"]["ocr_mode"]["default"] == "off"
 
 
 def test_sdk_adapter_metadata_is_visible_to_studio():

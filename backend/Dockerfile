@@ -23,6 +23,9 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libpq5 \
     curl \
+    tesseract-ocr \
+    tesseract-ocr-eng \
+    tesseract-ocr-osd \
     && rm -rf /var/lib/apt/lists/*
 
 # Create non-root user and group
