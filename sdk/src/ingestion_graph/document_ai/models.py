@@ -10,6 +10,8 @@ from dataclasses import dataclass, field
 from typing import Any, TypeAlias
 
 JSONValue: TypeAlias = None | bool | int | float | str | list["JSONValue"] | dict[str, "JSONValue"]
+MAX_TABLE_GRID_CELLS = 1_000_000
+MAX_TABLE_CELLS = 250_000
 
 
 def _json(value: Any) -> JSONValue:
@@ -120,6 +122,12 @@ class TableCell:
     def __post_init__(self) -> None:
         if self.row < 0 or self.column < 0 or self.rowspan < 1 or self.colspan < 1:
             raise ValueError("Table cell indexes and spans must be positive")
+        if self.header_level is not None and self.header_level < 0:
+            raise ValueError("Table cell header_level must be non-negative")
+        if self.confidence is not None and (
+            not math.isfinite(self.confidence) or not 0 <= self.confidence <= 1
+        ):
+            raise ValueError("Table cell confidence must be between 0 and 1")
 
 
 @dataclass(frozen=True, slots=True)
@@ -139,6 +147,14 @@ class TableArtifact:
     def __post_init__(self) -> None:
         if not self.table_id or self.row_count < 0 or self.column_count < 0:
             raise ValueError("TableArtifact identity and dimensions are invalid")
+        if self.row_count * self.column_count > MAX_TABLE_GRID_CELLS:
+            raise ValueError("TableArtifact grid exceeds the safety limit")
+        if len(self.cells) > MAX_TABLE_CELLS:
+            raise ValueError("TableArtifact cell count exceeds the safety limit")
+        if self.confidence is not None and (
+            not math.isfinite(self.confidence) or not 0 <= self.confidence <= 1
+        ):
+            raise ValueError("TableArtifact confidence must be between 0 and 1")
         occupied: set[tuple[int, int]] = set()
         for cell in self.cells:
             if (
@@ -214,6 +230,32 @@ class TableArtifact:
                     value=raw.get("value"),
                 )
             )
+        raw_engine = value.get("engine")
+        engine = None
+        if isinstance(raw_engine, Mapping):
+            configuration = raw_engine.get("configuration", {})
+            if not isinstance(configuration, Mapping):
+                raise ValueError("TableArtifact engine configuration must be an object")
+            engine = ComponentDescriptor(
+                name=str(raw_engine.get("name", "")),
+                version=str(raw_engine.get("version", "")),
+                configuration=configuration,
+                deterministic=bool(raw_engine.get("deterministic", True)),
+                external=bool(raw_engine.get("external", False)),
+            )
+        warnings = []
+        for raw_warning in value.get("warnings", ()):
+            if not isinstance(raw_warning, Mapping):
+                raise ValueError("TableArtifact warnings must be mappings")
+            warnings.append(
+                ExtractionWarning(
+                    code=str(raw_warning.get("code", "table_warning")),
+                    message=str(raw_warning.get("message", "Table warning")),
+                    page_number=raw_warning.get("page_number")
+                    if isinstance(raw_warning.get("page_number"), int)
+                    else None,
+                )
+            )
         return cls(
             table_id=str(value.get("table_id", "vision-table")),
             page_number=value.get("page_number")
@@ -227,6 +269,8 @@ class TableArtifact:
             confidence=value.get("confidence")
             if isinstance(value.get("confidence"), (int, float))
             else None,
+            engine=engine,
+            warnings=tuple(warnings),
             metadata=value.get("metadata", {})
             if isinstance(value.get("metadata"), Mapping)
             else {},

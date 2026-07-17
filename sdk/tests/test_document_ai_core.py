@@ -82,6 +82,33 @@ def test_table_artifact_rejects_overlapping_spans() -> None:
         )
 
 
+def test_table_artifact_json_round_trip_preserves_engine_and_warnings() -> None:
+    from ingestion_graph.document_ai import ExtractionWarning
+
+    artifact = TableArtifact(
+        "round-trip",
+        1,
+        None,
+        (TableCell(0, 0, "Header", header_level=0),),
+        1,
+        1,
+        engine=ComponentDescriptor("vision", "2", {"model": "fake"}, deterministic=False),
+        warnings=(ExtractionWarning("low_confidence", "Review this table", 1),),
+    )
+
+    restored = TableArtifact.from_dict(artifact.to_dict())
+
+    assert restored.engine == artifact.engine
+    assert restored.warnings == artifact.warnings
+
+
+def test_table_artifact_rejects_unsafe_grid_size() -> None:
+    import pytest
+
+    with pytest.raises(ValueError, match="safety limit"):
+        TableArtifact("oversized", 1, None, (), 1001, 1000)
+
+
 def test_memory_and_sqlite_cache_round_trip(tmp_path) -> None:
     async def run() -> None:
         memory = MemoryExtractionCache()

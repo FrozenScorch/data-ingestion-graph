@@ -14,6 +14,7 @@ from ingestion_graph.document_ai import (
     TableArtifact,
     TableCell,
 )
+from ingestion_graph.errors import ConfigurationError
 from ingestion_graph.messages import LogMessage, RecordMessage, StateMessage
 from ingestion_graph.models import DocumentElement, Operation, TableBatch
 from ingestion_graph.sources.documents import LocalDocumentsSource
@@ -60,6 +61,13 @@ def test_images_are_not_accepted_by_legacy_defaults(tmp_path):
     path.write_bytes(b"image")
     with pytest.raises(Exception, match="Image extensions"):
         LocalDocumentsSource(path, extensions=(".png",))
+
+
+def test_manifest_advertises_opt_in_images_but_keeps_legacy_default():
+    extensions = LocalDocumentsSource.manifest().config_schema["properties"]["extensions"]
+
+    assert ".png" in extensions["items"]["enum"]
+    assert ".png" not in extensions["default"]
 
 
 class FailingOcr(FakeOcr):
@@ -142,6 +150,56 @@ async def test_later_files_cannot_overwrite_failed_in_progress_state(tmp_path):
     assert len(deletes) == 2
 
 
+@pytest.mark.asyncio
+async def test_failed_current_file_does_not_block_unrelated_deletes(tmp_path):
+    failed = tmp_path / "a.png"
+    failed.write_bytes(b"image-bytes")
+    source = LocalDocumentsSource(
+        tmp_path,
+        extensions=(".png",),
+        ocr_mode="always",
+        ocr_engine=FailingOcr(),
+        failure_mode="best_effort",
+        checkpoint_interval=1,
+        stream_names=("documents",),
+    )
+    stream = (await source.discover())[0]
+    parser = source._parser_fingerprint()
+    state = {
+        "parser_fingerprint": parser,
+        "files": {
+            "b.png": {
+                "sha256": "b" * 64,
+                "element_count": 2,
+                "parser_fingerprint": parser,
+            }
+        },
+        "in_progress": {
+            "relative_path": "a.png",
+            "sha256": hashlib.sha256(b"image-bytes").hexdigest(),
+            "next_index": 2,
+            "parser_fingerprint": parser,
+        },
+    }
+
+    first = [item async for item in source.read(stream, state)]
+    deletes = [
+        item
+        for item in first
+        if isinstance(item, RecordMessage) and item.envelope.operation is Operation.DELETE
+    ]
+    final = [item for item in first if isinstance(item, StateMessage)][-1].state
+
+    assert len(deletes) == 2
+    assert "b.png" not in final["files"]
+    assert final["in_progress"]["relative_path"] == "a.png"
+    repeated = [item async for item in source.read(stream, final)]
+    assert not any(
+        isinstance(item, RecordMessage) and item.envelope.operation is Operation.DELETE
+        for item in repeated
+    )
+
+
 class RecordingOcr(FakeOcr):
     def __init__(self) -> None:
         self.calls = 0
@@ -188,13 +246,14 @@ class FakeSplitter:
     def __init__(self, prefix: str = "split") -> None:
         self.prefix = prefix
         self.calls = 0
+        self.closes = 0
 
     async def split(self, element: DocumentElement):
         self.calls += 1
         return (SplitChunk(f"{self.prefix}:{element.text}"),)
 
     async def close(self):
-        return None
+        self.closes += 1
 
 
 @pytest.mark.asyncio
@@ -216,6 +275,19 @@ async def test_custom_splitter_runs_for_text_but_never_tables(tmp_path):
         isinstance(item, DocumentElement) and item.text == "split:hello" for item in payloads
     )
     assert any(isinstance(item, TableBatch) for item in payloads)
+
+
+@pytest.mark.asyncio
+async def test_source_closes_injected_components_once(tmp_path):
+    path = tmp_path / "notes.txt"
+    path.write_text("hello", encoding="utf-8")
+    splitter = FakeSplitter()
+    source = LocalDocumentsSource(path, document_splitter=splitter)
+
+    await source.close()
+    await source.close()
+
+    assert splitter.closes == 1
 
 
 class NondeterministicSplitter(FakeSplitter):
@@ -266,6 +338,41 @@ async def test_nondeterministic_split_manifest_is_reused_on_resume(tmp_path):
     assert second_splitter.calls == 0
     assert [item.envelope.payload.text for item in resumed_records] == ["first-b"]
     assert all(item.envelope.operation is Operation.UPSERT for item in resumed_records)
+
+
+@pytest.mark.asyncio
+async def test_nondeterministic_restore_fails_when_manifest_is_missing(tmp_path):
+    path = tmp_path / "notes.txt"
+    path.write_text("hello", encoding="utf-8")
+    cache = SQLiteExtractionCache(tmp_path / "restore.db")
+    source = LocalDocumentsSource(
+        path,
+        document_splitter=NondeterministicSplitter("stable"),
+        extraction_cache=cache,
+        checkpoint_interval=1,
+        stream_names=("notes",),
+    )
+    stream = (await source.discover())[0]
+    initial = [item async for item in source.read(stream)]
+    final = [item for item in initial if isinstance(item, StateMessage)][-1].state
+    manifest_key = final["files"]["notes.txt"]["manifest_cache_key"]
+
+    path.unlink()
+    deletion = source.read(stream, final)
+    checkpoint = None
+    async for message in deletion:
+        if isinstance(message, StateMessage) and message.state.get("in_progress", {}).get(
+            "tombstone_next_index"
+        ):
+            checkpoint = message.state
+            break
+    await deletion.aclose()
+    assert checkpoint is not None
+
+    await cache.delete(manifest_key)
+    path.write_text("hello", encoding="utf-8")
+    with pytest.raises(ConfigurationError, match="manifest is unavailable"):
+        [item async for item in source.read(stream, checkpoint)]
 
 
 class FakeTableExtractor:

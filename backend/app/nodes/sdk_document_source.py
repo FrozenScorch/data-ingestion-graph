@@ -69,6 +69,10 @@ class SDKDocumentSourceNode(BaseNode):
         return "off"
 
     @property
+    def studio_ocr_modes(self) -> tuple[str, ...]:
+        return ("off", "auto", "always")
+
+    @property
     def implementation(self) -> str:
         return "sdk-adapter"
 
@@ -127,7 +131,10 @@ class SDKDocumentSourceNode(BaseNode):
                 ManifestFieldProjection(
                     source_field="ocr_mode",
                     target_field="ocr_mode",
-                    overrides={"default": self.studio_default_ocr_mode},
+                    overrides={
+                        "default": self.studio_default_ocr_mode,
+                        "enum": list(self.studio_ocr_modes),
+                    },
                 ),
                 ManifestFieldProjection(
                     source_field="table_mode",
@@ -225,6 +232,8 @@ class SDKDocumentSourceNode(BaseNode):
                 "Studio supports table_mode 'off' or 'native'; local and vision adapters "
                 "must be injected through the SDK"
             )
+        if ocr_mode not in self.studio_ocr_modes:
+            return self._failure("Document OCR mode is not supported by this Studio node")
         if not 1 <= max_output_items <= MAX_OUTPUT_ITEMS:
             return self._failure(f"max_output_items must be between 1 and {MAX_OUTPUT_ITEMS}")
         if not 1024 <= max_output_bytes <= MAX_OUTPUT_BYTES:
@@ -456,6 +465,10 @@ class SDKOCRDocumentSourceNode(SDKDocumentSourceNode):
     @property
     def studio_default_ocr_mode(self) -> str:
         return "auto"
+
+    @property
+    def studio_ocr_modes(self) -> tuple[str, ...]:
+        return ("auto", "always")
 
 
 def register() -> None:

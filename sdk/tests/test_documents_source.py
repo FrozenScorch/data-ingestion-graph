@@ -318,7 +318,7 @@ async def test_reappearing_file_restores_rows_after_partial_deletion(tmp_path: P
 
 
 @pytest.mark.asyncio
-async def test_unrelated_deletion_waits_for_saved_in_progress_file(tmp_path: Path):
+async def test_unrelated_deletion_preserves_saved_in_progress_file(tmp_path: Path):
     current = tmp_path / "a.txt"
     current.write_text("many words " * 100, encoding="utf-8")
     source = LocalDocumentsSource(
@@ -351,8 +351,8 @@ async def test_unrelated_deletion_waits_for_saved_in_progress_file(tmp_path: Pat
     resumed_final = states(resumed)[-1].state
 
     assert "in_progress" not in resumed_final
-    assert "b.txt" in resumed_final["files"]
-    deleted = records(await collect(source, stream, resumed_final))
+    assert "b.txt" not in resumed_final["files"]
+    deleted = [item for item in records(resumed) if item.envelope.operation is Operation.DELETE]
     assert len(deleted) == 2
     assert all(item.envelope.operation is Operation.DELETE for item in deleted)
 

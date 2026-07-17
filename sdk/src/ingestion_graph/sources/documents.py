@@ -78,6 +78,7 @@ SUPPORTED_EXTENSIONS = (
     ".xlsx",
 )
 OCR_IMAGE_EXTENSIONS = (".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp")
+ALL_DOCUMENT_EXTENSIONS = SUPPORTED_EXTENSIONS + OCR_IMAGE_EXTENSIONS
 PARSER_VERSION = "2"
 
 
@@ -147,7 +148,7 @@ class LocalDocumentsSource(Source):
         normalized_extensions = tuple(_normalize_extension(item) for item in extensions)
         if not normalized_extensions:
             raise ConfigurationError("Document extensions must not be empty")
-        supported = set(SUPPORTED_EXTENSIONS) | set(OCR_IMAGE_EXTENSIONS)
+        supported = set(ALL_DOCUMENT_EXTENSIONS)
         unsupported = sorted(set(normalized_extensions) - supported)
         if unsupported:
             raise ConfigurationError(f"Unsupported document extensions: {', '.join(unsupported)}")
@@ -253,6 +254,10 @@ class LocalDocumentsSource(Source):
                 raise ConfigurationError(
                     "Nondeterministic document components require a persistent extraction cache"
                 )
+        self._runtime_ocr_engine: Any = None
+        self._runtime_page_renderer: Any = None
+        self._runtime_table_extractor: Any = None
+        self._closed = False
         self._streams: dict[str, Path] = {}
 
     @classmethod
@@ -272,7 +277,7 @@ class LocalDocumentsSource(Source):
                     "recursive": {"type": "boolean", "default": True},
                     "extensions": {
                         "type": "array",
-                        "items": {"type": "string", "enum": list(SUPPORTED_EXTENSIONS)},
+                        "items": {"type": "string", "enum": list(ALL_DOCUMENT_EXTENSIONS)},
                         "default": list(SUPPORTED_EXTENSIONS),
                     },
                     "checkpoint_interval": {
@@ -433,13 +438,9 @@ class LocalDocumentsSource(Source):
         progress_path = (
             pending_in_progress.get("relative_path") if pending_in_progress is not None else None
         )
-        ordered_removed_paths = (
-            []
-            if progress_path in current_paths
-            else sorted(
-                removed_paths,
-                key=lambda item: (0 if item == progress_path else 1, item),
-            )
+        ordered_removed_paths = sorted(
+            removed_paths,
+            key=lambda item: (0 if item == progress_path else 1, item),
         )
         for relative_path in ordered_removed_paths:
             prior = files_state.get(relative_path)
@@ -459,6 +460,9 @@ class LocalDocumentsSource(Source):
                     "parser_fingerprint": parser_fingerprint,
                     "tombstone_next_index": 0,
                 }
+                for key in ("manifest_cache_key", "manifest_sha256"):
+                    if prior.get(key) is not None:
+                        pending_in_progress[key] = prior[key]
             tombstone_start = (
                 int(pending_in_progress.get("tombstone_next_index", 0))
                 if pending_in_progress is not None
@@ -539,8 +543,15 @@ class LocalDocumentsSource(Source):
                         in_progress.get("manifest_cache_key")
                         if isinstance(in_progress, Mapping)
                         and in_progress.get("relative_path") == relative_path
-                        and resume_index > 0
                         else None
+                    )
+                    requires_cached_manifest = bool(
+                        requires_manifest
+                        and isinstance(in_progress, Mapping)
+                        and in_progress.get("relative_path") == relative_path
+                        and (
+                            resume_index > 0 or in_progress.get("tombstone_next_index") is not None
+                        )
                     )
                     if requires_manifest:
                         if self.extraction_cache is None or not getattr(
@@ -576,13 +587,13 @@ class LocalDocumentsSource(Source):
                                     raise ValueError("manifest hash mismatch")
                                 elements = _deserialize_extraction_manifest(cached_manifest)
                             except (TypeError, ValueError, json.JSONDecodeError) as exc:
-                                if referenced_manifest is not None:
+                                if referenced_manifest is not None or requires_cached_manifest:
                                     raise ConfigurationError(
                                         "In-progress extraction manifest is corrupt"
                                     ) from exc
                                 await self.extraction_cache.delete(manifest_key)
                                 elements = None
-                        elif referenced_manifest is not None:
+                        elif referenced_manifest is not None or requires_cached_manifest:
                             raise ConfigurationError(
                                 "In-progress extraction manifest is unavailable"
                             )
@@ -695,11 +706,19 @@ class LocalDocumentsSource(Source):
                         in_progress=pending_in_progress,
                     ):
                         yield message
-                files_state[relative_path] = {
+                committed_file: dict[str, Any] = {
                     "sha256": fingerprint,
                     "element_count": parsed_count,
                     "parser_fingerprint": parser_fingerprint,
                 }
+                if manifest_key is not None and manifest_sha256 is not None:
+                    committed_file.update(
+                        {
+                            "manifest_cache_key": manifest_key,
+                            "manifest_sha256": manifest_sha256,
+                        }
+                    )
+                files_state[relative_path] = committed_file
                 if (
                     pending_in_progress is not None
                     and pending_in_progress.get("relative_path") == relative_path
@@ -852,13 +871,14 @@ class LocalDocumentsSource(Source):
         """Run opt-in OCR/table/splitter processing against an immutable snapshot."""
         from ingestion_graph.document_ai import table_artifact_to_batches
 
-        ocr_engine = self.ocr_engine
-        renderer = self.page_renderer
-        table_extractor = self.table_extractor
+        ocr_engine = self.ocr_engine or self._runtime_ocr_engine
+        renderer = self.page_renderer or self._runtime_page_renderer
+        table_extractor = self.table_extractor or self._runtime_table_extractor
         if self.ocr_mode != "off" and ocr_engine is None:
             from ingestion_graph.document_ai.tesseract import TesseractOcrEngine
 
             ocr_engine = TesseractOcrEngine()
+            self._runtime_ocr_engine = ocr_engine
         if (
             (self.ocr_mode != "off" or self.table_mode in {"local", "auto"})
             and path.suffix.lower() == ".pdf"
@@ -867,10 +887,12 @@ class LocalDocumentsSource(Source):
             from ingestion_graph.document_ai.rendering import PdfiumPageRenderer
 
             renderer = PdfiumPageRenderer()
+            self._runtime_page_renderer = renderer
         if self.table_mode in {"local", "auto"} and table_extractor is None:
             from ingestion_graph.document_ai.docling_adapter import DoclingTableExtractor
 
             table_extractor = DoclingTableExtractor()
+            self._runtime_table_extractor = table_extractor
 
         async def split_narrative(element: _ParsedElement) -> list[_ParsedElement]:
             if self.document_splitter is None or not isinstance(element.payload, DocumentElement):
@@ -1072,6 +1094,30 @@ class LocalDocumentsSource(Source):
             )
             elements.extend(await process_image(image, page_number, native_text))
         return elements
+
+    async def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        components = (
+            self.ocr_engine,
+            self.page_renderer,
+            self.table_extractor,
+            self.document_splitter,
+            self.vision_extractor,
+            self.extraction_cache,
+            self._runtime_ocr_engine,
+            self._runtime_page_renderer,
+            self._runtime_table_extractor,
+        )
+        closed: set[int] = set()
+        for component in components:
+            if component is None or id(component) in closed:
+                continue
+            closed.add(id(component))
+            close = getattr(component, "close", None)
+            if callable(close):
+                await close()
 
     def _discover_files(self, only_root: Path | None = None) -> list[Path]:
         files: list[Path] = []
@@ -1369,6 +1415,12 @@ def _validate_state(state: Mapping[str, Any] | None) -> dict[str, Any]:
             "element_count": raw_file["element_count"],
             "parser_fingerprint": file_parser,
         }
+        for key in ("manifest_cache_key", "manifest_sha256"):
+            item = raw_file.get(key)
+            if item is not None:
+                if not isinstance(item, str) or not item:
+                    raise ConfigurationError(f"Document checkpoint file {key} must be a string")
+                files[relative_path][key] = item
     in_progress = current.get("in_progress")
     if in_progress is not None:
         if not isinstance(in_progress, Mapping):
