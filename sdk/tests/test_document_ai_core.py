@@ -105,6 +105,12 @@ def test_table_artifact_json_round_trip_preserves_engine_and_warnings() -> None:
 def test_table_artifact_rejects_unsafe_grid_size() -> None:
     import pytest
 
+    with pytest.raises(ValueError, match="dimension exceeds"):
+        TableArtifact("too-many-rows", 1, None, (), 1_000_000_000, 0)
+    with pytest.raises(ValueError, match="dimension exceeds"):
+        TableArtifact("too-many-columns", 1, None, (), 0, 1_000_000_000)
+    with pytest.raises(ValueError, match="both be zero or both be positive"):
+        TableArtifact("asymmetric-empty", 1, None, (), 1, 0)
     with pytest.raises(ValueError, match="safety limit"):
         TableArtifact("oversized", 1, None, (), 1001, 1000)
 

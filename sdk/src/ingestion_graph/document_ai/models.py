@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from typing import Any, TypeAlias
 
 JSONValue: TypeAlias = None | bool | int | float | str | list["JSONValue"] | dict[str, "JSONValue"]
+MAX_TABLE_DIMENSION = 10_000
 MAX_TABLE_GRID_CELLS = 1_000_000
 MAX_TABLE_CELLS = 250_000
 
@@ -147,6 +148,10 @@ class TableArtifact:
     def __post_init__(self) -> None:
         if not self.table_id or self.row_count < 0 or self.column_count < 0:
             raise ValueError("TableArtifact identity and dimensions are invalid")
+        if self.row_count > MAX_TABLE_DIMENSION or self.column_count > MAX_TABLE_DIMENSION:
+            raise ValueError("TableArtifact dimension exceeds the safety limit")
+        if (self.row_count == 0) != (self.column_count == 0):
+            raise ValueError("TableArtifact dimensions must both be zero or both be positive")
         if self.row_count * self.column_count > MAX_TABLE_GRID_CELLS:
             raise ValueError("TableArtifact grid exceeds the safety limit")
         if len(self.cells) > MAX_TABLE_CELLS:
