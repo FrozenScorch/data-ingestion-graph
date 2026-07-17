@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 
 import pytest
@@ -68,6 +69,95 @@ def test_manifest_advertises_opt_in_images_but_keeps_legacy_default():
 
     assert ".png" in extensions["items"]["enum"]
     assert ".png" not in extensions["default"]
+
+
+@pytest.mark.asyncio
+async def test_pdf_page_concurrency_is_bounded_and_output_order_is_stable(tmp_path, monkeypatch):
+    from ingestion_graph.sources import documents
+
+    class FakePage:
+        def __init__(self, page_number: int) -> None:
+            self.page_number = page_number
+
+        def extract_text(self) -> str:
+            return f"native-{self.page_number}"
+
+    class FakeReader:
+        def __init__(self, _path) -> None:
+            self.pages = [FakePage(index) for index in range(1, 5)]
+
+    class TrackingRenderer:
+        descriptor = ComponentDescriptor("tracking-renderer", "1", deterministic=True)
+
+        def __init__(self) -> None:
+            self.active = 0
+            self.max_active = 0
+
+        async def render(self, _pdf: bytes, *, page_number: int, dpi: int) -> bytes:
+            self.active += 1
+            self.max_active = max(self.max_active, self.active)
+            try:
+                await asyncio.sleep(0.01 * (5 - page_number))
+                return f"image-{page_number}".encode()
+            finally:
+                self.active -= 1
+
+        async def close(self) -> None:
+            return None
+
+    class PageOcr(FakeOcr):
+        async def recognize(self, image: bytes, *, language: str = "eng") -> OcrResult:
+            return OcrResult(image.decode(), confidence=1.0)
+
+    monkeypatch.setattr(documents, "PdfReader", FakeReader)
+    path = tmp_path / "pages.pdf"
+    path.write_bytes(b"snapshot-pdf")
+    renderer = TrackingRenderer()
+    source = LocalDocumentsSource(
+        path,
+        ocr_mode="always",
+        ocr_engine=PageOcr(),
+        page_renderer=renderer,
+        max_page_concurrency=2,
+    )
+
+    elements = await source._parse_file_with_document_ai(path)
+
+    assert renderer.max_active == 2
+    assert [element.payload.page_number for element in elements] == [1, 2, 3, 4]
+    assert [element.payload.text for element in elements] == [
+        "image-1",
+        "image-2",
+        "image-3",
+        "image-4",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_page_timeout_covers_splitter_work(tmp_path):
+    class SlowSplitter:
+        descriptor = ComponentDescriptor("slow-splitter", "1", deterministic=True)
+
+        async def split(self, _element: DocumentElement):
+            await asyncio.sleep(1)
+            return (SplitChunk("late"),)
+
+        async def close(self) -> None:
+            return None
+
+    path = tmp_path / "scan.png"
+    path.write_bytes(b"image-bytes")
+    source = LocalDocumentsSource(
+        path,
+        extensions=(".png",),
+        ocr_mode="always",
+        ocr_engine=FakeOcr(),
+        document_splitter=SlowSplitter(),
+        page_timeout_seconds=0.01,
+    )
+
+    with pytest.raises(TimeoutError):
+        await source._parse_file_with_document_ai(path)
 
 
 class FailingOcr(FakeOcr):
@@ -338,6 +428,48 @@ async def test_nondeterministic_split_manifest_is_reused_on_resume(tmp_path):
     assert second_splitter.calls == 0
     assert [item.envelope.payload.text for item in resumed_records] == ["first-b"]
     assert all(item.envelope.operation is Operation.UPSERT for item in resumed_records)
+
+
+@pytest.mark.asyncio
+async def test_changed_file_does_not_reuse_nondeterministic_in_progress_manifest(tmp_path):
+    path = tmp_path / "notes.txt"
+    path.write_text("first content", encoding="utf-8")
+    cache_path = tmp_path / "changed-manifest.db"
+    first_source = LocalDocumentsSource(
+        path,
+        document_splitter=NondeterministicSplitter("first"),
+        extraction_cache=SQLiteExtractionCache(cache_path),
+        checkpoint_interval=1,
+        stream_names=("notes",),
+    )
+    stream = (await first_source.discover())[0]
+    initial = [item async for item in first_source.read(stream)]
+    checkpoint = next(
+        item.state
+        for item in initial
+        if isinstance(item, StateMessage)
+        and item.state.get("in_progress", {}).get("next_index") == 1
+    )
+
+    path.write_text("changed content", encoding="utf-8")
+    changed_splitter = NondeterministicSplitter("changed")
+    changed_source = LocalDocumentsSource(
+        path,
+        document_splitter=changed_splitter,
+        extraction_cache=SQLiteExtractionCache(cache_path),
+        checkpoint_interval=1,
+        stream_names=("notes",),
+    )
+    resumed = [item async for item in changed_source.read(stream, checkpoint)]
+    resumed_records = [item for item in resumed if isinstance(item, RecordMessage)]
+
+    assert changed_splitter.calls == 1
+    assert [item.envelope.payload.text for item in resumed_records] == [
+        "changed-a",
+        "changed-b",
+    ]
+    final = [item for item in resumed if isinstance(item, StateMessage)][-1].state
+    assert final["files"]["notes.txt"]["sha256"] == hashlib.sha256(b"changed content").hexdigest()
 
 
 @pytest.mark.asyncio

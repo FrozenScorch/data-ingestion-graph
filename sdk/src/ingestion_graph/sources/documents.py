@@ -539,16 +539,21 @@ class LocalDocumentsSource(Source):
                 try:
                     elements: list[_ParsedElement] | None = None
                     requires_manifest = self._requires_replay_manifest()
+                    checkpoint_matches_snapshot = bool(
+                        isinstance(in_progress, Mapping)
+                        and in_progress.get("relative_path") == relative_path
+                        and in_progress.get("sha256") == fingerprint
+                        and in_progress.get("parser_fingerprint") == parser_fingerprint
+                    )
                     referenced_manifest = (
                         in_progress.get("manifest_cache_key")
-                        if isinstance(in_progress, Mapping)
-                        and in_progress.get("relative_path") == relative_path
+                        if checkpoint_matches_snapshot and isinstance(in_progress, Mapping)
                         else None
                     )
                     requires_cached_manifest = bool(
                         requires_manifest
+                        and checkpoint_matches_snapshot
                         and isinstance(in_progress, Mapping)
-                        and in_progress.get("relative_path") == relative_path
                         and (
                             resume_index > 0 or in_progress.get("tombstone_next_index") is not None
                         )
@@ -579,7 +584,8 @@ class LocalDocumentsSource(Source):
                             try:
                                 expected_hash = (
                                     in_progress.get("manifest_sha256")
-                                    if isinstance(in_progress, Mapping)
+                                    if checkpoint_matches_snapshot
+                                    and isinstance(in_progress, Mapping)
                                     else None
                                 )
                                 manifest_sha256 = hashlib.sha256(cached_manifest).hexdigest()
@@ -961,9 +967,9 @@ class LocalDocumentsSource(Source):
                         await self.extraction_cache.delete(cache_key)
                         cached = None
                 if cached is None:
-                    result = await asyncio.wait_for(
-                        ocr_engine.recognize(image, language="+".join(self.ocr_languages)),
-                        timeout=self.page_timeout_seconds,
+                    result = await ocr_engine.recognize(
+                        image,
+                        language="+".join(self.ocr_languages),
                     )
                     if self.extraction_cache is not None and image:
                         await self.extraction_cache.put(
@@ -1056,7 +1062,11 @@ class LocalDocumentsSource(Source):
             return results
 
         if path.suffix.lower() in OCR_IMAGE_EXTENSIONS:
-            return await process_image(path.read_bytes(), 1)
+            image = await asyncio.to_thread(path.read_bytes)
+            return await asyncio.wait_for(
+                process_image(image, 1),
+                timeout=self.page_timeout_seconds,
+            )
         if path.suffix.lower() != ".pdf":
             parsed = list(
                 _parse_file(
@@ -1074,26 +1084,56 @@ class LocalDocumentsSource(Source):
                 "PDF support requires: pip install 'ingestion-graph[documents]'"
             )
         reader = PdfReader(str(path))
-        elements: list[_ParsedElement] = []
-        for page_number, page in enumerate(reader.pages, start=1):
-            native_text = page.extract_text() or ""
-            quality = evaluate_text_quality(native_text)
-            needs_render = (
-                self.ocr_mode == "always"
-                or (self.ocr_mode == "auto" and quality.score < self.min_native_text_quality)
-                or self.table_mode in {"local", "auto"}
-            )
-            if not needs_render:
-                elements.extend(await process_image(b"", page_number, native_text))
-                continue
-            if renderer is None:
-                raise ConfigurationError("PDF OCR/table processing requires a page renderer")
-            image = await asyncio.wait_for(
-                renderer.render(path.read_bytes(), page_number=page_number, dpi=self.render_dpi),
-                timeout=self.page_timeout_seconds,
-            )
-            elements.extend(await process_image(image, page_number, native_text))
-        return elements
+        page_inputs = [
+            (page_number, page.extract_text() or "")
+            for page_number, page in enumerate(reader.pages, start=1)
+        ]
+        pdf_bytes = await asyncio.to_thread(path.read_bytes)
+        semaphore = asyncio.Semaphore(self.max_page_concurrency)
+
+        async def process_pdf_page(page_number: int, native_text: str) -> list[_ParsedElement]:
+            async with semaphore:
+
+                async def run_page() -> list[_ParsedElement]:
+                    quality = evaluate_text_quality(native_text)
+                    needs_render = (
+                        self.ocr_mode == "always"
+                        or (
+                            self.ocr_mode == "auto" and quality.score < self.min_native_text_quality
+                        )
+                        or self.table_mode in {"local", "auto"}
+                    )
+                    if not needs_render:
+                        return await process_image(b"", page_number, native_text)
+                    if renderer is None:
+                        raise ConfigurationError(
+                            "PDF OCR/table processing requires a page renderer"
+                        )
+                    image = await renderer.render(
+                        pdf_bytes,
+                        page_number=page_number,
+                        dpi=self.render_dpi,
+                    )
+                    return await process_image(image, page_number, native_text)
+
+                return await asyncio.wait_for(
+                    run_page(),
+                    timeout=self.page_timeout_seconds,
+                )
+
+        tasks = [
+            asyncio.create_task(process_pdf_page(page_number, native_text))
+            for page_number, native_text in page_inputs
+        ]
+        try:
+            page_elements = await asyncio.gather(*tasks)
+        except BaseException:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
+        return [element for page in page_elements for element in page]
 
     async def close(self) -> None:
         if self._closed:
