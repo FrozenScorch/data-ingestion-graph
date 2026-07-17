@@ -358,6 +358,142 @@ async def test_unrelated_deletion_preserves_saved_in_progress_file(tmp_path: Pat
 
 
 @pytest.mark.asyncio
+async def test_changed_file_shrink_preserves_in_progress_only_reconciliation(tmp_path: Path):
+    path = tmp_path / "shrinking.txt"
+    old_bytes = b"a" * (256 * 5)
+    path.write_bytes(b"b" * (256 * 2))
+    source = LocalDocumentsSource(
+        path,
+        stream_names=["documents"],
+        checkpoint_interval=1,
+        text_chunk_chars=256,
+    )
+    stream = (await source.discover())[0]
+    parser = source._parser_fingerprint()
+    state = {
+        "parser_fingerprint": parser,
+        "files": {},
+        "in_progress": {
+            "relative_path": "shrinking.txt",
+            "sha256": hashlib.sha256(old_bytes).hexdigest(),
+            "next_index": 5,
+            "parser_fingerprint": parser,
+        },
+    }
+
+    first_read = source.read(stream, state)
+    checkpoint = None
+    async for message in first_read:
+        if (
+            isinstance(message, StateMessage)
+            and message.state.get("in_progress", {}).get("next_index") == 1
+        ):
+            checkpoint = message.state
+            break
+    await first_read.aclose()
+
+    assert checkpoint is not None
+    assert checkpoint["in_progress"]["reconcile_element_count"] == 5
+    resumed = await collect(source, stream, checkpoint)
+    resumed_records = records(resumed)
+    assert [item.envelope.operation for item in resumed_records] == [
+        Operation.UPSERT,
+        Operation.DELETE,
+        Operation.DELETE,
+        Operation.DELETE,
+    ]
+    assert states(resumed)[-1].state["files"]["shrinking.txt"]["element_count"] == 2
+
+
+@pytest.mark.asyncio
+async def test_changed_committed_file_resumes_tail_tombstones(tmp_path: Path):
+    path = tmp_path / "committed.txt"
+    old_bytes = b"a" * (256 * 5)
+    path.write_bytes(b"b" * (256 * 2))
+    source = LocalDocumentsSource(
+        path,
+        stream_names=["documents"],
+        checkpoint_interval=1,
+        text_chunk_chars=256,
+    )
+    stream = (await source.discover())[0]
+    parser = source._parser_fingerprint()
+    state = {
+        "parser_fingerprint": parser,
+        "files": {
+            "committed.txt": {
+                "sha256": hashlib.sha256(old_bytes).hexdigest(),
+                "element_count": 5,
+                "parser_fingerprint": parser,
+            }
+        },
+    }
+
+    first_read = source.read(stream, state)
+    checkpoint = None
+    async for message in first_read:
+        progress = message.state.get("in_progress", {}) if isinstance(message, StateMessage) else {}
+        if progress.get("tombstone_next_index") == 3:
+            checkpoint = message.state
+            break
+    await first_read.aclose()
+
+    assert checkpoint is not None
+    assert checkpoint["in_progress"]["next_index"] == 2
+    assert checkpoint["in_progress"]["reconcile_element_count"] == 5
+    resumed = await collect(source, stream, checkpoint)
+    resumed_records = records(resumed)
+    assert [item.envelope.operation for item in resumed_records] == [
+        Operation.DELETE,
+        Operation.DELETE,
+    ]
+    assert states(resumed)[-1].state["files"]["committed.txt"]["element_count"] == 2
+
+
+@pytest.mark.asyncio
+async def test_removed_file_uses_larger_committed_count_for_tombstone_checkpoint(tmp_path: Path):
+    source = LocalDocumentsSource(
+        tmp_path,
+        stream_names=["documents"],
+        checkpoint_interval=1,
+    )
+    stream = (await source.discover())[0]
+    parser = source._parser_fingerprint()
+    state = {
+        "parser_fingerprint": parser,
+        "files": {
+            "removed.txt": {
+                "sha256": "a" * 64,
+                "element_count": 10,
+                "parser_fingerprint": parser,
+            }
+        },
+        "in_progress": {
+            "relative_path": "removed.txt",
+            "sha256": "a" * 64,
+            "next_index": 2,
+            "parser_fingerprint": parser,
+        },
+    }
+
+    first_read = source.read(stream, state)
+    checkpoint = None
+    async for message in first_read:
+        if isinstance(message, StateMessage) and message.state.get("in_progress", {}).get(
+            "tombstone_next_index"
+        ):
+            checkpoint = message.state
+            break
+    await first_read.aclose()
+
+    assert checkpoint is not None
+    assert checkpoint["in_progress"]["next_index"] == 10
+    resumed = await collect(source, stream, checkpoint)
+    assert len(records(resumed)) == 9
+    assert states(resumed)[-1].state["files"] == {}
+
+
+@pytest.mark.asyncio
 async def test_csv_duplicate_headers_and_excel_temporal_values_are_json_safe(tmp_path: Path):
     (tmp_path / "people.csv").write_text("name,name\nAda,Grace\n", encoding="utf-8")
     if documents.load_workbook is None:

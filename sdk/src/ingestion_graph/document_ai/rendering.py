@@ -6,6 +6,7 @@ import asyncio
 import importlib
 import math
 import sys
+import warnings
 from collections.abc import Callable
 from io import BytesIO
 from types import ModuleType
@@ -16,6 +17,62 @@ from ingestion_graph.errors import ConfigurationError
 
 ModuleLoader = Callable[[str], ModuleType]
 ProcessFactory = Callable[..., Any]
+MAX_IMAGE_PIXELS = 50_000_000
+MAX_IMAGE_DIMENSION = 32_768
+MAX_IMAGE_FRAMES = 256
+_IMAGE_FORMATS = {
+    ".jpeg": "JPEG",
+    ".jpg": "JPEG",
+    ".png": "PNG",
+    ".tif": "TIFF",
+    ".tiff": "TIFF",
+    ".webp": "WEBP",
+}
+
+
+def validate_image_payload(
+    source: bytes,
+    *,
+    extension: str,
+    max_pixels: int = MAX_IMAGE_PIXELS,
+    max_dimension: int = MAX_IMAGE_DIMENSION,
+    max_frames: int = MAX_IMAGE_FRAMES,
+) -> None:
+    """Validate encoded image geometry before an OCR process decodes it."""
+    if not source:
+        raise ConfigurationError("Image input must not be empty")
+    expected_format = _IMAGE_FORMATS.get(extension.lower())
+    if expected_format is None:
+        raise ConfigurationError("Image input has an unsupported extension")
+    if max_pixels < 1 or max_dimension < 1 or max_frames < 1:
+        raise ValueError("Image safety limits must be positive")
+    try:
+        image_module = importlib.import_module("PIL.Image")
+    except (ImportError, ModuleNotFoundError) as exc:
+        raise ConfigurationError(
+            "Image validation requires: pip install 'ingestion-graph[ocr]'"
+        ) from exc
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", image_module.DecompressionBombWarning)
+            with image_module.open(BytesIO(source), formats=(expected_format,)) as image:
+                frame_count = int(getattr(image, "n_frames", 1))
+                if frame_count < 1 or frame_count > max_frames:
+                    raise ConfigurationError("Image input exceeds the frame-count limit")
+                for frame_index in range(frame_count):
+                    if frame_index:
+                        image.seek(frame_index)
+                    width, height = image.size
+                    if width < 1 or height < 1:
+                        raise ConfigurationError("Image input dimensions are invalid")
+                    if width > max_dimension or height > max_dimension:
+                        raise ConfigurationError("Image input exceeds the dimension limit")
+                    if width * height > max_pixels:
+                        raise ConfigurationError("Image input exceeds the pixel limit")
+    except ConfigurationError:
+        raise
+    except Exception as exc:
+        raise ConfigurationError("Image input is invalid or exceeds safety limits") from exc
 
 
 class PdfiumPageRenderer:
@@ -185,4 +242,4 @@ async def _terminate_process(process: Any) -> None:
         await process.wait()
 
 
-__all__ = ["PdfiumPageRenderer", "Pypdfium2PageRenderer"]
+__all__ = ["PdfiumPageRenderer", "Pypdfium2PageRenderer", "validate_image_payload"]

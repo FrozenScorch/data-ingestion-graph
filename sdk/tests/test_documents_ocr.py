@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 
 import pytest
@@ -20,6 +21,10 @@ from ingestion_graph.messages import LogMessage, RecordMessage, StateMessage
 from ingestion_graph.models import DocumentElement, Operation, TableBatch
 from ingestion_graph.sources.documents import LocalDocumentsSource
 
+VALID_PNG = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+)
+
 
 class FakeOcr:
     descriptor = ComponentDescriptor("fake-ocr", "1", deterministic=True)
@@ -30,7 +35,7 @@ class FakeOcr:
         return CheckResult(True)
 
     async def recognize(self, image: bytes, *, language: str = "eng") -> OcrResult:
-        assert image == b"image-bytes"
+        assert image == VALID_PNG
         return OcrResult("recognized table text", confidence=0.91)
 
     async def close(self):
@@ -40,7 +45,7 @@ class FakeOcr:
 @pytest.mark.asyncio
 async def test_explicit_image_ocr_uses_snapshot_and_emits_provenance(tmp_path):
     path = tmp_path / "scan.png"
-    path.write_bytes(b"image-bytes")
+    path.write_bytes(VALID_PNG)
     source = LocalDocumentsSource(
         path,
         extensions=(".png",),
@@ -123,7 +128,9 @@ async def test_pdf_page_concurrency_is_bounded_and_output_order_is_stable(tmp_pa
 
     elements = await source._parse_file_with_document_ai(path)
 
-    assert renderer.max_active == 2
+    # Shared component instances are serialized because protocols do not require reentrancy;
+    # the page window still bounds all queued work to max_page_concurrency.
+    assert renderer.max_active == 1
     assert [element.payload.page_number for element in elements] == [1, 2, 3, 4]
     assert [element.payload.text for element in elements] == [
         "image-1",
@@ -146,7 +153,7 @@ async def test_page_timeout_covers_splitter_work(tmp_path):
             return None
 
     path = tmp_path / "scan.png"
-    path.write_bytes(b"image-bytes")
+    path.write_bytes(VALID_PNG)
     source = LocalDocumentsSource(
         path,
         extensions=(".png",),
@@ -160,6 +167,162 @@ async def test_page_timeout_covers_splitter_work(tmp_path):
         await source._parse_file_with_document_ai(path)
 
 
+@pytest.mark.asyncio
+async def test_oversized_encoded_image_is_rejected_before_ocr(tmp_path):
+    import struct
+    import zlib
+
+    def chunk(name: bytes, value: bytes) -> bytes:
+        return (
+            struct.pack(">I", len(value))
+            + name
+            + value
+            + struct.pack(">I", zlib.crc32(name + value) & 0xFFFFFFFF)
+        )
+
+    oversized = (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", struct.pack(">IIBBBBB", 100_000, 100_000, 8, 2, 0, 0, 0))
+        + chunk(b"IEND", b"")
+    )
+    path = tmp_path / "oversized.png"
+    path.write_bytes(oversized)
+    engine = RecordingOcr()
+    source = LocalDocumentsSource(
+        path,
+        extensions=(".png",),
+        ocr_mode="always",
+        ocr_engine=engine,
+    )
+
+    with pytest.raises(ConfigurationError, match="invalid or exceeds safety limits"):
+        await source._parse_file_with_document_ai(path)
+    assert engine.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_pdf_vision_receives_one_nonempty_rendered_page(tmp_path, monkeypatch):
+    from ingestion_graph.sources import documents
+
+    class FakePage:
+        def extract_text(self) -> str:
+            return "clean native PDF text"
+
+    class FakeReader:
+        def __init__(self, _path) -> None:
+            self.pages = [FakePage()]
+
+    class Renderer:
+        descriptor = ComponentDescriptor("vision-renderer", "1", deterministic=True)
+
+        async def render(self, _pdf: bytes, *, page_number: int, dpi: int) -> bytes:
+            assert page_number == 1
+            return b"bounded-rendered-page"
+
+        async def close(self) -> None:
+            return None
+
+    class Vision:
+        descriptor = ComponentDescriptor("fake-vision", "1", deterministic=True, external=True)
+
+        def __init__(self) -> None:
+            self.images: list[bytes] = []
+
+        async def extract(self, image: bytes, *, schema):
+            self.images.append(image)
+            return {
+                "table_artifacts": [
+                    {
+                        "schema_version": "1",
+                        "table_id": "vision-table",
+                        "page_number": 1,
+                        "row_count": 1,
+                        "column_count": 1,
+                        "cells": [{"row": 0, "column": 0, "text": "value"}],
+                    }
+                ]
+            }
+
+        async def close(self) -> None:
+            return None
+
+    class Allow:
+        async def authorize(self, *, purpose: str, page_number: int | None) -> bool:
+            return purpose == "table" and page_number == 1
+
+    monkeypatch.setattr(documents, "PdfReader", FakeReader)
+    path = tmp_path / "vision.pdf"
+    path.write_bytes(b"snapshot-pdf")
+    vision = Vision()
+    source = LocalDocumentsSource(
+        path,
+        table_mode="vision",
+        page_renderer=Renderer(),
+        vision_extractor=vision,
+        external_processing_policy=Allow(),
+        extraction_cache=SQLiteExtractionCache(tmp_path / "vision.db"),
+    )
+
+    await source._parse_file_with_document_ai(path)
+
+    assert vision.images == [b"bounded-rendered-page"]
+
+
+@pytest.mark.asyncio
+async def test_invalid_vision_response_retries_once_before_accepting_table(tmp_path):
+    class RetryVision:
+        descriptor = ComponentDescriptor("retry-vision", "1", deterministic=False, external=True)
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def extract(self, _image: bytes, *, schema):
+            self.calls += 1
+            if self.calls == 1:
+                return {"invalid": True}
+            return {
+                "table_artifacts": [
+                    {
+                        "schema_version": "1",
+                        "table_id": "recovered",
+                        "page_number": 1,
+                        "row_count": 2,
+                        "column_count": 1,
+                        "cells": [
+                            {"row": 0, "column": 0, "text": "name", "header_level": 0},
+                            {"row": 1, "column": 0, "text": "value"},
+                        ],
+                    }
+                ]
+            }
+
+        async def close(self) -> None:
+            return None
+
+    class Allow:
+        async def authorize(self, *, purpose: str, page_number: int | None) -> bool:
+            return True
+
+    path = tmp_path / "vision.png"
+    path.write_bytes(VALID_PNG)
+    vision = RetryVision()
+    source = LocalDocumentsSource(
+        path,
+        extensions=(".png",),
+        ocr_mode="always",
+        ocr_engine=FakeOcr(),
+        table_mode="vision",
+        vision_extractor=vision,
+        external_processing_policy=Allow(),
+        extraction_cache=SQLiteExtractionCache(tmp_path / "vision-retry.db"),
+    )
+
+    elements = await source._parse_file_with_document_ai(path)
+
+    assert vision.calls == 2
+    assert any(isinstance(element.payload, TableBatch) for element in elements)
+
+
 class FailingOcr(FakeOcr):
     async def recognize(self, image: bytes, *, language: str = "eng") -> OcrResult:
         raise RuntimeError("transient OCR failure")
@@ -168,7 +331,7 @@ class FailingOcr(FakeOcr):
 @pytest.mark.asyncio
 async def test_best_effort_failure_preserves_prior_records_and_checkpoint(tmp_path):
     path = tmp_path / "scan.png"
-    path.write_bytes(b"image-bytes")
+    path.write_bytes(VALID_PNG)
     source = LocalDocumentsSource(
         path,
         extensions=(".png",),
@@ -201,7 +364,7 @@ async def test_best_effort_failure_preserves_prior_records_and_checkpoint(tmp_pa
 @pytest.mark.asyncio
 async def test_later_files_cannot_overwrite_failed_in_progress_state(tmp_path):
     failed = tmp_path / "a.png"
-    failed.write_bytes(b"image-bytes")
+    failed.write_bytes(VALID_PNG)
     (tmp_path / "b.txt").write_text("many words " * 100, encoding="utf-8")
     source = LocalDocumentsSource(
         tmp_path,
@@ -220,7 +383,7 @@ async def test_later_files_cannot_overwrite_failed_in_progress_state(tmp_path):
         "files": {},
         "in_progress": {
             "relative_path": "a.png",
-            "sha256": hashlib.sha256(b"image-bytes").hexdigest(),
+            "sha256": hashlib.sha256(VALID_PNG).hexdigest(),
             "next_index": 2,
             "parser_fingerprint": parser,
         },
@@ -243,7 +406,7 @@ async def test_later_files_cannot_overwrite_failed_in_progress_state(tmp_path):
 @pytest.mark.asyncio
 async def test_failed_current_file_does_not_block_unrelated_deletes(tmp_path):
     failed = tmp_path / "a.png"
-    failed.write_bytes(b"image-bytes")
+    failed.write_bytes(VALID_PNG)
     source = LocalDocumentsSource(
         tmp_path,
         extensions=(".png",),
@@ -266,7 +429,7 @@ async def test_failed_current_file_does_not_block_unrelated_deletes(tmp_path):
         },
         "in_progress": {
             "relative_path": "a.png",
-            "sha256": hashlib.sha256(b"image-bytes").hexdigest(),
+            "sha256": hashlib.sha256(VALID_PNG).hexdigest(),
             "next_index": 2,
             "parser_fingerprint": parser,
         },
@@ -307,7 +470,7 @@ class RecordingOcr(FakeOcr):
 @pytest.mark.asyncio
 async def test_ocr_cache_hit_preserves_warnings_and_payload(tmp_path):
     path = tmp_path / "scan.png"
-    path.write_bytes(b"image-bytes")
+    path.write_bytes(VALID_PNG)
     engine = RecordingOcr()
     cache = MemoryExtractionCache()
     source = LocalDocumentsSource(
@@ -378,6 +541,34 @@ async def test_source_closes_injected_components_once(tmp_path):
     await source.close()
 
     assert splitter.closes == 1
+
+
+@pytest.mark.asyncio
+async def test_source_attempts_every_close_after_a_component_failure(tmp_path):
+    class FailingClose(FakeOcr):
+        def __init__(self) -> None:
+            self.closes = 0
+
+        async def close(self) -> None:
+            self.closes += 1
+            raise RuntimeError("close failed")
+
+    path = tmp_path / "notes.txt"
+    path.write_text("hello", encoding="utf-8")
+    failing = FailingClose()
+    tracking = FakeSplitter()
+    source = LocalDocumentsSource(
+        path,
+        ocr_engine=failing,
+        document_splitter=tracking,
+    )
+
+    with pytest.raises(RuntimeError, match="close failed"):
+        await source.close()
+    await source.close()
+
+    assert failing.closes == 1
+    assert tracking.closes == 1
 
 
 class NondeterministicSplitter(FakeSplitter):
@@ -507,6 +698,60 @@ async def test_nondeterministic_restore_fails_when_manifest_is_missing(tmp_path)
         [item async for item in source.read(stream, checkpoint)]
 
 
+@pytest.mark.asyncio
+async def test_reappearing_file_after_config_changed_builds_a_new_manifest(tmp_path):
+    class ConfiguredSplitter(NondeterministicSplitter):
+        def __init__(self, prefix: str) -> None:
+            super().__init__(prefix)
+            self.descriptor = ComponentDescriptor(
+                "configured-splitter",
+                "1",
+                {"prefix": prefix},
+                deterministic=False,
+            )
+
+    path = tmp_path / "configured.txt"
+    path.write_text("hello", encoding="utf-8")
+    cache_path = tmp_path / "configured.db"
+    old_source = LocalDocumentsSource(
+        path,
+        document_splitter=ConfiguredSplitter("old"),
+        extraction_cache=SQLiteExtractionCache(cache_path),
+        checkpoint_interval=1,
+        stream_names=("configured",),
+    )
+    stream = (await old_source.discover())[0]
+    initial = [item async for item in old_source.read(stream)]
+    committed = [item for item in initial if isinstance(item, StateMessage)][-1].state
+
+    path.unlink()
+    new_splitter = ConfiguredSplitter("new")
+    new_source = LocalDocumentsSource(
+        path,
+        document_splitter=new_splitter,
+        extraction_cache=SQLiteExtractionCache(cache_path),
+        checkpoint_interval=1,
+        stream_names=("configured",),
+    )
+    deletion = new_source.read(stream, committed)
+    checkpoint = None
+    async for message in deletion:
+        if isinstance(message, StateMessage) and message.state.get("in_progress", {}).get(
+            "tombstone_next_index"
+        ):
+            checkpoint = message.state
+            break
+    await deletion.aclose()
+    assert checkpoint is not None
+
+    path.write_text("hello", encoding="utf-8")
+    restored = [item async for item in new_source.read(stream, checkpoint)]
+    restored_records = [item for item in restored if isinstance(item, RecordMessage)]
+
+    assert new_splitter.calls == 1
+    assert [item.envelope.payload.text for item in restored_records[:2]] == ["new-a", "new-b"]
+
+
 class FakeTableExtractor:
     descriptor = ComponentDescriptor("fake-table", "1", deterministic=True)
 
@@ -533,7 +778,7 @@ class FakeTableExtractor:
 @pytest.mark.parametrize("retain", [False, True])
 async def test_table_artifact_metadata_requires_explicit_retention(tmp_path, retain):
     path = tmp_path / "table.png"
-    path.write_bytes(b"image-bytes")
+    path.write_bytes(VALID_PNG)
     source = LocalDocumentsSource(
         path,
         extensions=(".png",),
@@ -558,7 +803,7 @@ async def test_table_artifact_metadata_requires_explicit_retention(tmp_path, ret
 
 def test_artifact_retention_changes_enhanced_parser_fingerprint(tmp_path):
     path = tmp_path / "table.png"
-    path.write_bytes(b"image-bytes")
+    path.write_bytes(VALID_PNG)
     common = {
         "paths": path,
         "extensions": (".png",),

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import threading
+import time
 from collections.abc import Sequence
 from types import ModuleType
 
@@ -311,3 +313,28 @@ async def test_docling_adapter_never_auto_configures_or_downloads_models() -> No
     extractor = DoclingTableExtractor()
     with pytest.raises(ConfigurationError, match="automatic model downloads are disabled"):
         await extractor.extract(b"image")
+
+
+@pytest.mark.asyncio
+async def test_docling_adapter_serializes_shared_converter_calls() -> None:
+    active = 0
+    max_active = 0
+    guard = threading.Lock()
+
+    class FakeConverter:
+        def convert_bytes(self, _image: bytes) -> object:
+            nonlocal active, max_active
+            with guard:
+                active += 1
+                max_active = max(max_active, active)
+            try:
+                time.sleep(0.02)
+                return {"document": {"tables": []}}
+            finally:
+                with guard:
+                    active -= 1
+
+    extractor = DoclingTableExtractor(converter_factory=FakeConverter)
+    await asyncio.gather(extractor.extract(b"one"), extractor.extract(b"two"))
+
+    assert max_active == 1

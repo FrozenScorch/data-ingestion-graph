@@ -41,8 +41,10 @@ then emitted as the existing `TableBatch` payload. A user-supplied
 without importing Studio or a model provider. Narrative splitters run after
 semantic extraction; `TableBatch` is never sent through a text splitter.
 
-Vision is a bounded, region-level fallback. It is disabled unless explicitly
-configured, and nondeterministic/external components require a persistent
+Vision is a bounded, single-page fallback. Each authorized call receives only
+one rendered PDF page or one explicitly selected image, never a multi-page
+document. Tighter table-region detection and cropping are deferred. Vision is
+disabled unless explicitly configured, and nondeterministic/external components require a persistent
 `ExtractionCache` so interrupted reads cannot regenerate a different element
 sequence. Before the first record is emitted, the SDK persists the complete
 ordered extraction manifest; an interrupted checkpoint references that

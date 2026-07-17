@@ -38,6 +38,7 @@ class DoclingTableExtractor:
         self._converter_factory = converter_factory
         self._converter: object | None = None
         self._converter_lock = asyncio.Lock()
+        self._conversion_lock = asyncio.Lock()
 
     async def extract(
         self, image: bytes, *, page_number: int | None = None
@@ -47,7 +48,8 @@ class DoclingTableExtractor:
         if page_number is not None and page_number < 1:
             raise ValueError("page_number must be positive when provided")
         converter = await self._get_converter()
-        result = await asyncio.to_thread(_convert, converter, image)
+        async with self._conversion_lock:
+            result = await asyncio.to_thread(_convert, converter, image)
         return tuple(_normalize_result(result, image=image, page_number=page_number))
 
     async def _get_converter(self) -> object:
