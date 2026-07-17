@@ -124,7 +124,11 @@ class SDKDocumentSourceNode(BaseNode):
                     target_field="table_batch_rows",
                     overrides={"maximum": 5000},
                 ),
-                ManifestFieldProjection(source_field="ocr_mode", target_field="ocr_mode"),
+                ManifestFieldProjection(
+                    source_field="ocr_mode",
+                    target_field="ocr_mode",
+                    overrides={"default": self.studio_default_ocr_mode},
+                ),
                 ManifestFieldProjection(
                     source_field="table_mode",
                     target_field="table_mode",

@@ -36,7 +36,9 @@ def test_ocr_adapter_is_a_thin_sdk_preset():
     assert node.studio_default_ocr_mode == "auto"
     properties = node.config_schema["properties"]
     assert ".png" in properties["artifact_ids"]["accepted_extensions"]
+    assert properties["ocr_mode"]["default"] == "auto"
     assert properties["table_mode"]["enum"] == ["off", "native"]
+    assert SDKDocumentSourceNode().config_schema["properties"]["ocr_mode"]["default"] == "off"
 
 
 def test_sdk_adapter_metadata_is_visible_to_studio():

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Sequence
 from types import ModuleType
 
@@ -159,6 +160,43 @@ async def test_pdfium_renderer_bounds_encoded_output() -> None:
 
     with pytest.raises(ConfigurationError, match="output-size limit"):
         await renderer.render(b"%PDF-fake", page_number=1, dpi=72)
+
+
+@pytest.mark.asyncio
+async def test_pdfium_renderer_cancellation_terminates_worker() -> None:
+    started = asyncio.Event()
+
+    class FakeProcess:
+        returncode = None
+        terminated = False
+
+        async def communicate(self, source: bytes):
+            started.set()
+            await asyncio.Event().wait()
+
+        def terminate(self):
+            self.terminated = True
+            self.returncode = -15
+
+        def kill(self):
+            self.returncode = -9
+
+        async def wait(self):
+            return self.returncode
+
+    process = FakeProcess()
+
+    async def factory(*args, **kwargs):
+        return process
+
+    renderer = PdfiumPageRenderer(use_subprocess=True, process_factory=factory)
+    task = asyncio.create_task(renderer.render(b"%PDF-fake", page_number=1))
+    await started.wait()
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert process.terminated is True
 
 
 @pytest.mark.asyncio

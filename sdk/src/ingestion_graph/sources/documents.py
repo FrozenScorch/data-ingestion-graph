@@ -445,6 +445,7 @@ class LocalDocumentsSource(Source):
                 max(prior_count, progress_count),
                 files_state,
                 parser_fingerprint,
+                in_progress=pending_in_progress,
             ):
                 yield message
             files_state.pop(relative_path, None)
@@ -641,6 +642,7 @@ class LocalDocumentsSource(Source):
                         files_state,
                         parser_fingerprint,
                         start=parsed_count,
+                        in_progress=pending_in_progress,
                     ):
                         yield message
                 files_state[relative_path] = {
@@ -711,6 +713,7 @@ class LocalDocumentsSource(Source):
         parser_fingerprint: str,
         *,
         start: int = 0,
+        in_progress: Mapping[str, Any] | None = None,
     ) -> AsyncIterator[SourceMessage]:
         emitted = 0
         for index in range(start, count):
@@ -735,7 +738,7 @@ class LocalDocumentsSource(Source):
             if emitted >= self.checkpoint_interval:
                 yield StateMessage(
                     stream_name,
-                    _checkpoint(files_state, parser_fingerprint),
+                    _checkpoint(files_state, parser_fingerprint, in_progress),
                 )
                 emitted = 0
 

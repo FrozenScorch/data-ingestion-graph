@@ -230,6 +230,39 @@ async def test_deleted_in_progress_file_emits_tombstones(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_deleted_in_progress_checkpoint_retains_replay_count(tmp_path: Path):
+    source = LocalDocumentsSource(
+        tmp_path,
+        stream_names=["documents"],
+        checkpoint_interval=1,
+    )
+    stream = (await source.discover())[0]
+    state = {
+        "parser_fingerprint": "prior-parser",
+        "files": {},
+        "in_progress": {
+            "relative_path": "removed.txt",
+            "sha256": "a" * 64,
+            "next_index": 3,
+        },
+    }
+
+    iterator = source.read(stream, state)
+    checkpoint = None
+    async for message in iterator:
+        if isinstance(message, StateMessage) and "in_progress" in message.state:
+            checkpoint = message.state
+            break
+    await iterator.aclose()
+
+    assert checkpoint is not None
+    assert checkpoint["in_progress"]["next_index"] == 3
+    replayed = records(await collect(source, stream, checkpoint))
+    assert len(replayed) == 3
+    assert all(item.envelope.operation is Operation.DELETE for item in replayed)
+
+
+@pytest.mark.asyncio
 async def test_csv_duplicate_headers_and_excel_temporal_values_are_json_safe(tmp_path: Path):
     (tmp_path / "people.csv").write_text("name,name\nAda,Grace\n", encoding="utf-8")
     if documents.load_workbook is None:
