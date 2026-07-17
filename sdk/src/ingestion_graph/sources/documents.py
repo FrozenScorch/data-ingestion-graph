@@ -1407,9 +1407,10 @@ def _validate_state(state: Mapping[str, Any] | None) -> dict[str, Any]:
                 isinstance(tombstone_next_index, bool)
                 or not isinstance(tombstone_next_index, int)
                 or tombstone_next_index < 0
+                or tombstone_next_index > next_index
             ):
                 raise ConfigurationError(
-                    "Document checkpoint in_progress tombstone_next_index must be non-negative"
+                    "Document checkpoint in_progress tombstone_next_index is invalid"
                 )
             in_progress["tombstone_next_index"] = tombstone_next_index
     return {

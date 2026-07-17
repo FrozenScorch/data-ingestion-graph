@@ -264,6 +264,24 @@ async def test_deleted_in_progress_checkpoint_retains_replay_count(tmp_path: Pat
 
 
 @pytest.mark.asyncio
+async def test_invalid_tombstone_progress_is_rejected(tmp_path: Path):
+    source = LocalDocumentsSource(tmp_path, stream_names=["documents"])
+    stream = (await source.discover())[0]
+    state = {
+        "files": {},
+        "in_progress": {
+            "relative_path": "removed.txt",
+            "sha256": "a" * 64,
+            "next_index": 2,
+            "tombstone_next_index": 3,
+        },
+    }
+
+    with pytest.raises(ConfigurationError, match="tombstone_next_index"):
+        await collect(source, stream, state)
+
+
+@pytest.mark.asyncio
 async def test_reappearing_file_restores_rows_after_partial_deletion(tmp_path: Path):
     path = tmp_path / "restored.txt"
     original = "many words " * 200
