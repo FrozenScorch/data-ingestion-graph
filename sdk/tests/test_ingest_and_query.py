@@ -226,9 +226,7 @@ def test_cli_ingests_queries_and_inspects_jsonl(tmp_path, monkeypatch, capsys):
     assert json.loads(capsys.readouterr().out)["total"] == 1
 
 
-def test_cli_reports_corrupt_sqlite_collection_without_a_traceback(
-    tmp_path, monkeypatch, capsys
-):
+def test_cli_reports_corrupt_sqlite_collection_without_a_traceback(tmp_path, monkeypatch, capsys):
     collection = tmp_path / "corrupt.db"
     collection.write_text("not a SQLite database", encoding="utf-8")
     monkeypatch.setattr(
