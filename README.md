@@ -25,12 +25,18 @@ ingestion_graph SDK -X-> Enterprise Studio
 Use the SDK from another project without installing Studio:
 
 ```shell
-python -m pip install "ingestion-graph[discord] @ git+https://github.com/FrozenScorch/data-ingestion-graph.git@44d7a11df3152ab54dbf7040e4654254c1ea1723#subdirectory=sdk"
+python -m pip install "ingestion-graph[discord] @ git+https://github.com/FrozenScorch/data-ingestion-graph.git@1ffcd738f0699ddd518bd35029dc550c22a1f487#subdirectory=sdk"
 ```
 
 SDK-backed nodes are marked **SDK** in the node palette. Studio-native nodes can
 be migrated behind SDK sources, transforms, and destinations without changing
 saved graph definitions.
+
+The checked-out 0.8 development branch also contains an unreleased, versioned
+JSON/TOML [`PipelineSpec`](sdk/docs/pipeline-spec.md). The verified dependency pin
+above is SDK 0.7.0 at commit
+`1ffcd738f0699ddd518bd35029dc550c22a1f487`; it does not include the unreleased
+PipelineSpec API.
 
 ## Start Studio locally or on a LAN
 

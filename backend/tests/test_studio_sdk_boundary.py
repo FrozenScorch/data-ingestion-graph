@@ -95,6 +95,7 @@ def test_document_studio_schema_is_strictly_projected_from_sdk_manifest():
             **sdk_schema["properties"][field],
             "maximum": maximum,
         }
+    assert "retain_extraction_artifacts" not in studio_schema["properties"]
     assert studio_schema["properties"]["artifact_ids"]["format"] == "artifact-refs"
     assert studio_schema["properties"]["artifact_ids"]["accepted_extensions"]
     assert studio_schema["required"] == []

@@ -265,9 +265,10 @@ class LocalDocumentsSource(Source):
     def manifest(cls) -> ConnectorSpec:
         return ConnectorSpec(
             name="local_documents",
-            version="1.0.0",
+            version="1.1.0",
             config_schema={
                 "type": "object",
+                "additionalProperties": False,
                 "properties": {
                     "paths": {
                         "type": "array",
@@ -339,6 +340,31 @@ class LocalDocumentsSource(Source):
                     "page_timeout_seconds": {"type": "number", "exclusiveMinimum": 0},
                     "max_page_concurrency": {"type": "integer", "minimum": 1},
                     "vision_fallback": {"type": "boolean", "default": False},
+                    "retain_extraction_artifacts": {
+                        "type": "boolean",
+                        "default": False,
+                    },
+                    "ocr_engine": _component_reference_schema(
+                        "ingestion_graph.document_ai.ocr_engines"
+                    ),
+                    "page_renderer": _component_reference_schema(
+                        "ingestion_graph.document_ai.page_renderers"
+                    ),
+                    "table_extractor": _component_reference_schema(
+                        "ingestion_graph.document_ai.table_extractors"
+                    ),
+                    "document_splitter": _component_reference_schema(
+                        "ingestion_graph.document_ai.document_splitters"
+                    ),
+                    "extraction_cache": _component_reference_schema(
+                        "ingestion_graph.document_ai.extraction_caches"
+                    ),
+                    "vision_extractor": _component_reference_schema(
+                        "ingestion_graph.document_ai.vision_extractors"
+                    ),
+                    "external_processing_policy": _component_reference_schema(
+                        "ingestion_graph.document_ai.external_processing_policies"
+                    ),
                 },
                 "required": ["paths"],
             },
@@ -1339,6 +1365,20 @@ class LocalDocumentsSource(Source):
                 name = f"{base or 'documents'}#{path_hash}"
             streams[name] = root
         return streams
+
+
+def _component_reference_schema(group: str) -> dict[str, Any]:
+    """Return the portable nested plugin shape used by PipelineSpec."""
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "plugin": {"type": "string", "minLength": 1},
+            "config": {"type": "object", "default": {}},
+        },
+        "required": ["plugin"],
+        "x-entry-point-group": group,
+    }
 
 
 def _normalize_extension(value: str) -> str:

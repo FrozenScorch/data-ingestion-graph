@@ -1,0 +1,18 @@
+schema_version = "1"
+name = "jsonl-query"
+
+[source]
+plugin = "jsonl"
+[source.config]
+path = "./data/items.jsonl"
+batch_size = 500
+
+[destination]
+plugin = "sqlite"
+[destination.config]
+path = "./.ingestion/items.db"
+
+[state_store]
+plugin = "sqlite"
+[state_store.config]
+path = "./.ingestion/state.db"

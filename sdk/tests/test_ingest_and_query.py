@@ -224,3 +224,49 @@ def test_cli_ingests_queries_and_inspects_jsonl(tmp_path, monkeypatch, capsys):
     )
     assert main() == 0
     assert json.loads(capsys.readouterr().out)["total"] == 1
+
+
+def test_cli_reports_corrupt_sqlite_collection_without_a_traceback(tmp_path, monkeypatch, capsys):
+    collection = tmp_path / "corrupt.db"
+    collection.write_text("not a SQLite database", encoding="utf-8")
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["ingestion-graph", "query", "--collection", str(collection)],
+    )
+
+    assert main() == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err.startswith("error: ")
+    assert "database" in captured.err.lower()
+    assert "Traceback" not in captured.err
+    assert captured.err.count("\n") == 1
+
+
+def test_cli_reports_corrupt_sqlite_state_without_a_traceback(tmp_path, monkeypatch, capsys):
+    input_path = tmp_path / "items.jsonl"
+    input_path.write_text('{"id":"1","title":"portable ingestion"}\n', encoding="utf-8")
+    state = tmp_path / "corrupt-state.db"
+    state.write_text("not a SQLite database", encoding="utf-8")
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "ingestion-graph",
+            "ingest-jsonl",
+            str(input_path),
+            "--collection",
+            str(tmp_path / "query.db"),
+            "--state",
+            str(state),
+        ],
+    )
+
+    assert main() == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err.startswith("error: ")
+    assert "database" in captured.err.lower()
+    assert "Traceback" not in captured.err
+    assert captured.err.count("\n") == 1

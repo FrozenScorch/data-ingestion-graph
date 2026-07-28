@@ -30,6 +30,37 @@ source = LocalDocumentsSource(
 )
 ```
 
+The same components can be selected declaratively without hiding them behind a
+profile or provider-specific source class:
+
+```toml
+[source]
+plugin = "local_documents"
+[source.config]
+paths = ["./documents"]
+ocr_mode = "auto"
+table_mode = "native"
+
+[source.config.ocr_engine]
+plugin = "tesseract"
+[source.config.ocr_engine.config]
+page_segmentation_mode = 3
+
+[source.config.page_renderer]
+plugin = "pdfium"
+
+[source.config.extraction_cache]
+plugin = "sqlite"
+[source.config.extraction_cache.config]
+path = "./.ingestion/extraction-cache.db"
+```
+
+`ingestion-graph plan` validates these provider names and configurations without
+loading models or resolving credentials. Table and vision providers are external
+entry-point plugins because the SDK cannot safely infer local model paths. A
+declarative `table_mode="local"` or `"auto"` therefore requires an explicit
+`table_extractor` reference. See [portable pipeline specifications](pipeline-spec.md).
+
 The legacy defaults remain unchanged: image extensions are not discovered,
 PDFs use `pypdf.extract_text()`, and no extraction metadata is added. Set
 `ocr_mode="auto"` or `"always"` and explicitly include image extensions when

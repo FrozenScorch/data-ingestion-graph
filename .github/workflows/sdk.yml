@@ -59,21 +59,92 @@ jobs:
         working-directory: sdk
       - run: python -m build --outdir ../dist
         working-directory: sdk
-      - run: python -m pip install --force-reinstall dist/*.whl
-      - run: python -c "import ingestion_graph; print(ingestion_graph.__version__)"
-      - name: Verify installed wheel connector manifests
+      - name: Install the wheel in an isolated dependency-free environment
+        run: |
+          python -m venv .wheel-smoke
+          PIP_DISABLE_PIP_VERSION_CHECK=1 PIP_NO_INDEX=1 \
+            .wheel-smoke/bin/python -m pip install --no-deps dist/*.whl
+      - name: Verify installed-wheel public API and entry-point groups
+        run: |
+          .wheel-smoke/bin/python - <<'PY'
+          import ingestion_graph as sdk
+          from ingestion_graph.plugins import PLUGIN_GROUPS, discover_plugins, load_plugin
+
+          public_api = {
+              "PIPELINE_SPEC_VERSION",
+              "ComponentRef",
+              "ConnectorPlan",
+              "ExtensionPlan",
+              "PipelinePlan",
+              "PipelineRegistry",
+              "PipelineSpec",
+              "ProviderSpec",
+              "StateStoreRef",
+              "create_ingestion_pipeline",
+              "load_pipeline_spec",
+              "plan_ingestion_pipeline",
+              "run_ingestion_pipeline",
+          }
+          assert public_api <= set(sdk.__all__)
+          assert sdk.__version__ == "0.8.0"
+          provider = sdk.ProviderSpec(
+              "example",
+              "1",
+              {"type": "object", "properties": {}, "additionalProperties": False},
+          )
+          assert provider.version == "1"
+
+          expected_plugins = {
+              "sources": {"discord", "jsonl", "local_documents", "postgres", "rest"},
+              "destinations": {"jsonl", "postgres", "sqlite"},
+              "transforms": set(),
+              "state_stores": {"memory", "sqlite"},
+              "ocr_engines": {"tesseract"},
+              "page_renderers": {"pdfium"},
+              "table_extractors": set(),
+              "document_splitters": {"identity"},
+              "extraction_caches": {"memory", "sqlite"},
+              "vision_extractors": set(),
+              "external_processing_policies": set(),
+          }
+          assert set(PLUGIN_GROUPS) == set(expected_plugins)
+          for kind, expected in expected_plugins.items():
+              assert set(discover_plugins(kind)) == expected, kind
+          for kind in ("sources", "destinations"):
+              for name in expected_plugins[kind]:
+                  manifest = sdk.load_connector_manifest(kind, name)
+                  assert manifest.name == name
+          for kind in (
+              "state_stores",
+              "ocr_engines",
+              "page_renderers",
+              "document_splitters",
+              "extraction_caches",
+          ):
+              for name in expected_plugins[kind]:
+                  assert callable(load_plugin(kind, name))
+
+          spec = sdk.load_pipeline_spec("sdk/examples/jsonl-to-sqlite.toml")
+          plan = sdk.plan_ingestion_pipeline(spec)
+          pipeline = sdk.create_ingestion_pipeline(spec, plan=plan)
+          assert plan.source.plugin == "jsonl"
+          assert plan.destination.plugin == "sqlite"
+          assert pipeline.state_namespace == plan.state_namespace
+          PY
+      - name: Smoke-test installed-wheel validate and plan commands
+        run: |
+          for spec in \
+            sdk/examples/jsonl-to-sqlite.toml \
+            sdk/examples/local-documents.toml
+          do
+            .wheel-smoke/bin/ingestion-graph validate "$spec" --json
+            .wheel-smoke/bin/ingestion-graph plan "$spec" --json
+          done
+      - name: Type-check a strict external wheel consumer
         run: >-
-          python -c "from ingestion_graph import load_connector_manifest;
-          from ingestion_graph.plugins import discover_plugins;
-          assert set(discover_plugins('sources')) == {'discord', 'jsonl', 'local_documents', 'postgres', 'rest'};
-          assert set(discover_plugins('destinations')) == {'jsonl', 'postgres', 'sqlite'};
-          assert load_connector_manifest('sources', 'postgres').name == 'postgres';
-          assert load_connector_manifest('sources', 'rest').name == 'rest';
-          assert load_connector_manifest('destinations', 'jsonl').name == 'jsonl';
-          assert load_connector_manifest('destinations', 'postgres').name == 'postgres';
-          assert load_connector_manifest('destinations', 'sqlite').name == 'sqlite'"
-      - run: python -m mypy --strict typecheck/consumer.py
-        working-directory: sdk
+          python -m mypy --strict --no-incremental
+          --python-executable "$PWD/.wheel-smoke/bin/python"
+          sdk/typecheck/consumer.py
 
   backend:
     runs-on: ubuntu-latest

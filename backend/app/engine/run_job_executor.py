@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from app.engine.checkpoint import get_checkpoints, save_checkpoint
-from app.engine.executor import DAGExecutor
+from app.engine.executor import DAGExecutor, requires_source_state_staging_lease
 from app.engine.graph_data import unpack_version_data
 from app.engine.runner import run_node_with_retry
 from app.engine.scheduler import topological_sort
@@ -193,7 +193,7 @@ async def _execute_failed_nodes(
                 return
             if run_node.output_data:
                 exec_state["outputs"][node_id] = run_node.output_data
-            if node_type == "sdk_document_source":
+            if requires_source_state_staging_lease(node_type):
                 await revalidate_source_state_staging_lease(
                     db,
                     run.id,

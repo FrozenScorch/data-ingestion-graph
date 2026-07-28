@@ -31,6 +31,12 @@ logger = logging.getLogger(__name__)
 # Minimum number of nodes in a level to trigger parallel execution.
 # Small groups execute sequentially to avoid asyncio overhead.
 PARALLEL_THRESHOLD = 2
+SOURCE_STATE_STAGING_NODE_TYPES = frozenset({"sdk_document_source", "sdk_ocr_document_source"})
+
+
+def requires_source_state_staging_lease(node_type: str) -> bool:
+    """Return whether a Studio node stages SDK source state before POST_EXEC."""
+    return node_type in SOURCE_STATE_STAGING_NODE_TYPES
 
 
 class DAGExecutor:
@@ -373,7 +379,7 @@ class DAGExecutor:
                             )
 
                     # Save post-execution checkpoint
-                    if node_type == "sdk_document_source":
+                    if requires_source_state_staging_lease(node_type):
                         await revalidate_source_state_staging_lease(
                             node_db,
                             run.id,
@@ -526,7 +532,7 @@ class DAGExecutor:
                     )
 
             # Save post-execution checkpoint
-            if node_type == "sdk_document_source":
+            if requires_source_state_staging_lease(node_type):
                 await revalidate_source_state_staging_lease(
                     self.db,
                     run.id,

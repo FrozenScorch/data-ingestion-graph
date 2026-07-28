@@ -3,16 +3,21 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 from io import BytesIO
 from typing import Any
 from uuid import UUID, uuid4
 
 import pytest
 from app.config import settings
+from app.nodes import sdk_document_source as sdk_document_source_module
 from app.nodes.base import NodeContext
 from app.nodes.sdk_document_source import SDKDocumentSourceNode
 from app.services import upload_service
 from fastapi import UploadFile
+from ingestion_graph.connectors import CheckResult, StreamDescriptor
+from ingestion_graph.messages import RecordMessage, StateMessage
+from ingestion_graph.models import DocumentElement, Envelope, TableBatch
 
 
 class MemoryStudioStateStore:
@@ -73,6 +78,34 @@ def _context(
     )
 
 
+def _source_type(envelope_factory):
+    class StubSource:
+        def __init__(
+            self,
+            paths,
+            *,
+            stream_names,
+            **_kwargs,
+        ):
+            self.path = paths[0]
+            self.stream_name = stream_names[0]
+
+        async def check(self):
+            return CheckResult(True)
+
+        async def discover(self):
+            return [StreamDescriptor(self.stream_name)]
+
+        async def read(self, stream, _state):
+            yield RecordMessage(envelope_factory(self.path, stream.name))
+            yield StateMessage(stream.name, {"cursor": "complete"})
+
+        async def close(self):
+            return None
+
+    return StubSource
+
+
 @pytest.mark.asyncio
 async def test_adapter_uses_owner_scoped_artifacts_and_rejects_paths(upload_root):
     owner, other_owner, graph_id = uuid4(), uuid4(), uuid4()
@@ -130,6 +163,241 @@ async def test_adapter_emits_sanitized_canonical_envelopes(upload_root):
     assert "path" not in item["provenance"]
     assert str(upload_root) not in json.dumps(item)
     assert str(upload_root) not in json.dumps(result.output_data)
+
+
+@pytest.mark.asyncio
+async def test_adapter_preserves_table_payload_keys_while_sanitizing_context(
+    upload_root,
+    monkeypatch,
+):
+    owner_id, graph_id = uuid4(), uuid4()
+    saved = await _save(owner_id, "table.txt", b"table")
+    store = MemoryStudioStateStore(owner_id=owner_id, graph_id=graph_id, node_id="documents")
+    expected_payload = {
+        "columns": ["path", "root", "value"],
+        "rows": [
+            {
+                "path": "customer/imports/report.csv",
+                "root": "north-america",
+                "value": 42,
+            }
+        ],
+        "kind": "table_batch",
+    }
+
+    def envelope_factory(path, stream):
+        return Envelope(
+            id="record",
+            source="local_documents",
+            stream=stream,
+            payload=TableBatch(
+                ("path", "root", "value"),
+                (
+                    {
+                        "path": "customer/imports/report.csv",
+                        "root": "north-america",
+                        "value": 42,
+                    },
+                ),
+            ),
+            metadata={
+                "relative_path": path.name,
+                "nested": {"source_path": str(path.resolve()), "safe": "preserved"},
+            },
+            provenance={
+                "path": str(path.resolve()),
+                "nested": {"absolute_path": str(path.resolve()), "safe": "preserved"},
+            },
+        )
+
+    monkeypatch.setattr(
+        sdk_document_source_module,
+        "LocalDocumentsSource",
+        _source_type(envelope_factory),
+    )
+
+    result = await SDKDocumentSourceNode(store).execute(  # type: ignore[arg-type]
+        _context(
+            owner_id=owner_id,
+            graph_id=graph_id,
+            config={"artifact_ids": [saved["id"]]},
+        )
+    )
+
+    assert result.success is True
+    item = result.output_data["items"][0]
+    assert item["payload"] == expected_payload
+    assert item["metadata"]["nested"] == {"safe": "preserved"}
+    assert item["provenance"]["nested"] == {"safe": "preserved"}
+    assert str(upload_root) not in json.dumps(item)
+
+
+@pytest.mark.asyncio
+async def test_adapter_redacts_obfuscated_file_uris_only_from_context(
+    upload_root,
+    monkeypatch,
+):
+    owner_id, graph_id = uuid4(), uuid4()
+    saved = await _save(owner_id, "table.txt", b"table")
+    store = MemoryStudioStateStore(owner_id=owner_id, graph_id=graph_id, node_id="documents")
+    safe_value = " \thttps://example.test/document"
+
+    def envelope_factory(_path, stream):
+        return Envelope(
+            id="record",
+            source="local_documents",
+            stream=stream,
+            payload=DocumentElement("file:///user-supplied-content"),
+            metadata={
+                "safe_uri": safe_value,
+                "nested": {
+                    "uri": " \x00\tFiLe:///server/private.pdf",
+                    "link": "\x1ffile:///server/private.png",
+                    "unicode_space": "\u00a0file:///server/private.webp",
+                },
+                "references": ["kept", "\x01 file:///server/private.tiff"],
+            },
+            provenance={"uri": "\r\nfile:///server/private.pdf"},
+        )
+
+    monkeypatch.setattr(
+        sdk_document_source_module,
+        "LocalDocumentsSource",
+        _source_type(envelope_factory),
+    )
+
+    result = await SDKDocumentSourceNode(store).execute(  # type: ignore[arg-type]
+        _context(
+            owner_id=owner_id,
+            graph_id=graph_id,
+            config={"artifact_ids": [saved["id"]]},
+        )
+    )
+
+    assert result.success is True
+    item = result.output_data["items"][0]
+    assert item["payload"]["text"] == "file:///user-supplied-content"
+    assert item["metadata"]["safe_uri"] == safe_value
+    assert item["metadata"]["nested"] == {}
+    assert item["metadata"]["references"] == ["kept"]
+    assert "uri" not in item["provenance"]
+    context_json = json.dumps({"metadata": item["metadata"], "provenance": item["provenance"]})
+    assert "file:" not in context_json.casefold()
+
+
+@pytest.mark.asyncio
+async def test_adapter_rejects_artifact_retention_without_an_artifact_store(
+    upload_root,
+    monkeypatch,
+):
+    owner_id, graph_id = uuid4(), uuid4()
+    saved = await _save(owner_id, "table.txt", b"table")
+    store = MemoryStudioStateStore(owner_id=owner_id, graph_id=graph_id, node_id="documents")
+
+    def unexpected_source(*_args, **_kwargs):
+        raise AssertionError("SDK source must not be constructed")
+
+    monkeypatch.setattr(sdk_document_source_module, "LocalDocumentsSource", unexpected_source)
+
+    result = await SDKDocumentSourceNode(store).execute(  # type: ignore[arg-type]
+        _context(
+            owner_id=owner_id,
+            graph_id=graph_id,
+            config={
+                "artifact_ids": [saved["id"]],
+                "retain_extraction_artifacts": True,
+            },
+        )
+    )
+
+    assert result.success is False
+    assert "does not support retain_extraction_artifacts" in (result.error_message or "")
+    assert result.output_data == {"items": []}
+    assert store.states == {}
+
+
+@pytest.mark.asyncio
+async def test_output_byte_limit_counts_json_wrapper_and_accepts_exact_boundary(
+    upload_root,
+    monkeypatch,
+):
+    owner_id, graph_id = uuid4(), uuid4()
+    saved = await _save(owner_id, "table.txt", b"table")
+    artifact_id = UUID(saved["id"])
+    stream_name = f"upload-{artifact_id}"
+    observed_at = datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC)
+
+    def envelope_with_text(text: str, stream: str) -> Envelope:
+        return Envelope(
+            id="record",
+            source="local_documents",
+            stream=stream,
+            payload=DocumentElement(text),
+            observed_at=observed_at,
+        )
+
+    envelope: Envelope | None = None
+    output_size = 0
+    for text_size in range(2_000):
+        candidate = envelope_with_text("x" * text_size, stream_name)
+        item = sdk_document_source_module._sanitized_envelope(candidate, artifact_id)
+        item_size = len(json.dumps(item, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+        candidate_output_size = len(
+            json.dumps({"items": [item]}, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        )
+        if item_size <= 1_024 < candidate_output_size:
+            envelope = candidate
+            output_size = candidate_output_size
+            break
+    assert envelope is not None
+    selected_envelope = envelope
+
+    def envelope_factory(_path, stream):
+        assert stream == stream_name
+        return selected_envelope
+
+    monkeypatch.setattr(
+        sdk_document_source_module,
+        "LocalDocumentsSource",
+        _source_type(envelope_factory),
+    )
+
+    rejected_store = MemoryStudioStateStore(
+        owner_id=owner_id,
+        graph_id=graph_id,
+        node_id="documents",
+    )
+    rejected = await SDKDocumentSourceNode(rejected_store).execute(  # type: ignore[arg-type]
+        _context(
+            owner_id=owner_id,
+            graph_id=graph_id,
+            config={"artifact_ids": [saved["id"]], "max_output_bytes": 1_024},
+        )
+    )
+    assert rejected.success is False
+    assert "max_output_bytes" in (rejected.error_message or "")
+    assert rejected_store.states == {}
+
+    accepted_store = MemoryStudioStateStore(
+        owner_id=owner_id,
+        graph_id=graph_id,
+        node_id="documents",
+    )
+    accepted = await SDKDocumentSourceNode(accepted_store).execute(  # type: ignore[arg-type]
+        _context(
+            owner_id=owner_id,
+            graph_id=graph_id,
+            config={"artifact_ids": [saved["id"]], "max_output_bytes": output_size},
+        )
+    )
+    assert accepted.success is True
+    serialized = json.dumps(
+        accepted.output_data,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    assert len(serialized) == output_size
+    assert accepted_store.states
 
 
 @pytest.mark.asyncio

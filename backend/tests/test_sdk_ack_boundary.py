@@ -7,7 +7,7 @@ from uuid import uuid4
 import pytest
 from app.engine import executor as executor_module
 from app.engine import run_job_executor
-from app.engine.executor import DAGExecutor
+from app.engine.executor import DAGExecutor, requires_source_state_staging_lease
 from app.models.execution import NodeStatus, Run, RunJob, RunNode
 
 
@@ -15,6 +15,12 @@ def _scalar_result(value):
     result = MagicMock()
     result.scalar_one_or_none.return_value = value
     return result
+
+
+def test_all_sdk_document_presets_require_source_state_staging_lease():
+    assert requires_source_state_staging_lease("sdk_document_source") is True
+    assert requires_source_state_staging_lease("sdk_ocr_document_source") is True
+    assert requires_source_state_staging_lease("writer") is False
 
 
 @pytest.mark.asyncio
@@ -150,6 +156,61 @@ async def test_executor_failure_transition_passes_durable_lease_fence(monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_ocr_source_revalidates_lease_immediately_before_post_exec(monkeypatch):
+    run = Run(id=uuid4(), graph_id=uuid4(), status="running")
+    job_id = uuid4()
+    db = AsyncMock()
+    executor = DAGExecutor(
+        db,
+        completion_job_id=job_id,
+        completion_lease_owner="worker-1",
+    )
+    monkeypatch.setattr(executor, "_emit_event", AsyncMock())
+    run_node = SimpleNamespace(
+        status=NodeStatus.COMPLETED.value,
+        output_data={"items": []},
+        items_processed=0,
+        duration_ms=1,
+    )
+    monkeypatch.setattr(executor_module, "run_node_with_retry", AsyncMock(return_value=run_node))
+    events: list[str] = []
+
+    async def revalidate(db_arg, run_id, *, job_id, lease_owner):
+        assert db_arg is db
+        assert run_id == run.id
+        assert job_id == executor.completion_job_id
+        assert lease_owner == executor.completion_lease_owner
+        events.append("lease")
+
+    async def checkpoint(**kwargs):
+        assert kwargs["db"] is db
+        assert kwargs["run_id"] == run.id
+        assert kwargs["node_id"] == "source"
+        events.append("checkpoint")
+
+    monkeypatch.setattr(executor_module, "revalidate_source_state_staging_lease", revalidate)
+    monkeypatch.setattr(executor_module, "save_checkpoint", checkpoint)
+
+    result = await executor._execute_level_sequential(
+        run,
+        0,
+        ["source"],
+        {"source": {"type": "sdk_ocr_document_source"}},
+        [],
+        {},
+        {
+            "outputs": {},
+            "connections": {},
+            "owner_id": str(uuid4()),
+            "graph_id": str(run.graph_id),
+        },
+    )
+
+    assert result is None
+    assert events == ["lease", "checkpoint"]
+
+
+@pytest.mark.asyncio
 async def test_failed_node_retry_restores_source_output_and_promotes_without_rerun(monkeypatch):
     graph_id, run_id, version_id = uuid4(), uuid4(), uuid4()
     run = Run(id=run_id, graph_id=graph_id, graph_version_id=version_id, status="failed")
@@ -214,6 +275,81 @@ async def test_failed_node_retry_restores_source_output_and_promotes_without_rer
         completion_job_id=job.id,
         completion_lease_owner="worker-1",
     )
+    promote.assert_awaited_once_with(
+        db,
+        run_id,
+        job_id=job.id,
+        lease_owner="worker-1",
+    )
+
+
+@pytest.mark.asyncio
+async def test_failed_ocr_source_retry_revalidates_lease_before_post_exec(monkeypatch):
+    graph_id, run_id = uuid4(), uuid4()
+    run = Run(id=run_id, graph_id=graph_id, graph_version_id=uuid4(), status="failed")
+    job = RunJob(id=uuid4(), run_id=run_id, status="leased", lease_owner="worker-1")
+    failed_node = RunNode(
+        run_id=run_id,
+        node_id="source",
+        node_type="sdk_ocr_document_source",
+        status=NodeStatus.FAILED.value,
+    )
+    node_result = MagicMock()
+    node_result.scalars.return_value.all.return_value = [failed_node]
+    owner_result = MagicMock()
+    owner_result.scalar_one_or_none.return_value = uuid4()
+    db = AsyncMock()
+    db.execute.side_effect = [node_result, owner_result, _scalar_result(run)]
+    monkeypatch.setattr(
+        run_job_executor,
+        "_load_version",
+        AsyncMock(
+            return_value=(
+                {"source": {"type": "sdk_ocr_document_source"}},
+                [],
+                {},
+            )
+        ),
+    )
+    monkeypatch.setattr(run_job_executor, "get_checkpoints", AsyncMock(return_value=[]))
+
+    executor = MagicMock()
+    executor._resolve_connections = AsyncMock(return_value={})
+    executor._collect_inputs.return_value = ({}, [])
+    executor._state_for_node.return_value = {}
+    monkeypatch.setattr(run_job_executor, "DAGExecutor", MagicMock(return_value=executor))
+    completed_node = RunNode(
+        run_id=run_id,
+        node_id="source",
+        node_type="sdk_ocr_document_source",
+        status=NodeStatus.COMPLETED.value,
+        output_data={"items": []},
+    )
+    monkeypatch.setattr(
+        run_job_executor,
+        "run_node_with_retry",
+        AsyncMock(return_value=completed_node),
+    )
+    events: list[str] = []
+
+    async def revalidate(db_arg, retry_run_id, *, job_id, lease_owner):
+        assert db_arg is db
+        assert retry_run_id == run_id
+        assert job_id == job.id
+        assert lease_owner == job.lease_owner
+        events.append("lease")
+
+    async def checkpoint(*_args, **_kwargs):
+        events.append("checkpoint")
+
+    monkeypatch.setattr(run_job_executor, "revalidate_source_state_staging_lease", revalidate)
+    monkeypatch.setattr(run_job_executor, "save_checkpoint", checkpoint)
+    promote = AsyncMock(return_value=True)
+    monkeypatch.setattr(run_job_executor, "complete_run_with_source_state_promotion", promote)
+
+    await run_job_executor._execute_failed_nodes(db, run, job, None)
+
+    assert events == ["lease", "checkpoint"]
     promote.assert_awaited_once_with(
         db,
         run_id,
