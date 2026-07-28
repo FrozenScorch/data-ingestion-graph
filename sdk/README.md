@@ -15,12 +15,14 @@ From any Python project today, install the SDK directly from its independently
 packaged GitHub subdirectory:
 
 ```shell
-python -m pip install "ingestion-graph[discord] @ git+https://github.com/FrozenScorch/data-ingestion-graph.git@main#subdirectory=sdk"
+python -m pip install "ingestion-graph[discord] @ git+https://github.com/FrozenScorch/data-ingestion-graph.git@1ffcd738f0699ddd518bd35029dc550c22a1f487#subdirectory=sdk"
 ```
 
-For reproducible deployments, replace `@main` with a reviewed commit SHA or
-release tag. The package is not published to PyPI yet. From a checkout of this
-monorepo:
+That exact SHA,
+`1ffcd738f0699ddd518bd35029dc550c22a1f487`, is the currently verified SDK 0.7.0
+dependency pin. Dependent projects must upgrade it through a tested dependency
+PR; never replace it with a moving branch such as `main`. The package is not
+published to PyPI yet. From a checkout of this monorepo:
 
 ```shell
 python -m pip install -e "./sdk[discord]"
@@ -29,14 +31,17 @@ python -m pip install -e "./sdk[discord]"
 For PDF, Word, and Excel parsing, install the document extra:
 
 ```shell
-python -m pip install "ingestion-graph[documents] @ git+https://github.com/FrozenScorch/data-ingestion-graph.git@main#subdirectory=sdk"
+python -m pip install "ingestion-graph[documents] @ git+https://github.com/FrozenScorch/data-ingestion-graph.git@1ffcd738f0699ddd518bd35029dc550c22a1f487#subdirectory=sdk"
 ```
 
 For generic paginated HTTPS JSON APIs, install the `rest` extra and see the
 [REST source guide](docs/rest-source.md).
 
-For scanned PDFs and image documents, install the optional `ocr` extra and
-enable `ocr_mode` explicitly. See the [local-first document intelligence guide](docs/document-ai.md).
+The optional OCR/provider work described below is part of the unreleased 0.8
+checkout and is not present at the verified 0.7.0 pin. For development from this
+checkout, run `python -m pip install -e "./sdk[ocr]"`, enable `ocr_mode`
+explicitly, and see the
+[local-first document intelligence guide](docs/document-ai.md).
 
 ```python
 from ingestion_graph import LocalDocumentsSource, Pipeline
@@ -60,6 +65,56 @@ root-anchored safe opens and reject path/reparse changes; followed directory
 cycles are deduplicated. Use explicit `stream_names` when identities must remain
 stable after moving a root between machines. File and expanded Office-archive
 size limits are enforced while copying and parsing.
+
+## Portable pipeline specs (unreleased 0.8)
+
+The API in this section exists in the checked-out 0.8 development branch, not in
+the verified 0.7.0 dependency pin above. The constructor API remains the
+lowest-level embedded interface. For a reusable configuration that can run from
+Python or the CLI, use a versioned JSON or TOML `PipelineSpec`:
+
+```toml
+schema_version = "1"
+name = "jsonl-query"
+
+[source]
+plugin = "jsonl"
+[source.config]
+path = "./data/items.jsonl"
+batch_size = 500
+
+[destination]
+plugin = "sqlite"
+[destination.config]
+path = "./.ingestion/items.db"
+
+[state_store]
+plugin = "sqlite"
+[state_store.config]
+path = "./.ingestion/state.db"
+```
+
+```shell
+ingestion-graph validate pipeline.toml
+ingestion-graph plan pipeline.toml
+ingestion-graph run pipeline.toml
+```
+
+```python
+from ingestion_graph import plan_ingestion_pipeline, run_ingestion_pipeline
+
+plan = plan_ingestion_pipeline("pipeline.toml")
+result = await run_ingestion_pipeline("pipeline.toml", plan=plan)
+```
+
+Recognized local path fields resolve relative to the spec file; custom plugins
+must declare path formats in their manifest schema. The planner validates
+connector manifests without resolving credentials or opening remote connections.
+It also derives separate processing and materialization fingerprints. The
+checkpoint namespace includes the effective source, transforms, selected streams,
+and destination so declared semantic changes receive a new source replay.
+See the [portable specification guide](docs/pipeline-spec.md) and the checked-in
+[examples](examples/).
 
 ## Test an ingestion pipeline
 
@@ -106,8 +161,14 @@ for hit in await collection.query(QueryRequest("Ada", limit=5)):
 - State advances only after the destination durably writes and flushes a page.
 - Transforms run in order on checkpoint-bounded batches before destination writes.
 - A transform may map, filter, or expand records but cannot move them across streams.
-- Transform changes do not invalidate saved source state automatically; use a new
-  pipeline name or reset its state when existing records must be reprocessed.
+- Constructor-driven `Pipeline` instances keep their explicit state namespace;
+  portable `PipelineSpec` runs derive one from declared source, transform,
+  stream, and destination semantics unless the spec supplies a manual namespace.
+- A spec-provided namespace is a manual epoch and disables automatic isolation;
+  bump it whenever prior checkpoints are not compatible.
+- Fingerprints cannot observe a destination that is deleted and recreated at
+  the same configured location. Coordinate a new state namespace or checkpoint
+  reset when rebuilding the same physical destination.
 - Resumable destinations must declare idempotency.
 - UPSERT and DELETE operations share stable source/stream/record identity.
 - Large payloads can be represented by content-addressed `BlobRef` values.
@@ -129,10 +190,11 @@ print(source_manifest.name, destination_manifest.config_schema)
 ```
 
 Plugin hosts can call `load_connector_manifest(kind, name)` for either `sources`
-or `destinations` before creating a connector. Older third-party connectors remain
-valid runtime plugins, but are reported as not manifest-aware instead of being
-instantiated just to inspect their metadata. Duplicate installed entry-point names
-fail closed so connector selection is deterministic.
+or `destinations` before creating a connector. A source or destination selected
+by `PipelineSpec` must expose a valid manifest; constructor-only connectors remain
+usable through the embedded `Pipeline` API but are not declaratively usable.
+Duplicate installed entry-point names fail closed so connector selection is
+deterministic.
 
 ## Connector conformance kit
 

@@ -50,10 +50,26 @@ from ingestion_graph.models import (
     stable_record_id,
 )
 from ingestion_graph.pipeline import Pipeline, PipelineResult
-from ingestion_graph.plugins import load_connector_manifest
+from ingestion_graph.plugins import ProviderSpec, load_connector_manifest
 from ingestion_graph.query import Query, QueryHit, QueryRequest, QueryResult, QueryStore
+from ingestion_graph.runtime import (
+    ConnectorPlan,
+    ExtensionPlan,
+    PipelinePlan,
+    PipelineRegistry,
+    create_ingestion_pipeline,
+    plan_ingestion_pipeline,
+    run_ingestion_pipeline,
+)
 from ingestion_graph.secrets import EnvSecretProvider, SecretProvider, SecretRef, SecretValue
 from ingestion_graph.sources import LocalDocumentsSource
+from ingestion_graph.spec import (
+    PIPELINE_SPEC_VERSION,
+    ComponentRef,
+    PipelineSpec,
+    StateStoreRef,
+    load_pipeline_spec,
+)
 from ingestion_graph.state import MemoryStateStore, SQLiteStateStore
 from ingestion_graph.transforms import Transform
 
@@ -90,6 +106,7 @@ __all__ = [
     "Operation",
     "Pipeline",
     "PipelineResult",
+    "ProviderSpec",
     "Query",
     "QueryHit",
     "QueryRequest",
@@ -113,7 +130,19 @@ __all__ = [
     "Tombstone",
     "Transform",
     "stable_record_id",
+    "ComponentRef",
+    "ConnectorPlan",
+    "ExtensionPlan",
+    "PIPELINE_SPEC_VERSION",
+    "PipelinePlan",
+    "PipelineRegistry",
+    "PipelineSpec",
+    "StateStoreRef",
+    "create_ingestion_pipeline",
+    "load_pipeline_spec",
+    "plan_ingestion_pipeline",
+    "run_ingestion_pipeline",
     "canonical_fingerprint",
 ]
 
-__version__ = "0.7.0"
+__version__ = "0.8.0"

@@ -1,0 +1,28 @@
+schema_version = "1"
+name = "local-documents"
+
+[source]
+plugin = "local_documents"
+[source.config]
+paths = ["./documents"]
+recursive = true
+extensions = [".txt"]
+stream_names = ["sample-documents"]
+ocr_mode = "off"
+table_mode = "native"
+failure_mode = "strict"
+
+# This dependency-free provider is resolved through the same named component
+# contract used by optional OCR, renderer, table, cache, and vision providers.
+[source.config.document_splitter]
+plugin = "identity"
+
+[destination]
+plugin = "sqlite"
+[destination.config]
+path = "./.ingestion/documents.db"
+
+[state_store]
+plugin = "sqlite"
+[state_store.config]
+path = "./.ingestion/state.db"

@@ -3,8 +3,10 @@
 Install the optional HTTP dependency with the SDK:
 
 ```shell
-python -m pip install "ingestion-graph[rest] @ git+https://github.com/FrozenScorch/data-ingestion-graph.git@main#subdirectory=sdk"
+python -m pip install "ingestion-graph[rest] @ git+https://github.com/FrozenScorch/data-ingestion-graph.git@1ffcd738f0699ddd518bd35029dc550c22a1f487#subdirectory=sdk"
 ```
+
+This exact commit is the currently verified SDK 0.7.0 dependency pin.
 
 `RestSource` reads JSON objects from a bounded sequence of HTTPS `GET` requests.
 The endpoint URL cannot contain credentials. Authentication is resolved from a

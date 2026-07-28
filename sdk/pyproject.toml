@@ -70,6 +70,23 @@ jsonl = "ingestion_graph.destinations:JsonlDestination"
 sqlite = "ingestion_graph.destinations:SQLiteCollection"
 postgres = "ingestion_graph.destinations:PostgresDestination"
 
+[project.entry-points."ingestion_graph.state_stores"]
+memory = "ingestion_graph.state:MemoryStateStore"
+sqlite = "ingestion_graph.state:SQLiteStateStore"
+
+[project.entry-points."ingestion_graph.document_ai.ocr_engines"]
+tesseract = "ingestion_graph.document_ai:TesseractOcrEngine"
+
+[project.entry-points."ingestion_graph.document_ai.page_renderers"]
+pdfium = "ingestion_graph.document_ai:PdfiumPageRenderer"
+
+[project.entry-points."ingestion_graph.document_ai.document_splitters"]
+identity = "ingestion_graph.document_ai:IdentitySplitter"
+
+[project.entry-points."ingestion_graph.document_ai.extraction_caches"]
+memory = "ingestion_graph.document_ai:MemoryExtractionCache"
+sqlite = "ingestion_graph.document_ai:SQLiteExtractionCache"
+
 [tool.setuptools]
 package-dir = {"" = "src"}
 

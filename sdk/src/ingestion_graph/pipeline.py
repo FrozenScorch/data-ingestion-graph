@@ -32,20 +32,29 @@ class Pipeline:
         *,
         transforms: Sequence[Transform] = (),
         state_store: StateStore | None = None,
+        state_namespace: str | None = None,
         on_event: EventHandler | None = None,
     ) -> None:
         if not name:
             raise ValueError("Pipeline name must not be empty")
         if not destination.idempotent:
             raise ValueError("Destinations must declare idempotent=True for resumable pipelines")
+        if state_namespace is not None and not state_namespace:
+            raise ValueError("Pipeline state_namespace must not be empty")
         self.name = name
+        self.state_namespace = state_namespace or name
         self.source = source
         self.destination = destination
         self.transforms = tuple(transforms)
         self.state_store = state_store or SQLiteStateStore()
         self.on_event = on_event
 
-    async def run(self, streams: Sequence[StreamDescriptor] | None = None) -> PipelineResult:
+    async def run(
+        self,
+        streams: Sequence[StreamDescriptor] | None = None,
+        *,
+        stream_names: Sequence[str] | None = None,
+    ) -> PipelineResult:
         run_error: BaseException | None = None
         try:
             source_name = self.source.spec().name
@@ -56,11 +65,27 @@ class Pipeline:
             if not destination_check.ok:
                 raise ProtocolError(f"Destination check failed: {destination_check.message}")
 
+            if streams is not None and stream_names is not None:
+                raise ValueError("Pass streams or stream_names, not both")
             selected_streams = list(streams or await self.source.discover())
+            if stream_names is not None:
+                requested = tuple(stream_names)
+                if any(not name for name in requested):
+                    raise ValueError("Pipeline stream_names must not contain empty values")
+                if len(requested) != len(set(requested)):
+                    raise ValueError("Pipeline stream_names must not contain duplicates")
+                by_name = {stream.name: stream for stream in selected_streams}
+                missing = [name for name in requested if name not in by_name]
+                if missing:
+                    raise ProtocolError(
+                        f"Source {source_name!r} did not discover requested streams: "
+                        + ", ".join(repr(name) for name in missing)
+                    )
+                selected_streams = [by_name[name] for name in requested]
             records_written = 0
             checkpoints = 0
             for stream in selected_streams:
-                state = await self.state_store.load(self.name, source_name, stream.name)
+                state = await self.state_store.load(self.state_namespace, source_name, stream.name)
                 pending: list[Envelope] = []
                 saw_checkpoint_after_record = True
                 async for message in self.source.read(stream, state):
@@ -88,7 +113,7 @@ class Pipeline:
                             records_written += newly_written
                             pending.clear()
                         await self.state_store.save(
-                            self.name, source_name, stream.name, message.state
+                            self.state_namespace, source_name, stream.name, message.state
                         )
                         checkpoints += 1
                         saw_checkpoint_after_record = True
