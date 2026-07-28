@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 from collections.abc import Mapping
 from typing import Any, Protocol, cast
 from uuid import UUID
@@ -26,6 +27,22 @@ SOURCE_NAME = "local_documents"
 STREAM_PREFIX = "upload-"
 MAX_OUTPUT_ITEMS = 10_000
 MAX_OUTPUT_BYTES = 64 * 1024 * 1024
+MAX_OUTPUT_DEPTH = 64
+_SENSITIVE_PATH_KEYS = frozenset(
+    {
+        "path",
+        "root",
+        "source_path",
+        "original_path",
+        "absolute_path",
+        "file_path",
+        "local_path",
+        "artifact_path",
+        "snapshot_path",
+        "temporary_path",
+        "temp_path",
+    }
+)
 
 
 class _OutputLimitExceeded(RuntimeError):
@@ -146,6 +163,10 @@ class SDKDocumentSourceNode(BaseNode):
                     source_field="min_native_text_quality",
                     target_field="min_native_text_quality",
                 ),
+                ManifestFieldProjection(
+                    source_field="retain_extraction_artifacts",
+                    target_field="retain_extraction_artifacts",
+                ),
             ),
             omitted={
                 "paths": "Studio resolves owner-scoped upload IDs to managed paths",
@@ -163,6 +184,28 @@ class SDKDocumentSourceNode(BaseNode):
                 "page_timeout_seconds": "Studio keeps page timeouts deployment-controlled",
                 "max_page_concurrency": "Studio keeps concurrency deployment-controlled",
                 "vision_fallback": "Studio has no live vision adapter in this release",
+                "ocr_engine": (
+                    "Studio uses its deployment-controlled local OCR preset until PipelineSpec "
+                    "provider references are imported losslessly"
+                ),
+                "page_renderer": (
+                    "Studio uses its deployment-controlled renderer until PipelineSpec provider "
+                    "references are imported losslessly"
+                ),
+                "table_extractor": (
+                    "Studio currently limits tables to native extraction and does not load "
+                    "specialist model plugins"
+                ),
+                "document_splitter": (
+                    "Studio keeps splitting as an explicit downstream graph node"
+                ),
+                "extraction_cache": (
+                    "Studio does not yet expose SDK extraction-cache selection in node config"
+                ),
+                "vision_extractor": "Studio has no live vision adapter in this release",
+                "external_processing_policy": (
+                    "Studio has no external document-processing path in this release"
+                ),
             },
             studio_properties={
                 "artifact_ids": {
@@ -223,10 +266,13 @@ class SDKDocumentSourceNode(BaseNode):
             table_mode = str(context.config.get("table_mode", "off"))
             failure_mode = str(context.config.get("failure_mode", "strict"))
             min_native_text_quality = float(context.config.get("min_native_text_quality", 0.65))
+            retain_extraction_artifacts = context.config.get("retain_extraction_artifacts", False)
             max_output_items = int(context.config.get("max_output_items", 5_000))
             max_output_bytes = int(context.config.get("max_output_bytes", 16 * 1024 * 1024))
         except (TypeError, ValueError):
             return self._failure("Document parser limits must be integers")
+        if not isinstance(retain_extraction_artifacts, bool):
+            return self._failure("retain_extraction_artifacts must be a boolean")
         if table_mode not in {"off", "native"}:
             return self._failure(
                 "Studio supports table_mode 'off' or 'native'; local and vision adapters "
@@ -315,6 +361,7 @@ class SDKDocumentSourceNode(BaseNode):
                 table_mode=table_mode,
                 failure_mode=failure_mode,
                 min_native_text_quality=min_native_text_quality,
+                retain_extraction_artifacts=retain_extraction_artifacts,
             )
             check = await connector.check()
             if not check.ok:
@@ -336,15 +383,10 @@ class SDKDocumentSourceNode(BaseNode):
                             message.envelope,
                             artifact_by_stream[descriptor.name],
                         )
-                        item_bytes = len(
-                            json.dumps(
-                                item,
-                                ensure_ascii=False,
-                                separators=(",", ":"),
-                            ).encode("utf-8")
+                        item_bytes = _bounded_json_size(
+                            item,
+                            max_bytes=max_output_bytes - output_bytes,
                         )
-                        if output_bytes + item_bytes > max_output_bytes:
-                            raise _OutputLimitExceeded("max_output_bytes")
                         items.append(item)
                         output_bytes += item_bytes
                     elif isinstance(message, StateMessage):
@@ -418,17 +460,88 @@ def _artifact_id(stream: str) -> UUID | None:
 
 
 def _sanitized_envelope(envelope: Any, artifact_id: UUID) -> dict[str, Any]:
-    value = envelope.to_dict()
-    metadata = dict(value.get("metadata") or {})
-    for key in ("path", "root", "source_path", "original_path", "absolute_path"):
-        metadata.pop(key, None)
+    raw_value = envelope.to_dict()
+    if not isinstance(raw_value, Mapping):
+        raise TypeError("Document envelope must serialize to an object")
+    value = _sanitize_json_value(raw_value)
+    if not isinstance(value, dict):
+        raise TypeError("Document envelope must serialize to an object")
+
+    metadata = value.get("metadata")
+    if not isinstance(metadata, dict):
+        raise TypeError("Document envelope metadata must serialize to an object")
     metadata["artifact_id"] = str(artifact_id)
-    value["metadata"] = metadata
-    provenance = dict(value.get("provenance") or {})
-    provenance.pop("path", None)
+
+    provenance = value.get("provenance")
+    if not isinstance(provenance, dict):
+        raise TypeError("Document envelope provenance must serialize to an object")
     provenance["artifact_id"] = str(artifact_id)
-    value["provenance"] = provenance
     return value
+
+
+def _sanitize_json_value(
+    value: Any,
+    *,
+    depth: int = 0,
+    active_containers: set[int] | None = None,
+) -> Any:
+    if depth > MAX_OUTPUT_DEPTH:
+        raise ValueError("Document envelope exceeds the maximum nesting depth")
+    if value is None or isinstance(value, (bool, int, str)):
+        return value
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError("Document envelope contains a non-finite number")
+        return value
+
+    if active_containers is None:
+        active_containers = set()
+    marker = id(value)
+    if marker in active_containers:
+        raise ValueError("Document envelope contains a recursive value")
+    active_containers.add(marker)
+    try:
+        if isinstance(value, Mapping):
+            sanitized: dict[str, Any] = {}
+            for raw_key, item in value.items():
+                key = str(raw_key)
+                if key.casefold() in _SENSITIVE_PATH_KEYS:
+                    continue
+                if (
+                    key.casefold() == "uri"
+                    and isinstance(item, str)
+                    and item.casefold().startswith("file:")
+                ):
+                    continue
+                sanitized[key] = _sanitize_json_value(
+                    item,
+                    depth=depth + 1,
+                    active_containers=active_containers,
+                )
+            return sanitized
+        if isinstance(value, (list, tuple)):
+            return [
+                _sanitize_json_value(
+                    item,
+                    depth=depth + 1,
+                    active_containers=active_containers,
+                )
+                for item in value
+            ]
+    finally:
+        active_containers.remove(marker)
+
+    raise TypeError(f"Document envelope contains unsupported {type(value).__name__} output")
+
+
+def _bounded_json_size(value: Any, *, max_bytes: int) -> int:
+    size = 0
+    encoder = json.JSONEncoder(ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+    for part in encoder.iterencode(value):
+        size += len(part.encode("utf-8"))
+        if size > max_bytes:
+            raise _OutputLimitExceeded("max_output_bytes")
+    return size
 
 
 async def _stage_states(

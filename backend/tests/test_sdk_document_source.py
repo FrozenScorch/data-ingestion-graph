@@ -9,10 +9,14 @@ from uuid import UUID, uuid4
 
 import pytest
 from app.config import settings
+from app.nodes import sdk_document_source as sdk_document_source_module
 from app.nodes.base import NodeContext
 from app.nodes.sdk_document_source import SDKDocumentSourceNode
 from app.services import upload_service
 from fastapi import UploadFile
+from ingestion_graph.connectors import CheckResult, StreamDescriptor
+from ingestion_graph.messages import RecordMessage, StateMessage
+from ingestion_graph.models import DocumentElement, Envelope
 
 
 class MemoryStudioStateStore:
@@ -73,6 +77,75 @@ def _context(
     )
 
 
+def _artifact_source_type(
+    captured_retain_values: list[bool],
+    *,
+    artifact_text: str = "cell",
+):
+    class ArtifactSource:
+        def __init__(
+            self,
+            paths,
+            *,
+            stream_names,
+            retain_extraction_artifacts=False,
+            **_kwargs,
+        ):
+            self.path = paths[0]
+            self.stream_name = stream_names[0]
+            self.retain_extraction_artifacts = retain_extraction_artifacts
+            captured_retain_values.append(retain_extraction_artifacts)
+
+        async def check(self):
+            return CheckResult(True)
+
+        async def discover(self):
+            return [StreamDescriptor(self.stream_name)]
+
+        async def read(self, stream, _state):
+            metadata: dict[str, Any] = {"relative_path": self.path.name}
+            if self.retain_extraction_artifacts:
+                metadata["table_artifact"] = {
+                    "metadata": {
+                        "path": str(self.path.resolve()),
+                        "safe": "preserved",
+                        "source_crop": {
+                            "uri": self.path.resolve().as_uri(),
+                            "sha256": "0" * 64,
+                        },
+                        "nested": [
+                            {
+                                "source_path": str(self.path.resolve()),
+                                "relative_path": self.path.name,
+                            }
+                        ],
+                    },
+                    "cells": [{"text": artifact_text}],
+                }
+            yield RecordMessage(
+                Envelope(
+                    id="record",
+                    source="local_documents",
+                    stream=stream.name,
+                    payload=DocumentElement("table row"),
+                    metadata=metadata,
+                    provenance={
+                        "path": str(self.path.resolve()),
+                        "nested": {
+                            "absolute_path": str(self.path.resolve()),
+                            "safe": "preserved",
+                        },
+                    },
+                )
+            )
+            yield StateMessage(stream.name, {"cursor": "complete"})
+
+        async def close(self):
+            return None
+
+    return ArtifactSource
+
+
 @pytest.mark.asyncio
 async def test_adapter_uses_owner_scoped_artifacts_and_rejects_paths(upload_root):
     owner, other_owner, graph_id = uuid4(), uuid4(), uuid4()
@@ -130,6 +203,116 @@ async def test_adapter_emits_sanitized_canonical_envelopes(upload_root):
     assert "path" not in item["provenance"]
     assert str(upload_root) not in json.dumps(item)
     assert str(upload_root) not in json.dumps(result.output_data)
+
+
+@pytest.mark.parametrize(
+    ("retain_config", "expected"),
+    [
+        ({}, False),
+        ({"retain_extraction_artifacts": True}, True),
+    ],
+)
+@pytest.mark.asyncio
+async def test_adapter_executes_with_type_safe_artifact_retention(
+    upload_root,
+    monkeypatch,
+    retain_config,
+    expected,
+):
+    owner_id, graph_id = uuid4(), uuid4()
+    saved = await _save(owner_id, "table.txt", b"table")
+    store = MemoryStudioStateStore(owner_id=owner_id, graph_id=graph_id, node_id="documents")
+    captured: list[bool] = []
+    monkeypatch.setattr(
+        sdk_document_source_module,
+        "LocalDocumentsSource",
+        _artifact_source_type(captured),
+    )
+
+    result = await SDKDocumentSourceNode(store).execute(  # type: ignore[arg-type]
+        _context(
+            owner_id=owner_id,
+            graph_id=graph_id,
+            config={"artifact_ids": [saved["id"]], **retain_config},
+        )
+    )
+
+    assert result.success is True
+    assert captured == [expected]
+    item = result.output_data["items"][0]
+    if expected:
+        artifact = item["metadata"]["table_artifact"]
+        assert artifact["metadata"]["safe"] == "preserved"
+        assert artifact["metadata"]["nested"][0]["relative_path"] == "table.txt"
+        assert "path" not in artifact["metadata"]
+        assert "source_path" not in artifact["metadata"]["nested"][0]
+        assert "uri" not in artifact["metadata"]["source_crop"]
+        assert artifact["metadata"]["source_crop"]["sha256"] == "0" * 64
+        assert "absolute_path" not in item["provenance"]["nested"]
+        assert str(upload_root) not in json.dumps(item)
+        assert "file:" not in json.dumps(item).casefold()
+    else:
+        assert "table_artifact" not in item["metadata"]
+
+
+@pytest.mark.parametrize("invalid_value", ["true", 1, None])
+@pytest.mark.asyncio
+async def test_adapter_rejects_non_boolean_artifact_retention(
+    upload_root,
+    invalid_value,
+):
+    owner_id, graph_id = uuid4(), uuid4()
+    saved = await _save(owner_id, "table.txt", b"table")
+    store = MemoryStudioStateStore(owner_id=owner_id, graph_id=graph_id, node_id="documents")
+
+    result = await SDKDocumentSourceNode(store).execute(  # type: ignore[arg-type]
+        _context(
+            owner_id=owner_id,
+            graph_id=graph_id,
+            config={
+                "artifact_ids": [saved["id"]],
+                "retain_extraction_artifacts": invalid_value,
+            },
+        )
+    )
+
+    assert result.success is False
+    assert "must be a boolean" in (result.error_message or "")
+    assert store.states == {}
+
+
+@pytest.mark.asyncio
+async def test_retained_artifacts_obey_output_byte_limit_without_advancing_state(
+    upload_root,
+    monkeypatch,
+):
+    owner_id, graph_id = uuid4(), uuid4()
+    saved = await _save(owner_id, "table.txt", b"table")
+    store = MemoryStudioStateStore(owner_id=owner_id, graph_id=graph_id, node_id="documents")
+    captured: list[bool] = []
+    monkeypatch.setattr(
+        sdk_document_source_module,
+        "LocalDocumentsSource",
+        _artifact_source_type(captured, artifact_text="x" * 2_000),
+    )
+
+    result = await SDKDocumentSourceNode(store).execute(  # type: ignore[arg-type]
+        _context(
+            owner_id=owner_id,
+            graph_id=graph_id,
+            config={
+                "artifact_ids": [saved["id"]],
+                "retain_extraction_artifacts": True,
+                "max_output_bytes": 1_024,
+            },
+        )
+    )
+
+    assert captured == [True]
+    assert result.success is False
+    assert "max_output_bytes" in (result.error_message or "")
+    assert result.output_data == {"items": []}
+    assert store.states == {}
 
 
 @pytest.mark.asyncio
