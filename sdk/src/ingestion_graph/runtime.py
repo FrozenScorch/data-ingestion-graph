@@ -1239,8 +1239,38 @@ def _validate_document_configuration(
     registry: PipelineRegistry,
     bindings: FactoryBindings,
 ) -> None:
-    ocr_mode = config.get("ocr_mode", "off")
+    paths = config.get("paths", ())
+    path_count = (
+        len(paths)
+        if isinstance(paths, Sequence) and not isinstance(paths, (str, bytes, bytearray))
+        else 0
+    )
     configured_extensions = config.get("extensions", ())
+    if not configured_extensions:
+        raise ConfigurationError("Document extensions must not be empty")
+    ocr_languages = config.get("ocr_languages", ("eng",))
+    if (
+        not isinstance(ocr_languages, Sequence)
+        or isinstance(ocr_languages, (str, bytes, bytearray))
+        or not ocr_languages
+        or any(
+            not isinstance(language, str) or not language or not language.replace("-", "").isalnum()
+            for language in ocr_languages
+        )
+    ):
+        raise ConfigurationError("Document ocr_languages must contain valid language codes")
+    stream_names = config.get("stream_names")
+    if stream_names is not None:
+        if not isinstance(stream_names, Sequence) or isinstance(
+            stream_names, (str, bytes, bytearray)
+        ):  # pragma: no cover - the manifest schema rejects this first
+            raise ConfigurationError("Document stream_names must name every configured path")
+        normalized_names = tuple(str(name).strip() for name in stream_names)
+        if len(normalized_names) != path_count or any(not name for name in normalized_names):
+            raise ConfigurationError("Document stream_names must name every configured path")
+        if len(set(normalized_names)) != len(normalized_names):
+            raise ConfigurationError("Document stream_names must be unique")
+    ocr_mode = config.get("ocr_mode", "off")
     if (
         ocr_mode == "off"
         and isinstance(configured_extensions, Sequence)

@@ -14,6 +14,7 @@ from ingestion_graph import (
     ConnectorCapabilities,
     ConnectorSpec,
     Destination,
+    LocalDocumentsSource,
     PipelineSpec,
     ProviderSpec,
     SecretRef,
@@ -1454,3 +1455,58 @@ def test_nested_unsupported_manifest_schema_type_fails_closed(tmp_path) -> None:
 
     with pytest.raises(PluginError, match="unsupported values: 'bogus'"):
         plan_ingestion_pipeline(spec, registry=registry)
+
+
+@pytest.mark.parametrize("use_mapping", [False, True], ids=["spec", "mapping"])
+@pytest.mark.parametrize(
+    ("invalid_config", "message"),
+    [
+        ({"extensions": []}, "Document extensions must not be empty"),
+        ({"ocr_languages": []}, "Document ocr_languages must contain valid language codes"),
+        (
+            {"ocr_languages": ["eng!"]},
+            "Document ocr_languages must contain valid language codes",
+        ),
+        (
+            {"paths": ["one", "two"], "stream_names": ["only-one"]},
+            "Document stream_names must name every configured path",
+        ),
+        (
+            {"stream_names": [" "]},
+            "Document stream_names must name every configured path",
+        ),
+        (
+            {"paths": ["one", "two"], "stream_names": ["same", " same "]},
+            "Document stream_names must be unique",
+        ),
+    ],
+)
+def test_document_constructor_invariants_fail_during_planning_without_construction(
+    tmp_path,
+    use_mapping,
+    invalid_config,
+    message,
+) -> None:
+    constructed = 0
+
+    class TrackingDocumentsSource(LocalDocumentsSource):
+        def __init__(self, *args, **kwargs) -> None:
+            nonlocal constructed
+            constructed += 1
+            super().__init__(*args, **kwargs)
+
+    registry = PipelineRegistry()
+    registry.register("sources", "local_documents", TrackingDocumentsSource)
+    definition = {
+        "name": "invalid-document-config",
+        "source": {
+            "plugin": "local_documents",
+            "config": {"paths": [str(tmp_path)], **invalid_config},
+        },
+        "destination": {"plugin": "sqlite", "config": {}},
+    }
+    value = definition if use_mapping else PipelineSpec.from_dict(definition)
+
+    with pytest.raises(ConfigurationError, match=message):
+        plan_ingestion_pipeline(value, registry=registry)
+    assert constructed == 0
