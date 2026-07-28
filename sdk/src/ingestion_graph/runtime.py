@@ -7,7 +7,6 @@ import hashlib
 import inspect
 import os
 import re
-import threading
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
@@ -38,6 +37,7 @@ from ingestion_graph.transforms import Transform
 
 Factory = Callable[..., object]
 FactoryBindings = dict[tuple[str, str], Factory]
+_BACKGROUND_CONSTRUCTION_CLEANUPS: set[asyncio.Task[None]] = set()
 
 _DOCUMENT_EXTENSION_FIELDS = {
     "ocr_engine": "ocr_engines",
@@ -763,10 +763,16 @@ class _ConstructionScope:
         self._resources.clear()
         self._resource_ids.clear()
 
-    def rollback(self) -> None:
+    def _take_resources(self) -> tuple[object, ...]:
         resources = tuple(reversed(self._resources))
         self.release()
-        _run_cleanup_blocking(resources)
+        return resources
+
+    async def rollback_async(self) -> None:
+        await _close_constructed_resources(self._take_resources())
+
+    def rollback_sync(self) -> None:
+        _start_cleanup_from_sync(self._take_resources())
 
 
 async def _close_constructed_resources(resources: Sequence[object]) -> None:
@@ -786,32 +792,34 @@ async def _close_constructed_resources(resources: Sequence[object]) -> None:
         raise first_error
 
 
-def _run_cleanup_blocking(resources: Sequence[object]) -> None:
-    async def cleanup() -> None:
-        await _close_constructed_resources(resources)
-
+def _start_cleanup_from_sync(resources: Sequence[object]) -> None:
     try:
-        asyncio.get_running_loop()
+        loop = asyncio.get_running_loop()
     except RuntimeError:
-        asyncio.run(cleanup())
+        asyncio.run(_close_constructed_resources(resources))
         return
 
-    errors: list[BaseException] = []
-
-    def run_in_thread() -> None:
-        try:
-            asyncio.run(cleanup())
-        except BaseException as exc:
-            errors.append(exc)
-
-    thread = threading.Thread(
-        target=run_in_thread,
+    task = loop.create_task(
+        _close_constructed_resources(resources),
         name="ingestion-graph-construction-cleanup",
     )
-    thread.start()
-    thread.join()
-    if errors:
-        raise errors[0]
+    _BACKGROUND_CONSTRUCTION_CLEANUPS.add(task)
+    task.add_done_callback(_finish_background_construction_cleanup)
+
+
+def _finish_background_construction_cleanup(task: asyncio.Task[None]) -> None:
+    _BACKGROUND_CONSTRUCTION_CLEANUPS.discard(task)
+    if task.cancelled():
+        return
+    error = task.exception()
+    if error is not None:
+        task.get_loop().call_exception_handler(
+            {
+                "message": "Pipeline construction cleanup failed",
+                "exception": error,
+                "task": task,
+            }
+        )
 
 
 def create_ingestion_pipeline(
@@ -820,6 +828,37 @@ def create_ingestion_pipeline(
     registry: PipelineRegistry | None = None,
     plan: PipelinePlan | None = None,
 ) -> Pipeline:
+    """Construct a pipeline synchronously.
+
+    When called inside an active event loop, a construction failure schedules
+    asynchronous rollback on that same loop so loop-affine resources are never
+    closed from a foreign thread or loop. ``run_ingestion_pipeline`` uses the
+    awaited construction path and completes rollback before propagating errors.
+    """
+    spec, active_plan, bindings = _prepare_pipeline_construction(
+        value,
+        registry=registry,
+        plan=plan,
+    )
+    scope = _ConstructionScope()
+    try:
+        pipeline = _construct_pipeline(spec, active_plan, bindings, scope)
+    except BaseException as exc:
+        try:
+            scope.rollback_sync()
+        except BaseException as close_error:
+            exc.add_note(f"Pipeline construction cleanup also failed: {close_error!r}")
+        raise
+    scope.release()
+    return pipeline
+
+
+def _prepare_pipeline_construction(
+    value: PipelineSpec | Mapping[str, Any] | str | Path,
+    *,
+    registry: PipelineRegistry | None,
+    plan: PipelinePlan | None,
+) -> tuple[PipelineSpec, PipelinePlan, FactoryBindings]:
     spec = _as_pipeline_spec(value)
     active_registry = registry or PipelineRegistry()
     bindings: FactoryBindings = {}
@@ -830,43 +869,62 @@ def create_ingestion_pipeline(
         raise ConfigurationError(
             "PipelinePlan does not match the active PipelineRegistry implementations"
         )
+    return spec, active_plan, bindings
+
+
+def _construct_pipeline(
+    spec: PipelineSpec,
+    plan: PipelinePlan,
+    bindings: FactoryBindings,
+    scope: _ConstructionScope,
+) -> Pipeline:
+    source = _instantiate_connector(
+        bindings,
+        plan.source,
+        scope,
+        extensions=plan.extensions,
+    )
+    destination = _instantiate_connector(bindings, plan.destination, scope)
+    transforms = [_instantiate_connector(bindings, item, scope) for item in plan.transforms]
+    state_store = _instantiate_state_store(
+        bindings,
+        plan.state_store,
+        scope,
+        plan.state_store_schema,
+    )
+    if not isinstance(source, Source):  # pragma: no cover - validated during construction
+        raise AssertionError("Validated source has an unexpected runtime type")
+    if not isinstance(destination, Destination):  # pragma: no cover
+        raise AssertionError("Validated destination has an unexpected runtime type")
+    if any(not isinstance(transform, Transform) for transform in transforms):  # pragma: no cover
+        raise AssertionError("Validated transform has an unexpected runtime type")
+    return Pipeline(
+        spec.name,
+        source,
+        destination,
+        transforms=cast(list[Transform], transforms),
+        state_store=state_store,
+        state_namespace=plan.state_namespace,
+    )
+
+
+async def _create_ingestion_pipeline_async(
+    value: PipelineSpec | Mapping[str, Any] | str | Path,
+    *,
+    registry: PipelineRegistry | None,
+    plan: PipelinePlan | None,
+) -> Pipeline:
+    spec, active_plan, bindings = _prepare_pipeline_construction(
+        value,
+        registry=registry,
+        plan=plan,
+    )
     scope = _ConstructionScope()
     try:
-        source = _instantiate_connector(
-            bindings,
-            active_plan.source,
-            scope,
-            extensions=active_plan.extensions,
-        )
-        destination = _instantiate_connector(bindings, active_plan.destination, scope)
-        transforms = [
-            _instantiate_connector(bindings, item, scope) for item in active_plan.transforms
-        ]
-        state_store = _instantiate_state_store(
-            bindings,
-            active_plan.state_store,
-            scope,
-            active_plan.state_store_schema,
-        )
-        if not isinstance(source, Source):  # pragma: no cover - validated during construction
-            raise AssertionError("Validated source has an unexpected runtime type")
-        if not isinstance(destination, Destination):  # pragma: no cover
-            raise AssertionError("Validated destination has an unexpected runtime type")
-        if any(
-            not isinstance(transform, Transform) for transform in transforms
-        ):  # pragma: no cover
-            raise AssertionError("Validated transform has an unexpected runtime type")
-        pipeline = Pipeline(
-            spec.name,
-            source,
-            destination,
-            transforms=cast(list[Transform], transforms),
-            state_store=state_store,
-            state_namespace=active_plan.state_namespace,
-        )
+        pipeline = _construct_pipeline(spec, active_plan, bindings, scope)
     except BaseException as exc:
         try:
-            scope.rollback()
+            await scope.rollback_async()
         except BaseException as close_error:
             exc.add_note(f"Pipeline construction cleanup also failed: {close_error!r}")
         raise
@@ -881,7 +939,11 @@ async def run_ingestion_pipeline(
     plan: PipelinePlan | None = None,
 ) -> PipelineResult:
     spec = _as_pipeline_spec(value)
-    pipeline = create_ingestion_pipeline(spec, registry=registry, plan=plan)
+    pipeline = await _create_ingestion_pipeline_async(
+        spec,
+        registry=registry,
+        plan=plan,
+    )
     return await pipeline.run(stream_names=spec.streams or None)
 
 

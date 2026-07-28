@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from importlib.metadata import EntryPoint
 from pathlib import Path
@@ -1132,6 +1133,8 @@ def test_image_extensions_with_ocr_disabled_fail_during_planning(tmp_path) -> No
 @pytest.mark.asyncio
 async def test_construction_failure_rolls_back_async_resources_once(tmp_path, monkeypatch) -> None:
     closed: list[str] = []
+    expected_loop = asyncio.get_running_loop()
+    cleanup_complete = asyncio.Event()
 
     class TrackingSource(Source):
         def __init__(self, *, path: str) -> None:
@@ -1165,7 +1168,9 @@ async def test_construction_failure_rolls_back_async_resources_once(tmp_path, mo
                 yield None
 
         async def close(self) -> None:
+            assert asyncio.get_running_loop() is expected_loop
             closed.append("source")
+            cleanup_complete.set()
 
     class TrackingDestination(Destination):
         idempotent = True
@@ -1189,6 +1194,7 @@ async def test_construction_failure_rolls_back_async_resources_once(tmp_path, mo
             return None
 
         async def close(self) -> None:
+            assert asyncio.get_running_loop() is expected_loop
             closed.append("destination")
 
     class TrackingStateStore(StateStore):
@@ -1208,6 +1214,7 @@ async def test_construction_failure_rolls_back_async_resources_once(tmp_path, mo
             del pipeline, source, stream, state
 
         async def close(self) -> None:
+            assert asyncio.get_running_loop() is expected_loop
             closed.append("state")
 
     registry = PipelineRegistry()
@@ -1235,14 +1242,16 @@ async def test_construction_failure_rolls_back_async_resources_once(tmp_path, mo
     with pytest.raises(RuntimeError, match="pipeline construction failed"):
         create_ingestion_pipeline(spec, registry=registry)
 
+    await asyncio.wait_for(cleanup_complete.wait(), timeout=1)
     assert closed == ["state", "destination", "source"]
 
 
 @pytest.mark.asyncio
-async def test_source_owned_document_provider_is_closed_once_on_rollback(
+async def test_async_run_awaits_source_owned_provider_rollback_on_its_loop(
     tmp_path, monkeypatch
 ) -> None:
     closes = 0
+    expected_loop = asyncio.get_running_loop()
 
     class TrackingOcr:
         descriptor = ComponentDescriptor("tracking-ocr", "1")
@@ -1256,6 +1265,7 @@ async def test_source_owned_document_provider_is_closed_once_on_rollback(
 
         async def close(self) -> None:
             nonlocal closes
+            assert asyncio.get_running_loop() is expected_loop
             closes += 1
 
     registry = PipelineRegistry()
@@ -1282,7 +1292,7 @@ async def test_source_owned_document_provider_is_closed_once_on_rollback(
     monkeypatch.setattr("ingestion_graph.runtime.Pipeline", fail_pipeline)
 
     with pytest.raises(RuntimeError, match="pipeline construction failed"):
-        create_ingestion_pipeline(spec, registry=registry)
+        await run_ingestion_pipeline(spec, registry=registry)
 
     assert closes == 1
 
