@@ -28,6 +28,7 @@ STREAM_PREFIX = "upload-"
 MAX_OUTPUT_ITEMS = 10_000
 MAX_OUTPUT_BYTES = 64 * 1024 * 1024
 MAX_OUTPUT_DEPTH = 64
+_EMPTY_OUTPUT_BYTES = len(b'{"items":[]}')
 _SENSITIVE_PATH_KEYS = frozenset(
     {
         "path",
@@ -163,10 +164,6 @@ class SDKDocumentSourceNode(BaseNode):
                     source_field="min_native_text_quality",
                     target_field="min_native_text_quality",
                 ),
-                ManifestFieldProjection(
-                    source_field="retain_extraction_artifacts",
-                    target_field="retain_extraction_artifacts",
-                ),
             ),
             omitted={
                 "paths": "Studio resolves owner-scoped upload IDs to managed paths",
@@ -205,6 +202,9 @@ class SDKDocumentSourceNode(BaseNode):
                 "vision_extractor": "Studio has no live vision adapter in this release",
                 "external_processing_policy": (
                     "Studio has no external document-processing path in this release"
+                ),
+                "retain_extraction_artifacts": (
+                    "Studio does not expose an artifact store for retained extraction outputs"
                 ),
             },
             studio_properties={
@@ -266,13 +266,14 @@ class SDKDocumentSourceNode(BaseNode):
             table_mode = str(context.config.get("table_mode", "off"))
             failure_mode = str(context.config.get("failure_mode", "strict"))
             min_native_text_quality = float(context.config.get("min_native_text_quality", 0.65))
-            retain_extraction_artifacts = context.config.get("retain_extraction_artifacts", False)
             max_output_items = int(context.config.get("max_output_items", 5_000))
             max_output_bytes = int(context.config.get("max_output_bytes", 16 * 1024 * 1024))
         except (TypeError, ValueError):
             return self._failure("Document parser limits must be integers")
-        if not isinstance(retain_extraction_artifacts, bool):
-            return self._failure("retain_extraction_artifacts must be a boolean")
+        if context.config.get("retain_extraction_artifacts", False) is not False:
+            return self._failure(
+                "Studio does not support retain_extraction_artifacts without an artifact store"
+            )
         if table_mode not in {"off", "native"}:
             return self._failure(
                 "Studio supports table_mode 'off' or 'native'; local and vision adapters "
@@ -361,7 +362,6 @@ class SDKDocumentSourceNode(BaseNode):
                 table_mode=table_mode,
                 failure_mode=failure_mode,
                 min_native_text_quality=min_native_text_quality,
-                retain_extraction_artifacts=retain_extraction_artifacts,
             )
             check = await connector.check()
             if not check.ok:
@@ -369,7 +369,7 @@ class SDKDocumentSourceNode(BaseNode):
 
             artifact_by_stream = {stream: artifact_id for artifact_id, stream, _ in configured}
             items: list[dict[str, Any]] = []
-            output_bytes = 0
+            output_bytes = _EMPTY_OUTPUT_BYTES
             pending_states: dict[str, Mapping[str, Any]] = {}
             streams = await connector.discover()
             for descriptor in streams:
@@ -383,12 +383,13 @@ class SDKDocumentSourceNode(BaseNode):
                             message.envelope,
                             artifact_by_stream[descriptor.name],
                         )
+                        separator_bytes = 1 if items else 0
                         item_bytes = _bounded_json_size(
                             item,
-                            max_bytes=max_output_bytes - output_bytes,
+                            max_bytes=max_output_bytes - output_bytes - separator_bytes,
                         )
                         items.append(item)
-                        output_bytes += item_bytes
+                        output_bytes += separator_bytes + item_bytes
                     elif isinstance(message, StateMessage):
                         final_state = dict(message.state)
                 if final_state is None:
@@ -463,23 +464,88 @@ def _sanitized_envelope(envelope: Any, artifact_id: UUID) -> dict[str, Any]:
     raw_value = envelope.to_dict()
     if not isinstance(raw_value, Mapping):
         raise TypeError("Document envelope must serialize to an object")
-    value = _sanitize_json_value(raw_value)
-    if not isinstance(value, dict):
-        raise TypeError("Document envelope must serialize to an object")
+    _validate_json_value(raw_value)
+    value = dict(raw_value)
 
-    metadata = value.get("metadata")
+    raw_metadata = value.get("metadata")
+    if not isinstance(raw_metadata, Mapping):
+        raise TypeError("Document envelope metadata must serialize to an object")
+    metadata = _sanitize_context_value(raw_metadata)
     if not isinstance(metadata, dict):
         raise TypeError("Document envelope metadata must serialize to an object")
     metadata["artifact_id"] = str(artifact_id)
+    value["metadata"] = metadata
 
-    provenance = value.get("provenance")
+    raw_provenance = value.get("provenance")
+    if not isinstance(raw_provenance, Mapping):
+        raise TypeError("Document envelope provenance must serialize to an object")
+    provenance = _sanitize_context_value(raw_provenance)
     if not isinstance(provenance, dict):
         raise TypeError("Document envelope provenance must serialize to an object")
     provenance["artifact_id"] = str(artifact_id)
+    value["provenance"] = provenance
+
+    payload = value.get("payload")
+    if (
+        isinstance(payload, Mapping)
+        and payload.get("kind") == "blob_ref"
+        and isinstance(payload.get("uri"), str)
+        and _is_local_file_uri(payload["uri"])
+    ):
+        raise ValueError("Studio cannot expose an unmapped local BlobRef")
     return value
 
 
-def _sanitize_json_value(
+def _validate_json_value(
+    value: Any,
+    *,
+    depth: int = 0,
+    active_containers: set[int] | None = None,
+) -> None:
+    if depth > MAX_OUTPUT_DEPTH:
+        raise ValueError("Document envelope exceeds the maximum nesting depth")
+    if value is None or isinstance(value, (bool, int, str)):
+        return
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError("Document envelope contains a non-finite number")
+        return
+
+    if active_containers is None:
+        active_containers = set()
+    marker = id(value)
+    if marker in active_containers:
+        raise ValueError("Document envelope contains a recursive value")
+    active_containers.add(marker)
+    try:
+        if isinstance(value, Mapping):
+            for raw_key, item in value.items():
+                if not isinstance(raw_key, str):
+                    raise TypeError("Document envelope object keys must be strings")
+                _validate_json_value(
+                    item,
+                    depth=depth + 1,
+                    active_containers=active_containers,
+                )
+            return
+        if isinstance(value, (list, tuple)):
+            for item in value:
+                _validate_json_value(
+                    item,
+                    depth=depth + 1,
+                    active_containers=active_containers,
+                )
+            return
+    finally:
+        active_containers.remove(marker)
+
+    raise TypeError(f"Document envelope contains unsupported {type(value).__name__} output")
+
+
+_REDACTED = object()
+
+
+def _sanitize_context_value(
     value: Any,
     *,
     depth: int = 0,
@@ -487,11 +553,9 @@ def _sanitize_json_value(
 ) -> Any:
     if depth > MAX_OUTPUT_DEPTH:
         raise ValueError("Document envelope exceeds the maximum nesting depth")
-    if value is None or isinstance(value, (bool, int, str)):
-        return value
-    if isinstance(value, float):
-        if not math.isfinite(value):
-            raise ValueError("Document envelope contains a non-finite number")
+    if isinstance(value, str):
+        return _REDACTED if _is_local_file_uri(value) else value
+    if value is None or isinstance(value, (bool, int, float)):
         return value
 
     if active_containers is None:
@@ -503,35 +567,40 @@ def _sanitize_json_value(
     try:
         if isinstance(value, Mapping):
             sanitized: dict[str, Any] = {}
-            for raw_key, item in value.items():
-                key = str(raw_key)
+            for key, item in value.items():
                 if key.casefold() in _SENSITIVE_PATH_KEYS:
                     continue
-                if (
-                    key.casefold() == "uri"
-                    and isinstance(item, str)
-                    and item.casefold().startswith("file:")
-                ):
-                    continue
-                sanitized[key] = _sanitize_json_value(
+                sanitized_item = _sanitize_context_value(
                     item,
                     depth=depth + 1,
                     active_containers=active_containers,
                 )
+                if sanitized_item is not _REDACTED:
+                    sanitized[key] = sanitized_item
             return sanitized
         if isinstance(value, (list, tuple)):
-            return [
-                _sanitize_json_value(
+            sanitized_items: list[Any] = []
+            for item in value:
+                sanitized_item = _sanitize_context_value(
                     item,
                     depth=depth + 1,
                     active_containers=active_containers,
                 )
-                for item in value
-            ]
+                if sanitized_item is not _REDACTED:
+                    sanitized_items.append(sanitized_item)
+            return sanitized_items
     finally:
         active_containers.remove(marker)
 
     raise TypeError(f"Document envelope contains unsupported {type(value).__name__} output")
+
+
+def _is_local_file_uri(value: str) -> bool:
+    """Recognize file URIs after ignoring leading whitespace and C0 controls."""
+    start = 0
+    while start < len(value) and (ord(value[start]) <= 0x20 or value[start].isspace()):
+        start += 1
+    return value[start:].casefold().startswith("file:")
 
 
 def _bounded_json_size(value: Any, *, max_bytes: int) -> int:
