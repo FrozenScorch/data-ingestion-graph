@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import sqlite3
 import sys
 from pathlib import Path
 from typing import Any
@@ -91,7 +92,7 @@ def main() -> int:
             return asyncio.run(_ingest_jsonl(args))
         if args.command == "query":
             return asyncio.run(_query(args))
-    except (IngestionError, OSError, ValueError) as exc:
+    except (IngestionError, OSError, ValueError, sqlite3.Error) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
     build_parser().print_help()
