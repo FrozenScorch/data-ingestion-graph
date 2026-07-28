@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import inspect
+import os
 import re
+import threading
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
@@ -34,6 +37,7 @@ from ingestion_graph.state import MemoryStateStore, SQLiteStateStore, StateStore
 from ingestion_graph.transforms import Transform
 
 Factory = Callable[..., object]
+FactoryBindings = dict[tuple[str, str], Factory]
 
 _DOCUMENT_EXTENSION_FIELDS = {
     "ocr_engine": "ocr_engines",
@@ -57,10 +61,19 @@ _PROVIDER_METHODS: dict[str, tuple[str, ...]] = {
     "page_renderers": ("render", "close"),
     "table_extractors": ("extract", "close"),
     "document_splitters": ("split", "close"),
-    "extraction_caches": ("get", "put"),
+    "extraction_caches": ("get", "put", "delete", "close"),
     "vision_extractors": ("extract", "close"),
     "external_processing_policies": ("authorize",),
 }
+_DESCRIPTOR_PROVIDER_KINDS = {
+    "ocr_engines",
+    "page_renderers",
+    "table_extractors",
+    "document_splitters",
+    "vision_extractors",
+}
+_OCR_IMAGE_EXTENSIONS = {".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp"}
+_SUPPORTED_SCHEMA_TYPES = {"null", "boolean", "integer", "number", "string", "array", "object"}
 
 
 @dataclass(frozen=True, slots=True)
@@ -293,29 +306,12 @@ class PipelineRegistry:
 
     def provider_manifest(self, kind: str, name: str) -> ProviderSpec | None:
         factory = self.factory(kind, name)
-        if self.is_built_in(kind, name):
-            built_in = _built_in_provider_manifests(kind).get(name)
-            if built_in is not None:
-                return built_in
-        manifest = getattr(factory, "manifest", None)
-        if not callable(manifest):
-            return None
-        try:
-            result = manifest()
-        except NotImplementedError as exc:
-            del exc
-            return None
-        except Exception as exc:
-            raise PluginError(f"Failed to load {kind} plugin {name!r} manifest: {exc}") from exc
-        if isinstance(result, ConnectorSpec):
-            validate_connector_manifest(result, kind=kind, entry_point_name=name)
-            result = ProviderSpec(result.name, result.version, result.config_schema)
-        if not isinstance(result, ProviderSpec):
-            raise PluginError(f"{kind} plugin {name!r} manifest() did not return ProviderSpec")
-        if result.name != name:
-            raise PluginError(f"{kind} plugin {name!r} returned manifest name {result.name!r}")
-        validate_provider_manifest(result, kind=kind, entry_point_name=name)
-        return result
+        return _provider_manifest(
+            factory,
+            kind=kind,
+            name=name,
+            built_in=self.is_built_in(kind, name),
+        )
 
 
 def _connector_manifest(factory: Factory, *, kind: str, name: str) -> ConnectorSpec | None:
@@ -345,6 +341,51 @@ def _connector_manifest(factory: Factory, *, kind: str, name: str) -> ConnectorS
         ),
         capabilities=result.capabilities,
     )
+
+
+def _provider_manifest(
+    factory: Factory,
+    *,
+    kind: str,
+    name: str,
+    built_in: bool,
+) -> ProviderSpec | None:
+    if built_in:
+        manifest = _built_in_provider_manifests(kind).get(name)
+        if manifest is not None:
+            return manifest
+    manifest_method = getattr(factory, "manifest", None)
+    if not callable(manifest_method):
+        return None
+    try:
+        result = manifest_method()
+    except NotImplementedError:
+        return None
+    except Exception as exc:
+        raise PluginError(f"Failed to load {kind} plugin {name!r} manifest: {exc}") from exc
+    if isinstance(result, ConnectorSpec):
+        validate_connector_manifest(result, kind=kind, entry_point_name=name)
+        result = ProviderSpec(result.name, result.version, result.config_schema)
+    if not isinstance(result, ProviderSpec):
+        raise PluginError(f"{kind} plugin {name!r} manifest() did not return ProviderSpec")
+    if result.name != name:
+        raise PluginError(f"{kind} plugin {name!r} returned manifest name {result.name!r}")
+    validate_provider_manifest(result, kind=kind, entry_point_name=name)
+    return result
+
+
+def _bound_factory(
+    registry: PipelineRegistry,
+    bindings: FactoryBindings,
+    kind: str,
+    name: str,
+) -> Factory:
+    key = (kind, name)
+    factory = bindings.get(key)
+    if factory is None:
+        factory = registry.factory(kind, name)
+        bindings[key] = factory
+    return factory
 
 
 def _built_in_factories(kind: str) -> dict[str, Factory]:
@@ -552,14 +593,26 @@ class _ProviderResolution:
 
 def _plan_provider(
     registry: PipelineRegistry,
+    bindings: FactoryBindings,
     kind: str,
     reference: ComponentRef,
     base_dir: Path | None,
 ) -> _ProviderResolution:
-    factory = registry.factory(kind, reference.plugin)
+    factory = _bound_factory(registry, bindings, kind, reference.plugin)
     _validate_factory_contract(kind, reference.plugin, factory)
-    manifest = registry.provider_manifest(kind, reference.plugin)
-    descriptor = _static_descriptor(factory, kind=kind, name=reference.plugin)
+    built_in = registry.is_built_in(kind, reference.plugin)
+    manifest = _provider_manifest(
+        factory,
+        kind=kind,
+        name=reference.plugin,
+        built_in=built_in,
+    )
+    descriptor = _static_descriptor(
+        factory,
+        kind=kind,
+        name=reference.plugin,
+        built_in=built_in,
+    )
     version, implementation = _implementation_identity(
         factory,
         declared_version=None if manifest is None else manifest.version,
@@ -573,6 +626,12 @@ def _plan_provider(
         plugin=reference.plugin,
         base_dir=base_dir,
     )
+    if kind in _DESCRIPTOR_PROVIDER_KINDS and descriptor is None:
+        raise PluginError(
+            f"{kind} plugin {reference.plugin!r} must expose a class-level "
+            "ComponentDescriptor so replay and external-processing safety can be "
+            "validated before construction"
+        )
     return _ProviderResolution(
         plugin=reference.plugin,
         version=version,
@@ -585,7 +644,7 @@ def _plan_provider(
         else _immutable_json_mapping(
             descriptor.to_dict(), path=f"{kind}.{reference.plugin}.descriptor"
         ),
-        built_in=registry.is_built_in(kind, reference.plugin),
+        built_in=built_in,
         config_schema=None if manifest is None else manifest.config_schema,
     )
 
@@ -597,18 +656,33 @@ def plan_ingestion_pipeline(
 ) -> PipelinePlan:
     spec = _as_pipeline_spec(value)
     active_registry = registry or PipelineRegistry()
+    return _build_pipeline_plan(spec, active_registry, {})
+
+
+def _build_pipeline_plan(
+    spec: PipelineSpec,
+    registry: PipelineRegistry,
+    bindings: FactoryBindings,
+) -> PipelinePlan:
     base_dir = spec.base_dir or Path.cwd().resolve()
-    source = _plan_connector(active_registry, "sources", spec.source, base_dir)
-    source, extensions = _plan_extensions(active_registry, source, base_dir)
+    source = _plan_connector(registry, bindings, "sources", spec.source, base_dir)
+    source, extensions = _plan_extensions(registry, bindings, source, base_dir)
     if source.plugin == "local_documents":
-        _validate_document_configuration(source.config, extensions, active_registry)
-    destination = _plan_connector(active_registry, "destinations", spec.destination, base_dir)
+        _validate_document_configuration(source.config, extensions, registry, bindings)
+    destination = _plan_connector(
+        registry,
+        bindings,
+        "destinations",
+        spec.destination,
+        base_dir,
+    )
     transforms = tuple(
-        _plan_connector(active_registry, "transforms", transform, base_dir)
+        _plan_connector(registry, bindings, "transforms", transform, base_dir)
         for transform in spec.transforms
     )
     state = _plan_provider(
-        active_registry,
+        registry,
+        bindings,
         "state_stores",
         ComponentRef(spec.state_store.plugin, spec.state_store.config),
         base_dir,
@@ -663,6 +737,83 @@ def plan_ingestion_pipeline(
     )
 
 
+class _ConstructionScope:
+    """Own newly built runtime objects until Pipeline accepts their ownership."""
+
+    def __init__(self) -> None:
+        self._resources: list[object] = []
+        self._resource_ids: set[int] = set()
+
+    def track(self, resource: object) -> None:
+        identity = id(resource)
+        if identity not in self._resource_ids:
+            self._resource_ids.add(identity)
+            self._resources.append(resource)
+
+    def transfer(self, resources: Sequence[object], owner: object) -> None:
+        transferred = {id(resource) for resource in resources}
+        if transferred:
+            self._resources = [
+                resource for resource in self._resources if id(resource) not in transferred
+            ]
+            self._resource_ids.difference_update(transferred)
+        self.track(owner)
+
+    def release(self) -> None:
+        self._resources.clear()
+        self._resource_ids.clear()
+
+    def rollback(self) -> None:
+        resources = tuple(reversed(self._resources))
+        self.release()
+        _run_cleanup_blocking(resources)
+
+
+async def _close_constructed_resources(resources: Sequence[object]) -> None:
+    first_error: BaseException | None = None
+    for resource in resources:
+        close = getattr(resource, "close", None)
+        if not callable(close):
+            continue
+        try:
+            result = close()
+            if inspect.isawaitable(result):
+                await result
+        except BaseException as exc:
+            if first_error is None:
+                first_error = exc
+    if first_error is not None:
+        raise first_error
+
+
+def _run_cleanup_blocking(resources: Sequence[object]) -> None:
+    async def cleanup() -> None:
+        await _close_constructed_resources(resources)
+
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        asyncio.run(cleanup())
+        return
+
+    errors: list[BaseException] = []
+
+    def run_in_thread() -> None:
+        try:
+            asyncio.run(cleanup())
+        except BaseException as exc:
+            errors.append(exc)
+
+    thread = threading.Thread(
+        target=run_in_thread,
+        name="ingestion-graph-construction-cleanup",
+    )
+    thread.start()
+    thread.join()
+    if errors:
+        raise errors[0]
+
+
 def create_ingestion_pipeline(
     value: PipelineSpec | Mapping[str, Any] | str | Path,
     *,
@@ -671,46 +822,56 @@ def create_ingestion_pipeline(
 ) -> Pipeline:
     spec = _as_pipeline_spec(value)
     active_registry = registry or PipelineRegistry()
-    active_plan = plan or plan_ingestion_pipeline(spec, registry=active_registry)
+    bindings: FactoryBindings = {}
+    current_plan = _build_pipeline_plan(spec, active_registry, bindings)
+    active_plan = plan or current_plan
     _validate_plan_for_spec(active_plan, spec)
-    if plan is not None:
-        current_plan = plan_ingestion_pipeline(spec, registry=active_registry)
-        if current_plan.runtime_fingerprint != active_plan.runtime_fingerprint:
-            raise ConfigurationError(
-                "PipelinePlan does not match the active PipelineRegistry implementations"
-            )
-    source = _instantiate_connector(
-        active_registry, active_plan.source, extensions=active_plan.extensions
-    )
-    destination = _instantiate_connector(active_registry, active_plan.destination)
-    transform_objects = tuple(
-        _instantiate_connector(active_registry, item) for item in active_plan.transforms
-    )
-    state_store = _instantiate_state_store(
-        active_registry, active_plan.state_store, active_plan.state_store_schema
-    )
-    if not isinstance(source, Source):
-        raise PluginError(f"Source plugin {active_plan.source.plugin!r} did not return Source")
-    if not isinstance(destination, Destination):
-        raise PluginError(
-            f"Destination plugin {active_plan.destination.plugin!r} did not return Destination"
+    if plan is not None and current_plan.runtime_fingerprint != active_plan.runtime_fingerprint:
+        raise ConfigurationError(
+            "PipelinePlan does not match the active PipelineRegistry implementations"
         )
-    transforms: list[Transform] = []
-    for index, transform in enumerate(transform_objects):
-        if not isinstance(transform, Transform):
-            raise PluginError(
-                f"Transform plugin {active_plan.transforms[index].plugin!r} "
-                "did not return Transform"
-            )
-        transforms.append(transform)
-    return Pipeline(
-        spec.name,
-        source,
-        destination,
-        transforms=transforms,
-        state_store=state_store,
-        state_namespace=active_plan.state_namespace,
-    )
+    scope = _ConstructionScope()
+    try:
+        source = _instantiate_connector(
+            bindings,
+            active_plan.source,
+            scope,
+            extensions=active_plan.extensions,
+        )
+        destination = _instantiate_connector(bindings, active_plan.destination, scope)
+        transforms = [
+            _instantiate_connector(bindings, item, scope) for item in active_plan.transforms
+        ]
+        state_store = _instantiate_state_store(
+            bindings,
+            active_plan.state_store,
+            scope,
+            active_plan.state_store_schema,
+        )
+        if not isinstance(source, Source):  # pragma: no cover - validated during construction
+            raise AssertionError("Validated source has an unexpected runtime type")
+        if not isinstance(destination, Destination):  # pragma: no cover
+            raise AssertionError("Validated destination has an unexpected runtime type")
+        if any(
+            not isinstance(transform, Transform) for transform in transforms
+        ):  # pragma: no cover
+            raise AssertionError("Validated transform has an unexpected runtime type")
+        pipeline = Pipeline(
+            spec.name,
+            source,
+            destination,
+            transforms=cast(list[Transform], transforms),
+            state_store=state_store,
+            state_namespace=active_plan.state_namespace,
+        )
+    except BaseException as exc:
+        try:
+            scope.rollback()
+        except BaseException as close_error:
+            exc.add_note(f"Pipeline construction cleanup also failed: {close_error!r}")
+        raise
+    scope.release()
+    return pipeline
 
 
 async def run_ingestion_pipeline(
@@ -743,28 +904,39 @@ def _validate_plan_for_spec(plan: PipelinePlan, spec: PipelineSpec) -> None:
 
 def _plan_connector(
     registry: PipelineRegistry,
+    bindings: FactoryBindings,
     kind: str,
     reference: ComponentRef,
     base_dir: Path | None,
 ) -> ConnectorPlan:
-    factory = registry.factory(kind, reference.plugin)
+    factory = _bound_factory(registry, bindings, kind, reference.plugin)
     _validate_factory_contract(kind, reference.plugin, factory)
     if kind == "transforms":
-        provider_manifest = registry.provider_manifest(kind, reference.plugin)
+        provider_manifest = _provider_manifest(
+            factory,
+            kind=kind,
+            name=reference.plugin,
+            built_in=registry.is_built_in(kind, reference.plugin),
+        )
         manifest = None
         schema = None if provider_manifest is None else provider_manifest.config_schema
         manifest_version = None if provider_manifest is None else provider_manifest.version
         capabilities = None
         manifest_aware = provider_manifest is not None
     else:
-        manifest = registry.connector_manifest(kind, reference.plugin)
+        manifest = _connector_manifest(factory, kind=kind, name=reference.plugin)
         if manifest is None:  # pragma: no cover - source/destination manifests are required
             raise PluginError(f"{kind} plugin {reference.plugin!r} has no manifest")
         schema = manifest.config_schema
         manifest_version = manifest.version
         capabilities = manifest.capabilities
         manifest_aware = True
-    descriptor = _static_descriptor(factory, kind=kind, name=reference.plugin)
+    descriptor = _static_descriptor(
+        factory,
+        kind=kind,
+        name=reference.plugin,
+        built_in=registry.is_built_in(kind, reference.plugin),
+    )
     version, implementation = _implementation_identity(
         factory,
         declared_version=manifest_version,
@@ -792,6 +964,7 @@ def _plan_connector(
 
 def _plan_extensions(
     registry: PipelineRegistry,
+    bindings: FactoryBindings,
     source: ConnectorPlan,
     base_dir: Path | None,
 ) -> tuple[ConnectorPlan, tuple[ExtensionPlan, ...]]:
@@ -821,7 +994,7 @@ def _plan_extensions(
         if not isinstance(value, Mapping):
             raise ConfigurationError(f"sources.local_documents.{field} must be a component object")
         reference = ComponentRef.from_dict(value, path=f"sources.local_documents.{field}")
-        provider = _plan_provider(registry, kind, reference, base_dir)
+        provider = _plan_provider(registry, bindings, kind, reference, base_dir)
         source_config[field] = {
             "plugin": provider.plugin,
             "config": _json_object(provider.config, path=f"{kind}.{provider.plugin}.config"),
@@ -889,39 +1062,66 @@ def _plan_warnings(spec: PipelineSpec, source: ConnectorPlan) -> tuple[str, ...]
 
 
 def _instantiate_connector(
-    registry: PipelineRegistry,
+    bindings: FactoryBindings,
     plan: ConnectorPlan,
+    scope: _ConstructionScope,
     *,
     extensions: Sequence[ExtensionPlan] = (),
 ) -> object:
-    factory = registry.factory(plan.kind, plan.plugin)
+    factory = bindings[(plan.kind, plan.plugin)]
     config = _json_object(plan.config, path=f"{plan.kind}.{plan.plugin}.config")
     if plan.config_schema is not None:
         config = _coerce_config(config, plan.config_schema, path=f"{plan.kind}.{plan.plugin}")
+    extension_instances: tuple[object, ...] = ()
     if plan.kind == "sources" and plan.plugin == "local_documents":
-        config = _instantiate_document_extensions(registry, config, extensions)
+        config, extension_instances = _instantiate_document_extensions(
+            bindings,
+            config,
+            extensions,
+            scope,
+        )
     try:
-        return factory(**config)
+        instance = factory(**config)
     except (ConfigurationError, PluginError):
         raise
     except TypeError as exc:
         raise ConfigurationError(
             f"Could not construct {plan.kind} plugin {plan.plugin!r}: {exc}"
         ) from exc
+    scope.track(instance)
+    expected_type: type[object]
+    if plan.kind == "sources":
+        expected_type = Source
+    elif plan.kind == "destinations":
+        expected_type = Destination
+    elif plan.kind == "transforms":
+        expected_type = Transform
+    else:  # pragma: no cover - only connector plans reach this helper
+        raise AssertionError(f"Unexpected connector kind: {plan.kind}")
+    if not isinstance(instance, expected_type):
+        raise PluginError(
+            f"{plan.kind[:-1].capitalize()} plugin {plan.plugin!r} did not return "
+            f"{expected_type.__name__}"
+        )
+    if extension_instances:
+        scope.transfer(extension_instances, instance)
+    return instance
 
 
 def _instantiate_document_extensions(
-    registry: PipelineRegistry,
+    bindings: FactoryBindings,
     config: dict[str, Any],
     extensions: Sequence[ExtensionPlan],
-) -> dict[str, Any]:
+    scope: _ConstructionScope,
+) -> tuple[dict[str, Any], tuple[object, ...]]:
     resolved = dict(config)
     by_field = {extension.field: extension for extension in extensions}
+    instances: list[object] = []
     for field, kind in _DOCUMENT_EXTENSION_FIELDS.items():
         extension = by_field.get(field)
         if extension is None:
             continue
-        factory = registry.factory(kind, extension.plugin)
+        factory = bindings[(kind, extension.plugin)]
         extension_config = _json_object(extension.config, path=f"{kind}.{extension.plugin}.config")
         if extension.config_schema is not None:
             extension_config = _coerce_config(
@@ -937,26 +1137,35 @@ def _instantiate_document_extensions(
             raise ConfigurationError(
                 f"Could not construct {kind} plugin {extension.plugin!r}: {exc}"
             ) from exc
-        _validate_instance_contract(kind, extension.plugin, instance)
+        scope.track(instance)
+        _validate_instance_contract(
+            kind,
+            extension.plugin,
+            instance,
+            expected_descriptor=extension.descriptor,
+        )
+        instances.append(instance)
         resolved[field] = instance
-    return resolved
+    return resolved, tuple(instances)
 
 
 def _instantiate_state_store(
-    registry: PipelineRegistry,
+    bindings: FactoryBindings,
     reference: ComponentRef,
+    scope: _ConstructionScope,
     schema: Mapping[str, Any] | None = None,
 ) -> StateStore:
     config = _json_object(reference.config, path=f"state_stores.{reference.plugin}.config")
     if schema is not None:
         config = _coerce_config(config, schema, path=f"state_stores.{reference.plugin}")
-    factory = registry.factory("state_stores", reference.plugin)
+    factory = bindings[("state_stores", reference.plugin)]
     try:
         state_store = factory(**config)
     except TypeError as exc:
         raise ConfigurationError(
             f"Could not construct state-store plugin {reference.plugin!r}: {exc}"
         ) from exc
+    scope.track(state_store)
     if not isinstance(state_store, StateStore):
         raise PluginError(f"State-store plugin {reference.plugin!r} did not return StateStore")
     return state_store
@@ -966,7 +1175,26 @@ def _validate_document_configuration(
     config: Mapping[str, JSONValue],
     extensions: Sequence[ExtensionPlan],
     registry: PipelineRegistry,
+    bindings: FactoryBindings,
 ) -> None:
+    ocr_mode = config.get("ocr_mode", "off")
+    configured_extensions = config.get("extensions", ())
+    if (
+        ocr_mode == "off"
+        and isinstance(configured_extensions, Sequence)
+        and not isinstance(configured_extensions, (str, bytes, bytearray))
+        and any(
+            isinstance(extension, str)
+            and (
+                extension.strip().lower()
+                if extension.strip().startswith(".")
+                else f".{extension.strip().lower()}"
+            )
+            in _OCR_IMAGE_EXTENSIONS
+            for extension in configured_extensions
+        )
+    ):
+        raise ConfigurationError("Image extensions require ocr_mode='auto' or 'always'")
     table_mode = config.get("table_mode", "off")
     if table_mode in {"auto", "local"} and "table_extractor" not in config:
         raise ConfigurationError(
@@ -1009,7 +1237,7 @@ def _validate_document_configuration(
         raise ConfigurationError(
             "External or nondeterministic document components require a persistent extraction cache"
         )
-    cache_type = _factory_result_type(registry.factory(cache.kind, cache.plugin))
+    cache_type = _factory_result_type(_bound_factory(registry, bindings, cache.kind, cache.plugin))
     if cache_type is None or getattr(cache_type, "persistent", False) is not True:
         raise ConfigurationError(
             "External or nondeterministic document components require a persistent extraction cache"
@@ -1028,6 +1256,7 @@ def _effective_config(
     path = f"{kind}.{plugin}"
     effective = _json_object(config, path=f"{path}.config")
     if schema is not None:
+        _validate_supported_schema(schema, path=f"{path}.config_schema")
         effective = cast(dict[str, JSONValue], _apply_defaults(effective, schema))
         effective = _apply_signature_defaults(
             effective,
@@ -1209,7 +1438,9 @@ def _resolve_path(value: Any, base_dir: Path) -> str:
     candidate = Path(value).expanduser()
     if not candidate.is_absolute():
         candidate = base_dir / candidate
-    return str(candidate.resolve())
+    # Resolve "." and ".." lexically while preserving the final symlink/reparse
+    # component for downstream connectors that deliberately reject link traversal.
+    return os.path.abspath(os.fspath(candidate))
 
 
 def _schema_properties(
@@ -1223,6 +1454,54 @@ def _schema_properties(
         for key, value in properties.items()
         if isinstance(value, Mapping)
     }
+
+
+def _validate_supported_schema(schema: Mapping[str, Any], *, path: str) -> None:
+    raw_types = schema.get("type")
+    if raw_types is not None:
+        if isinstance(raw_types, str):
+            types = (raw_types,)
+        elif isinstance(raw_types, Sequence) and not isinstance(raw_types, (str, bytes, bytearray)):
+            types = tuple(raw_types)
+        else:
+            raise PluginError(f"{path}.type must be a schema type or type array")
+        invalid_types = [
+            value
+            for value in types
+            if not isinstance(value, str) or value not in _SUPPORTED_SCHEMA_TYPES
+        ]
+        if not types or invalid_types:
+            names = ", ".join(repr(value) for value in invalid_types) or "<empty>"
+            raise PluginError(f"{path}.type contains unsupported values: {names}")
+
+    one_of = schema.get("oneOf")
+    if one_of is not None:
+        if (
+            not isinstance(one_of, Sequence)
+            or isinstance(one_of, (str, bytes, bytearray))
+            or not one_of
+            or any(not isinstance(candidate, Mapping) for candidate in one_of)
+        ):
+            raise PluginError(f"{path}.oneOf must be a non-empty array of schema objects")
+        for index, candidate in enumerate(one_of):
+            _validate_supported_schema(
+                cast(Mapping[str, Any], candidate), path=f"{path}.oneOf[{index}]"
+            )
+
+    properties = schema.get("properties")
+    if properties is not None:
+        if not isinstance(properties, Mapping):
+            raise PluginError(f"{path}.properties must be an object")
+        for name, child in properties.items():
+            if not isinstance(child, Mapping):
+                raise PluginError(f"{path}.properties.{name} must be a schema object")
+            _validate_supported_schema(child, path=f"{path}.properties.{name}")
+
+    items = schema.get("items")
+    if items is not None:
+        if not isinstance(items, Mapping):
+            raise PluginError(f"{path}.items must be a schema object")
+        _validate_supported_schema(items, path=f"{path}.items")
 
 
 def _validate_factory_arguments(
@@ -1330,6 +1609,16 @@ def _validate_factory_contract(kind: str, plugin: str, factory: Factory) -> None
         raise PluginError(
             f"{kind} plugin {plugin!r} is missing required methods: {', '.join(missing)}"
         )
+    synchronous = [
+        method
+        for method in methods
+        if callable(getattr(target, method, None))
+        and not inspect.iscoroutinefunction(getattr(target, method))
+    ]
+    if synchronous:
+        raise PluginError(
+            f"{kind} plugin {plugin!r} must implement async methods: " + ", ".join(synchronous)
+        )
 
 
 def _require_subclass(
@@ -1368,12 +1657,51 @@ def _factory_result_type(factory: Factory) -> type[Any] | None:
     return annotation if inspect.isclass(annotation) else None
 
 
-def _validate_instance_contract(kind: str, plugin: str, instance: object) -> None:
+def _validate_instance_contract(
+    kind: str,
+    plugin: str,
+    instance: object,
+    *,
+    expected_descriptor: Mapping[str, JSONValue] | None,
+) -> None:
     methods = _PROVIDER_METHODS.get(kind, ())
     missing = [method for method in methods if not callable(getattr(instance, method, None))]
     if missing:
         raise PluginError(
             f"{kind} plugin {plugin!r} returned an invalid provider missing: " + ", ".join(missing)
+        )
+    synchronous = [
+        method
+        for method in methods
+        if callable(getattr(instance, method, None))
+        and not inspect.iscoroutinefunction(getattr(instance, method))
+    ]
+    if synchronous:
+        raise PluginError(
+            f"{kind} plugin {plugin!r} returned a provider with non-async methods: "
+            + ", ".join(synchronous)
+        )
+    if kind not in _DESCRIPTOR_PROVIDER_KINDS:
+        return
+    descriptor = getattr(instance, "descriptor", None)
+    if not isinstance(descriptor, ComponentDescriptor):
+        raise PluginError(
+            f"{kind} plugin {plugin!r} returned a provider without a valid ComponentDescriptor"
+        )
+    if expected_descriptor is None:  # pragma: no cover - planning rejects this first
+        raise AssertionError("Document provider descriptor was not planned")
+    expected_safety = {
+        key: expected_descriptor.get(key)
+        for key in ("name", "version", "deterministic", "external")
+    }
+    actual_safety = {
+        key: descriptor.to_dict().get(key)
+        for key in ("name", "version", "deterministic", "external")
+    }
+    if actual_safety != expected_safety:
+        raise PluginError(
+            f"{kind} plugin {plugin!r} returned descriptor metadata that differs "
+            "from its construction-free plan"
         )
 
 
@@ -1382,6 +1710,7 @@ def _static_descriptor(
     *,
     kind: str,
     name: str,
+    built_in: bool,
 ) -> ComponentDescriptor | None:
     target = _factory_result_type(factory)
     if target is None:
@@ -1389,12 +1718,24 @@ def _static_descriptor(
     try:
         descriptor = inspect.getattr_static(target, "descriptor")
     except AttributeError:
-        return None
+        descriptor = None
     if isinstance(descriptor, (property, staticmethod, classmethod)):
+        descriptor = None
+    if descriptor is None and built_in:
+        descriptor = _built_in_component_descriptor(kind, name)
+    if descriptor is None:
         return None
     if not isinstance(descriptor, ComponentDescriptor):
         raise PluginError(f"{kind} plugin {name!r} has invalid static descriptor metadata")
     return descriptor
+
+
+def _built_in_component_descriptor(kind: str, name: str) -> ComponentDescriptor | None:
+    if (kind, name) == ("ocr_engines", "tesseract"):
+        return ComponentDescriptor("tesseract-cli", "1", deterministic=True, external=False)
+    if (kind, name) == ("page_renderers", "pdfium"):
+        return ComponentDescriptor("pypdfium2", "3", deterministic=True, external=False)
+    return None
 
 
 def _implementation_identity(

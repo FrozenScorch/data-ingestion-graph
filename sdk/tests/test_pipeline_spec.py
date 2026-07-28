@@ -10,10 +10,15 @@ import pytest
 from ingestion_graph import (
     CheckResult,
     ComponentRef,
+    ConnectorCapabilities,
+    ConnectorSpec,
+    Destination,
     PipelineSpec,
     ProviderSpec,
     SecretRef,
+    Source,
     StateStoreRef,
+    StreamDescriptor,
     Transform,
     create_ingestion_pipeline,
     plan_ingestion_pipeline,
@@ -25,6 +30,7 @@ from ingestion_graph.errors import ConfigurationError, PluginError, ProtocolErro
 from ingestion_graph.plugins import discover_plugins
 from ingestion_graph.query import QueryRequest
 from ingestion_graph.runtime import PipelineRegistry
+from ingestion_graph.state import StateStore
 
 
 def _write_toml_spec(root: Path) -> Path:
@@ -56,6 +62,8 @@ path = ".ingestion/state.db"
 
 
 class _CallableOcr:
+    descriptor = ComponentDescriptor("callable-ocr", "1")
+
     def __init__(self, *, model: str = "local") -> None:
         self.model = model
 
@@ -236,6 +244,8 @@ def test_plan_validates_secret_references_without_resolving_them() -> None:
 
 def test_declarative_document_components_are_explicit_and_replaceable(tmp_path) -> None:
     class FakeOcr:
+        descriptor = ComponentDescriptor("learning-ocr", "1")
+
         def __init__(self, *, model: str) -> None:
             self.model = model
 
@@ -944,6 +954,8 @@ def test_implicit_namespace_uses_the_full_materialization_digest(tmp_path) -> No
 
 def test_vision_provider_policy_validation_matches_local_documents(tmp_path) -> None:
     class Vision:
+        descriptor = ComponentDescriptor("vision", "1")
+
         async def extract(self, image, *, schema):
             del image, schema
             return {}
@@ -1051,3 +1063,384 @@ def test_cli_run_loads_the_path_spec_once(tmp_path, monkeypatch, capsys) -> None
     assert main() == 0
     assert load_count == 1
     assert json.loads(capsys.readouterr().out)["records_written"] == 1
+
+
+@pytest.mark.asyncio
+async def test_document_root_symlink_is_preserved_for_connector_policy(tmp_path) -> None:
+    real_root = tmp_path / "real-documents"
+    real_root.mkdir()
+    (real_root / "note.md").write_text("# private\n", encoding="utf-8")
+    linked_root = tmp_path / "linked-documents"
+    try:
+        linked_root.symlink_to(real_root, target_is_directory=True)
+    except (NotImplementedError, OSError) as exc:
+        pytest.skip(f"directory symlinks are unavailable: {exc}")
+
+    linked_spec = PipelineSpec.from_dict(
+        {
+            "name": "linked-root",
+            "source": {
+                "plugin": "local_documents",
+                "config": {"paths": ["linked-documents"]},
+            },
+            "destination": {"plugin": "sqlite", "config": {"path": "output.db"}},
+        },
+        origin=tmp_path / "pipeline.toml",
+    )
+    direct_spec = PipelineSpec.from_dict(
+        {
+            **linked_spec.to_dict(),
+            "source": {
+                "plugin": "local_documents",
+                "config": {"paths": ["real-documents"]},
+            },
+        },
+        origin=tmp_path / "pipeline.toml",
+    )
+
+    linked_plan = plan_ingestion_pipeline(linked_spec)
+    direct_plan = plan_ingestion_pipeline(direct_spec)
+    pipeline = create_ingestion_pipeline(linked_spec, plan=linked_plan)
+
+    assert linked_plan.source.config["paths"] == (str(linked_root.absolute()),)
+    assert pipeline.source.paths == (linked_root.absolute(),)  # type: ignore[attr-defined]
+    assert linked_plan.processing_fingerprint != direct_plan.processing_fingerprint
+    assert not (await pipeline.source.check()).ok
+    await pipeline._close_resources()  # type: ignore[attr-defined]
+
+
+def test_image_extensions_with_ocr_disabled_fail_during_planning(tmp_path) -> None:
+    spec = PipelineSpec.from_dict(
+        {
+            "name": "invalid-image-routing",
+            "source": {
+                "plugin": "local_documents",
+                "config": {
+                    "paths": [str(tmp_path)],
+                    "extensions": [".png"],
+                    "ocr_mode": "off",
+                },
+            },
+            "destination": {"plugin": "sqlite", "config": {}},
+        }
+    )
+
+    with pytest.raises(ConfigurationError, match="Image extensions require"):
+        plan_ingestion_pipeline(spec)
+
+
+@pytest.mark.asyncio
+async def test_construction_failure_rolls_back_async_resources_once(tmp_path, monkeypatch) -> None:
+    closed: list[str] = []
+
+    class TrackingSource(Source):
+        def __init__(self, *, path: str) -> None:
+            self.path = path
+
+        @classmethod
+        def manifest(cls) -> ConnectorSpec:
+            return ConnectorSpec(
+                "tracking-source",
+                "1",
+                {
+                    "type": "object",
+                    "properties": {"path": {"type": "string"}},
+                    "required": ["path"],
+                    "additionalProperties": False,
+                },
+            )
+
+        def spec(self) -> ConnectorSpec:
+            return self.manifest()
+
+        async def check(self):
+            return CheckResult(True)
+
+        async def discover(self):
+            return [StreamDescriptor("records")]
+
+        async def read(self, stream, state=None):
+            del stream, state
+            if False:  # pragma: no cover - establishes the async-generator contract
+                yield None
+
+        async def close(self) -> None:
+            closed.append("source")
+
+    class TrackingDestination(Destination):
+        idempotent = True
+
+        @classmethod
+        def manifest(cls) -> ConnectorSpec:
+            return ConnectorSpec(
+                "tracking-destination",
+                "1",
+                {"type": "object", "properties": {}, "additionalProperties": False},
+                ConnectorCapabilities(),
+            )
+
+        async def check(self):
+            return CheckResult(True)
+
+        async def write(self, records):
+            return len(records)
+
+        async def flush(self) -> None:
+            return None
+
+        async def close(self) -> None:
+            closed.append("destination")
+
+    class TrackingStateStore(StateStore):
+        @classmethod
+        def manifest(cls) -> ProviderSpec:
+            return ProviderSpec(
+                "tracking-state",
+                "1",
+                {"type": "object", "properties": {}, "additionalProperties": False},
+            )
+
+        async def load(self, pipeline, source, stream):
+            del pipeline, source, stream
+            return {}
+
+        async def save(self, pipeline, source, stream, state) -> None:
+            del pipeline, source, stream, state
+
+        async def close(self) -> None:
+            closed.append("state")
+
+    registry = PipelineRegistry()
+    registry.register("sources", "tracking-source", TrackingSource)
+    registry.register("destinations", "tracking-destination", TrackingDestination)
+    registry.register("state_stores", "tracking-state", TrackingStateStore)
+    spec = PipelineSpec.from_dict(
+        {
+            "name": "rollback",
+            "source": {
+                "plugin": "tracking-source",
+                "config": {"path": str(tmp_path / "input")},
+            },
+            "destination": {"plugin": "tracking-destination", "config": {}},
+            "state_store": {"plugin": "tracking-state", "config": {}},
+        }
+    )
+
+    def fail_pipeline(*args, **kwargs):
+        del args, kwargs
+        raise RuntimeError("pipeline construction failed")
+
+    monkeypatch.setattr("ingestion_graph.runtime.Pipeline", fail_pipeline)
+
+    with pytest.raises(RuntimeError, match="pipeline construction failed"):
+        create_ingestion_pipeline(spec, registry=registry)
+
+    assert closed == ["state", "destination", "source"]
+
+
+@pytest.mark.asyncio
+async def test_source_owned_document_provider_is_closed_once_on_rollback(
+    tmp_path, monkeypatch
+) -> None:
+    closes = 0
+
+    class TrackingOcr:
+        descriptor = ComponentDescriptor("tracking-ocr", "1")
+
+        async def check(self):
+            return CheckResult(True)
+
+        async def recognize(self, image, *, language="eng"):
+            del image, language
+            return OcrResult("text")
+
+        async def close(self) -> None:
+            nonlocal closes
+            closes += 1
+
+    registry = PipelineRegistry()
+    registry.register("ocr_engines", "tracking-ocr", TrackingOcr)
+    spec = PipelineSpec.from_dict(
+        {
+            "name": "provider-rollback",
+            "source": {
+                "plugin": "local_documents",
+                "config": {
+                    "paths": [str(tmp_path)],
+                    "ocr_mode": "auto",
+                    "ocr_engine": {"plugin": "tracking-ocr", "config": {}},
+                },
+            },
+            "destination": {"plugin": "sqlite", "config": {}},
+        }
+    )
+
+    def fail_pipeline(*args, **kwargs):
+        del args, kwargs
+        raise RuntimeError("pipeline construction failed")
+
+    monkeypatch.setattr("ingestion_graph.runtime.Pipeline", fail_pipeline)
+
+    with pytest.raises(RuntimeError, match="pipeline construction failed"):
+        create_ingestion_pipeline(spec, registry=registry)
+
+    assert closes == 1
+
+
+@pytest.mark.asyncio
+async def test_prepared_plan_constructs_the_exact_factory_verified_in_replan(tmp_path) -> None:
+    class FirstTransform(Transform):
+        @classmethod
+        def manifest(cls) -> ProviderSpec:
+            return ProviderSpec(
+                "mutable-transform",
+                "1",
+                {"type": "object", "properties": {}, "additionalProperties": False},
+            )
+
+        async def apply(self, records):
+            return records
+
+    class SecondTransform(FirstTransform):
+        pass
+
+    SecondTransform.__module__ = FirstTransform.__module__
+    SecondTransform.__qualname__ = FirstTransform.__qualname__
+
+    stable_registry = PipelineRegistry()
+    stable_registry.register("transforms", "mutable-transform", FirstTransform)
+    spec = PipelineSpec.from_dict(
+        {
+            "name": "factory-binding",
+            "source": {"plugin": "jsonl", "config": {"path": str(tmp_path / "in.jsonl")}},
+            "transforms": [{"plugin": "mutable-transform", "config": {}}],
+            "destination": {"plugin": "sqlite", "config": {}},
+        }
+    )
+    prepared = plan_ingestion_pipeline(spec, registry=stable_registry)
+
+    class MutableRegistry(PipelineRegistry):
+        def __init__(self) -> None:
+            super().__init__()
+            self.transform_lookups = 0
+
+        def factory(self, kind: str, name: str):
+            if (kind, name) == ("transforms", "mutable-transform"):
+                self.transform_lookups += 1
+                return FirstTransform if self.transform_lookups == 1 else SecondTransform
+            return super().factory(kind, name)
+
+    mutable_registry = MutableRegistry()
+    pipeline = create_ingestion_pipeline(spec, registry=mutable_registry, plan=prepared)
+
+    assert mutable_registry.transform_lookups == 1
+    assert type(pipeline.transforms[0]) is FirstTransform
+    await pipeline._close_resources()  # type: ignore[attr-defined]
+
+
+def test_document_provider_requires_construction_free_descriptor(tmp_path) -> None:
+    constructed = 0
+
+    class DescriptorlessVision:
+        def __init__(self) -> None:
+            nonlocal constructed
+            constructed += 1
+
+        async def extract(self, image, *, schema):
+            del image, schema
+            return {}
+
+        async def close(self) -> None:
+            return None
+
+    class Policy:
+        async def authorize(self, *, purpose, page_number):
+            del purpose, page_number
+            return True
+
+    registry = PipelineRegistry()
+    registry.register("vision_extractors", "descriptorless", DescriptorlessVision)
+    registry.register("external_processing_policies", "policy", Policy)
+    spec = PipelineSpec.from_dict(
+        {
+            "name": "descriptor-required",
+            "source": {
+                "plugin": "local_documents",
+                "config": {
+                    "paths": [str(tmp_path)],
+                    "table_mode": "vision",
+                    "vision_extractor": {"plugin": "descriptorless", "config": {}},
+                    "external_processing_policy": {"plugin": "policy", "config": {}},
+                    "extraction_cache": {"plugin": "memory", "config": {}},
+                },
+            },
+            "destination": {"plugin": "sqlite", "config": {}},
+        }
+    )
+
+    with pytest.raises(PluginError, match="class-level ComponentDescriptor"):
+        plan_ingestion_pipeline(spec, registry=registry)
+    assert constructed == 0
+
+
+def test_document_provider_protocol_methods_must_be_async(tmp_path) -> None:
+    class SyncVision:
+        descriptor = ComponentDescriptor("sync-vision", "1")
+
+        def extract(self, image, *, schema):
+            del image, schema
+            return {}
+
+        async def close(self) -> None:
+            return None
+
+    registry = PipelineRegistry()
+    registry.register("vision_extractors", "sync-vision", SyncVision)
+    spec = PipelineSpec.from_dict(
+        {
+            "name": "async-contract",
+            "source": {
+                "plugin": "local_documents",
+                "config": {
+                    "paths": [str(tmp_path)],
+                    "vision_extractor": {"plugin": "sync-vision", "config": {}},
+                },
+            },
+            "destination": {"plugin": "sqlite", "config": {}},
+        }
+    )
+
+    with pytest.raises(PluginError, match="must implement async methods: extract"):
+        plan_ingestion_pipeline(spec, registry=registry)
+
+
+def test_nested_unsupported_manifest_schema_type_fails_closed(tmp_path) -> None:
+    class InvalidSchemaTransform(Transform):
+        @classmethod
+        def manifest(cls) -> ProviderSpec:
+            return ProviderSpec(
+                "invalid-schema",
+                "1",
+                {
+                    "type": "object",
+                    "properties": {"unused": {"type": "bogus"}},
+                    "additionalProperties": False,
+                },
+            )
+
+        async def apply(self, records):
+            return records
+
+    registry = PipelineRegistry()
+    registry.register("transforms", "invalid-schema", InvalidSchemaTransform)
+    spec = PipelineSpec.from_dict(
+        {
+            "name": "invalid-schema",
+            "source": {"plugin": "jsonl", "config": {"path": str(tmp_path / "in.jsonl")}},
+            "transforms": [{"plugin": "invalid-schema", "config": {}}],
+            "destination": {"plugin": "sqlite", "config": {}},
+        }
+    )
+
+    with pytest.raises(PluginError, match="unsupported values: 'bogus'"):
+        plan_ingestion_pipeline(spec, registry=registry)
