@@ -3,5 +3,13 @@ from ingestion_graph.sources.documents import LocalDocumentsSource
 from ingestion_graph.sources.jsonl import JsonlSource
 from ingestion_graph.sources.postgres import PostgresSource
 from ingestion_graph.sources.rest import RestSource
+from ingestion_graph.sources.sitemap import SitemapHtmlSource
 
-__all__ = ["DiscordSource", "JsonlSource", "LocalDocumentsSource", "PostgresSource", "RestSource"]
+__all__ = [
+    "DiscordSource",
+    "JsonlSource",
+    "LocalDocumentsSource",
+    "PostgresSource",
+    "RestSource",
+    "SitemapHtmlSource",
+]

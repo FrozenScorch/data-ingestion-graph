@@ -40,6 +40,7 @@ all-documents = [
 ]
 postgres = ["asyncpg>=0.30"]
 rest = ["httpx>=0.28"]
+sitemap = ["httpx>=0.28"]
 dev = [
   "asyncpg>=0.30",
   "build>=1.2",
@@ -64,6 +65,7 @@ jsonl = "ingestion_graph.sources:JsonlSource"
 local_documents = "ingestion_graph.sources:LocalDocumentsSource"
 postgres = "ingestion_graph.sources:PostgresSource"
 rest = "ingestion_graph.sources:RestSource"
+sitemap_html = "ingestion_graph.sources:SitemapHtmlSource"
 
 [project.entry-points."ingestion_graph.destinations"]
 jsonl = "ingestion_graph.destinations:JsonlDestination"
