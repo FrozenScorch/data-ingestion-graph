@@ -44,6 +44,7 @@ dev = [
   "asyncpg>=0.30",
   "build>=1.2",
   "httpx>=0.28",
+    "hvac>=2.4,<3",
   "pytest>=8.3",
   "pytest-asyncio>=0.24",
   "mypy>=1.15",

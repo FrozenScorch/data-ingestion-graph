@@ -53,6 +53,12 @@ the keyword arguments and response shape: `path`, `mount_point`, `version` and
 The reader must raise on transport, authentication, permission or deleted-version
 errors. Do not implement a reader that silently returns stale credentials.
 
+`SecretProvider.resolve` is synchronous, including the Vault network read.
+Running a connector on a shared application event loop can therefore block other
+requests until the read completes or times out. Run pipelines using this provider
+in a dedicated worker or thread, with bounded client timeouts. Async secret
+resolution would require a separate SDK contract and call-site change.
+
 ## Bindings and rotation
 
 - `SecretRef.key` is an exact alias lookup, never a caller-selected Vault URL or
@@ -106,7 +112,11 @@ their reviewed SDK commit before using the new provider.
 
 ## Verification
 
-Run `python -m pytest tests/test_vault_secrets.py -q` from `sdk/`. These offline
+Install the SDK's `dev` extra in your local test environment, then run
+`python -m pytest tests/test_vault_secrets.py -q` from `sdk/`. The development
+dependencies include `hvac>=2.4,<3` so the real-client compatibility test runs;
+without `hvac`, that one test is skipped. No runtime dependency was added.
+These offline
 tests exercise alias isolation, rotation, revocation/failure behavior, malformed
 responses, error redaction and use by the existing PostgreSQL connection adapter.
 They require no Vault instance, live credentials or database. They do not verify
