@@ -56,6 +56,7 @@ from ingestion_graph.secrets import EnvSecretProvider, SecretProvider, SecretRef
 from ingestion_graph.sources import LocalDocumentsSource
 from ingestion_graph.state import MemoryStateStore, SQLiteStateStore
 from ingestion_graph.transforms import Transform
+from ingestion_graph.vault import VaultKV2Reader, VaultSecretBinding, VaultSecretProvider
 
 __all__ = [
     "ArtifactStore",
@@ -112,6 +113,9 @@ __all__ = [
     "TableCell",
     "Tombstone",
     "Transform",
+    "VaultKV2Reader",
+    "VaultSecretBinding",
+    "VaultSecretProvider",
     "stable_record_id",
     "canonical_fingerprint",
 ]

@@ -114,6 +114,14 @@ for hit in await collection.query(QueryRequest("Ada", limit=5)):
 - Serialized pipeline definitions contain `SecretRef`, not resolved credentials.
 - Connectors use standard Python entry-point groups.
 
+## External Vault secrets
+
+`VaultSecretProvider` resolves approved aliases through an authenticated Vault
+KV v2 reader, including an existing `hvac` client. It implements the same
+`SecretProvider` interface as `EnvSecretProvider`, without adding a mandatory
+dependency. See [Vault secret bindings](docs/vault-secrets.md) for client setup,
+project scoping responsibilities, rotation behavior and limitations.
+
 ## Connector manifests
 
 Built-in sources and destinations publish configuration and capability metadata

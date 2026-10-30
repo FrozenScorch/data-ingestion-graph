@@ -1,6 +1,6 @@
 """External-consumer typing smoke test, run after installing the built wheel."""
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 
 from ingestion_graph import (
     ConformanceReport,
@@ -9,7 +9,12 @@ from ingestion_graph import (
     QueryRequest,
     QueryResult,
     RecordPayload,
+    SecretProvider,
+    SecretRef,
+    SecretValue,
     Transform,
+    VaultSecretBinding,
+    VaultSecretProvider,
     inspect_manifest,
     load_connector_manifest,
     stable_record_id,
@@ -39,3 +44,15 @@ transform: Transform = KeepAll()
 
 def first_match(result: QueryResult) -> Envelope:
     return result[0].envelope
+
+
+def read_vault(
+    *, path: str, mount_point: str, version: int | None, raise_on_deleted_version: bool
+) -> Mapping[str, object]:
+    return {"data": {"data": {"password": "test-fixture"}}}
+
+
+secret_provider: SecretProvider = VaultSecretProvider(
+    read_vault, {"password": VaultSecretBinding("project/database", "password")}
+)
+secret: SecretValue = secret_provider.resolve(SecretRef("password", provider="vault"))
